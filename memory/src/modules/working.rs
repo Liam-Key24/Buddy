@@ -44,6 +44,7 @@ impl Memory for WorkingMemory {
             created_at: now,
             updated_at: now,
             payload: payload.to_string(),
+            ..Default::default()
         };
         let id = self.storage.insert(MemoryKind::Working, &row)?;
         Ok(id)
@@ -81,6 +82,7 @@ impl Memory for WorkingMemory {
             created_at: record.created_at.unwrap_or_else(chrono_now),
             updated_at: chrono_now(),
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage.update(MemoryKind::Working, id, &row)?;
         Ok(())

@@ -28,6 +28,7 @@ impl Memory for ReflectionMemory {
             created_at: now,
             updated_at: now,
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage
             .insert(MemoryKind::Reflection, &row)
@@ -60,6 +61,7 @@ impl Memory for ReflectionMemory {
             created_at: record.created_at.unwrap_or_else(chrono_now),
             updated_at: chrono_now(),
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage.update(MemoryKind::Reflection, id, &row)?;
         Ok(())

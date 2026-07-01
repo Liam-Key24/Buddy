@@ -32,6 +32,7 @@ impl Memory for ToolMemory {
             created_at: now,
             updated_at: now,
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage.insert(MemoryKind::Tool, &row).map_err(Into::into)
     }
@@ -62,6 +63,7 @@ impl Memory for ToolMemory {
             created_at: record.created_at.unwrap_or_else(chrono_now),
             updated_at: chrono_now(),
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage.update(MemoryKind::Tool, id, &row)?;
         Ok(())

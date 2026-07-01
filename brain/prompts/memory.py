@@ -8,7 +8,9 @@ Output schema:
   "completed_work": ["<item1>", "<item2>"],
   "architectural_decisions": ["<decision1>"],
   "outstanding_issues": ["<issue1>"],
-  "next_steps": ["<step1>", "<step2>"]
+  "next_steps": ["<step1>", "<step2>"],
+  "entities": [{"name": "<entity>", "entity_type": "technology|project|decision|task|person|file"}],
+  "relations": [{"from": "<entity>", "to": "<entity>", "relation_type": "uses|depends_on|part_of|decided_in"}]
 }
 
 Be concise. Focus on facts, not conversation."""
@@ -20,7 +22,9 @@ Output schema:
   "attempted": "<what was attempted>",
   "successful": true | false,
   "improvements": "<what could be improved>",
-  "lessons": "<lessons learned>"
+  "lessons": "<lessons learned>",
+  "entities": [{"name": "<entity>", "entity_type": "technology|project|decision|task"}],
+  "relations": [{"from": "<entity>", "to": "<entity>", "relation_type": "uses|related_to"}]
 }"""
 
 PROJECT_PROMPT = """You are Buddy's memory module. Extract updated project knowledge as JSON only (no markdown fences).
@@ -28,7 +32,9 @@ PROJECT_PROMPT = """You are Buddy's memory module. Extract updated project knowl
 Output schema:
 {
   "section": "description" | "architecture" | "stack" | "features" | "roadmap" | "terminology",
-  "content": "<concise project knowledge for this section>"
+  "content": "<concise project knowledge for this section>",
+  "entities": [{"name": "<entity>", "entity_type": "technology|project|feature"}],
+  "relations": [{"from": "<entity>", "to": "<entity>", "relation_type": "uses|part_of"}]
 }"""
 
 PREFERENCE_PROMPT = """You are Buddy's memory module. Extract a user preference as JSON only (no markdown fences).

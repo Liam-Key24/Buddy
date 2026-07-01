@@ -15,6 +15,8 @@ class MemoryContextPayload(BaseModel):
     errors: str | None = None
     tools: str | None = None
     reflections: str | None = None
+    workspace: str | None = None
+    learned_patterns: str | None = None
 
 
 def format_history(history: list) -> list[dict]:
@@ -33,8 +35,12 @@ def build_memory_block(memory: MemoryContextPayload | None) -> str:
     sections = []
     if memory.handover:
         sections.append(f"## Project Handover\n{memory.handover}")
+    if memory.workspace:
+        sections.append(f"## Workspace\n{memory.workspace}")
     if memory.working:
         sections.append(f"## Active Task\n{memory.working}")
+    if memory.learned_patterns:
+        sections.append(f"## Learned Patterns\n{memory.learned_patterns}")
     if memory.project:
         sections.append(f"## Project Knowledge\n{memory.project}")
     if memory.preferences:

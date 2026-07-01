@@ -1,4 +1,5 @@
 mod commands;
+mod intelligence_hooks;
 mod logging;
 mod memory_extraction;
 mod orchestrator;
@@ -43,6 +44,12 @@ pub fn run() {
                     let _ = pm.start_brain(&st);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
+                let ctx = MemoryContext {
+                    workspace_path: st.project_root.clone(),
+                    conversation_id: None,
+                    task_id: None,
+                };
+                st.intelligence.spawn_reindex(ctx).await;
             });
 
             Ok(())
@@ -76,5 +83,8 @@ fn handle_exit(state: Arc<AppState>) {
         conversation_id: None,
         task_id: None,
     };
-    tauri::async_runtime::block_on(session_end_handover(&state, &ctx));
+    tauri::async_runtime::block_on(async {
+        session_end_handover(&state, &ctx).await;
+        let _ = state.intelligence.run_maintenance(&ctx).await;
+    });
 }

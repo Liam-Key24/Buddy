@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use buddy_core::TaskRunner;
 use buddy_database::Database;
+use buddy_intelligence::IntelligenceService;
 use buddy_memory::MemoryManager;
 use buddy_plugins::create_registry;
 use tauri::{AppHandle, Manager};
@@ -13,6 +14,7 @@ const DEFAULT_MLX_URL: &str = "http://127.0.0.1:8001";
 pub struct AppState {
     pub db: Arc<Database>,
     pub memory_manager: Arc<MemoryManager>,
+    pub intelligence: Arc<IntelligenceService>,
     pub task_runner: Arc<TaskRunner>,
     pub project_root: PathBuf,
 }
@@ -25,9 +27,16 @@ impl AppState {
         let registry = Arc::new(create_registry());
         let task_runner = Arc::new(TaskRunner::new(registry));
         let memory_manager = Arc::new(MemoryManager::new(db.clone()));
+        let brain_url = DEFAULT_BRAIN_URL.to_string();
+        let intelligence = Arc::new(IntelligenceService::new(
+            db.clone(),
+            memory_manager.clone(),
+            brain_url,
+        ));
         Self {
             db,
             memory_manager,
+            intelligence,
             task_runner,
             project_root,
         }

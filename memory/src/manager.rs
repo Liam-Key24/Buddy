@@ -14,8 +14,8 @@ use crate::modules::{
 };
 use crate::storage::SqliteStorageBackend;
 use crate::types::{
-    estimate_tokens, ContextSection, HistoryMessage, MemoryContext, MemoryKind, MemoryRecord,
-    MergedContext, RetrieveQuery, DEFAULT_TOKEN_BUDGET,
+    estimate_tokens, ContextSection, HandleEventResult, HistoryMessage, MemoryContext, MemoryKind,
+    MemoryRecord, MergedContext, RetrieveQuery, DEFAULT_TOKEN_BUDGET,
 };
 
 pub struct MemoryManager {
@@ -73,10 +73,14 @@ impl MemoryManager {
         }
     }
 
-    fn module(&self, kind: MemoryKind) -> Result<&Arc<dyn Memory>, MemoryError> {
+    fn get_module(&self, kind: MemoryKind) -> Result<&Arc<dyn Memory>, MemoryError> {
         self.modules
             .get(&kind)
             .ok_or_else(|| MemoryError::NotFound(format!("{kind:?}")))
+    }
+
+    pub fn module(&self, kind: MemoryKind) -> Result<&Arc<dyn Memory>, MemoryError> {
+        self.get_module(kind)
     }
 
     fn workspace_key(ctx: &MemoryContext) -> String {
@@ -117,7 +121,7 @@ impl MemoryManager {
             if kind == MemoryKind::Conversation {
                 continue;
             }
-            let module = self.module(kind)?;
+            let module = self.get_module(kind)?;
             let summary = module.summarize(&query)?;
             if summary.is_empty() {
                 continue;
@@ -141,7 +145,7 @@ impl MemoryManager {
 
         sections.sort_by_key(|s| s.kind.retrieval_priority());
 
-        let conv_module = self.module(MemoryKind::Conversation)?;
+        let conv_module = self.get_module(MemoryKind::Conversation)?;
         let conv_records = conv_module.retrieve(&query)?;
         let conversation_messages: Vec<HistoryMessage> = conv_records
             .iter()
@@ -178,13 +182,23 @@ impl MemoryManager {
         Ok(parts.join("\n\n"))
     }
 
+    pub fn summarize_kind(
+        &self,
+        kind: MemoryKind,
+        query: &RetrieveQuery,
+    ) -> Result<String, MemoryError> {
+        let module = self.get_module(kind)?;
+        module.summarize(query)
+    }
+
     #[instrument(skip(self, event))]
     pub fn handle_event(
         &self,
         ctx: &MemoryContext,
         event: MemoryEvent,
-    ) -> Result<Vec<MemoryEvent>, MemoryError> {
+    ) -> Result<HandleEventResult, MemoryError> {
         let mut follow_up = Vec::new();
+        let mut saved = Vec::new();
         let workspace = Self::workspace_key(ctx);
 
         match &event {
@@ -201,24 +215,30 @@ impl MemoryManager {
                     let mut tasks = self.active_task_ids.lock().unwrap();
                     tasks.insert(workspace.clone(), task_id.clone());
                 }
-                let module = self.module(MemoryKind::Working)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Working)?;
+                let payload = serde_json::json!({
+                    "task_id": task_id,
+                    "objective": objective,
+                    "plan": plan,
+                    "files": files,
+                    "notes": "",
+                    "status": "active",
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Working,
-                        payload: serde_json::json!({
-                            "task_id": task_id,
-                            "objective": objective,
-                            "plan": plan,
-                            "files": files,
-                            "notes": "",
-                            "status": "active",
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Working,
+                    id,
+                    payload,
+                });
             }
             MemoryEvent::TaskUpdated {
                 objective,
@@ -226,7 +246,7 @@ impl MemoryManager {
                 files,
                 notes,
             } => {
-                let module = self.module(MemoryKind::Working)?;
+                let module = self.get_module(MemoryKind::Working)?;
                 let records = module.retrieve(&RetrieveQuery {
                     workspace_path: ctx.workspace_path.clone(),
                     conversation_id: ctx.conversation_id.clone(),
@@ -264,7 +284,7 @@ impl MemoryManager {
                 }
             }
             MemoryEvent::TaskCompleted { outcome } => {
-                let module = self.module(MemoryKind::Working)?;
+                let module = self.get_module(MemoryKind::Working)?;
                 let records = module.retrieve(&RetrieveQuery {
                     workspace_path: ctx.workspace_path.clone(),
                     conversation_id: ctx.conversation_id.clone(),
@@ -292,61 +312,79 @@ impl MemoryManager {
                 duration_ms,
                 success,
             } => {
-                let module = self.module(MemoryKind::Tool)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Tool)?;
+                let payload = serde_json::json!({
+                    "tool": tool,
+                    "params": params,
+                    "result": result,
+                    "duration_ms": duration_ms,
+                    "success": success,
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Tool,
-                        payload: serde_json::json!({
-                            "tool": tool,
-                            "params": params,
-                            "result": result,
-                            "duration_ms": duration_ms,
-                            "success": success,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Tool,
+                    id,
+                    payload,
+                });
             }
             MemoryEvent::ToolFailed {
                 error,
                 cause,
                 resolution,
             } => {
-                let module = self.module(MemoryKind::Error)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Error)?;
+                let payload = serde_json::json!({
+                    "error": error,
+                    "cause": cause,
+                    "resolution": resolution,
+                    "frequency": 1,
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Error,
-                        payload: serde_json::json!({
-                            "error": error,
-                            "cause": cause,
-                            "resolution": resolution,
-                            "frequency": 1,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Error,
+                    id,
+                    payload,
+                });
             }
             MemoryEvent::DecisionRecorded { decision, reason } => {
-                let module = self.module(MemoryKind::Decision)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Decision)?;
+                let payload = serde_json::json!({
+                    "decision": decision,
+                    "reason": reason,
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Decision,
-                        payload: serde_json::json!({
-                            "decision": decision,
-                            "reason": reason,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Decision,
+                    id,
+                    payload,
+                });
             }
             MemoryEvent::PreferenceDetected {
                 key,
@@ -354,22 +392,29 @@ impl MemoryManager {
                 confidence,
                 source,
             } => {
-                let module = self.module(MemoryKind::Preference)?;
-                let _ = module.save(
+                let module = self.get_module(MemoryKind::Preference)?;
+                let payload = serde_json::json!({
+                    "key": key,
+                    "value": value,
+                    "confidence": confidence,
+                    "source": source,
+                });
+                if let Ok(id) = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Preference,
-                        payload: serde_json::json!({
-                            "key": key,
-                            "value": value,
-                            "confidence": confidence,
-                            "source": source,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
-                );
+                ) {
+                    saved.push(crate::types::SavedMemory {
+                        kind: MemoryKind::Preference,
+                        id,
+                        payload,
+                    });
+                }
             }
             MemoryEvent::ProjectChanged { hint: _ } => {
                 follow_up.push(event.clone());
@@ -380,17 +425,23 @@ impl MemoryManager {
                 follow_up.push(event.clone());
             }
             MemoryEvent::HandoverSaved { summary } => {
-                let module = self.module(MemoryKind::Handover)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Handover)?;
+                let payload = serde_json::json!({ "summary": summary });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Handover,
-                        payload: serde_json::json!({ "summary": summary }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Handover,
+                    id,
+                    payload,
+                });
                 info!("handover saved for workspace");
             }
             MemoryEvent::ReflectionSaved {
@@ -399,46 +450,61 @@ impl MemoryManager {
                 improvements,
                 lessons,
             } => {
-                let module = self.module(MemoryKind::Reflection)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Reflection)?;
+                let payload = serde_json::json!({
+                    "attempted": attempted,
+                    "successful": successful,
+                    "improvements": improvements,
+                    "lessons": lessons,
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Reflection,
-                        payload: serde_json::json!({
-                            "attempted": attempted,
-                            "successful": successful,
-                            "improvements": improvements,
-                            "lessons": lessons,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Reflection,
+                    id,
+                    payload,
+                });
             }
             MemoryEvent::ProjectSaved { section, content } => {
-                let module = self.module(MemoryKind::Project)?;
-                module.save(
+                let module = self.get_module(MemoryKind::Project)?;
+                let payload = serde_json::json!({
+                    "section": section,
+                    "content": content,
+                });
+                let id = module.save(
                     ctx,
                     MemoryRecord {
                         id: None,
                         kind: MemoryKind::Project,
-                        payload: serde_json::json!({
-                            "section": section,
-                            "content": content,
-                        }),
+                        payload: payload.clone(),
                         created_at: None,
                         updated_at: None,
                     },
                 )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Project,
+                    id,
+                    payload,
+                });
             }
         }
 
-        Ok(follow_up)
+        Ok(HandleEventResult {
+            followups: follow_up,
+            saved,
+        })
     }
 
     pub fn compress_old_handovers(&self, ctx: &MemoryContext, keep: usize) -> Result<(), MemoryError> {
-        let module = self.module(MemoryKind::Handover)?;
+        let module = self.get_module(MemoryKind::Handover)?;
         let records = module.retrieve(&RetrieveQuery {
             workspace_path: ctx.workspace_path.clone(),
             conversation_id: None,
@@ -455,7 +521,7 @@ impl MemoryManager {
     }
 
     pub fn prune_expired_working(&self, ctx: &MemoryContext) -> Result<(), MemoryError> {
-        let module = self.module(MemoryKind::Working)?;
+        let module = self.get_module(MemoryKind::Working)?;
         let records = module.retrieve(&RetrieveQuery {
             workspace_path: ctx.workspace_path.clone(),
             conversation_id: None,

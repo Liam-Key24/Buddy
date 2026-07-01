@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from context import MemoryContextPayload, build_messages, format_history
+from embeddings import embed_text, embedding_dimensions
 from mlx_client import MLXClient
 from parser import parse_extraction, parse_plan
 from prompts import PLAN_SYSTEM_PROMPT, RESPOND_SYSTEM_PROMPT
@@ -79,6 +80,15 @@ class ExtractRequest(BaseModel):
 class ExtractResponse(BaseModel):
     kind: str
     data: dict
+
+
+class EmbedRequest(BaseModel):
+    text: str
+
+
+class EmbedResponse(BaseModel):
+    embedding: list[float]
+    dimensions: int
 
 
 @app.get("/health")
@@ -199,6 +209,13 @@ def memory_extract(req: ExtractRequest):
         int((time.time() - start) * 1000),
     )
     return ExtractResponse(kind=req.kind, data=data)
+
+
+@app.post("/embed", response_model=EmbedResponse)
+def embed(req: EmbedRequest):
+    logger.info("embed request len=%d", len(req.text))
+    vector = embed_text(req.text)
+    return EmbedResponse(embedding=vector, dimensions=embedding_dimensions())
 
 
 if __name__ == "__main__":

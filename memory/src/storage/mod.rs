@@ -2,16 +2,23 @@ mod sqlite;
 
 pub use sqlite::SqliteStorageBackend;
 
+pub fn default_importance(kind: crate::types::MemoryKind) -> f64 {
+    sqlite::default_importance(kind)
+}
+
 use crate::error::StorageError;
 use crate::types::MemoryKind;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryRow {
     pub id: String,
     pub workspace_path: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub payload: String,
+    pub search_text: Option<String>,
+    pub embedding: Option<Vec<u8>>,
+    pub importance: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

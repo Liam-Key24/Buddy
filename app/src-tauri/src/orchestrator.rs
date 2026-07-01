@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tracing::{error, info, instrument};
 
+use crate::intelligence_hooks::spawn_index_saved;
 use crate::memory_extraction::{
     maybe_handover_on_context_limit, memory_context_for, process_memory_followups,
     BrainMemoryContext,
@@ -57,10 +58,12 @@ struct RespondRequest {
 }
 
 fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Result<(), String> {
+    let mut all_saved = Vec::new();
+
     if let Some(task_state) = &plan.task_state {
         match task_state {
             TaskState::Started => {
-                state.memory_manager.handle_event(
+                let result = state.memory_manager.handle_event(
                     ctx,
                     MemoryEvent::TaskStarted {
                         objective: plan.reasoning.clone(),
@@ -68,9 +71,10 @@ fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Resul
                         files: vec![],
                     },
                 ).map_err(|e| e.to_string())?;
+                all_saved.extend(result.saved);
             }
             TaskState::Updated => {
-                state.memory_manager.handle_event(
+                let result = state.memory_manager.handle_event(
                     ctx,
                     MemoryEvent::TaskUpdated {
                         objective: None,
@@ -79,13 +83,14 @@ fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Resul
                         notes: None,
                     },
                 ).map_err(|e| e.to_string())?;
+                all_saved.extend(result.saved);
             }
             TaskState::Completed => {}
         }
     }
 
     if let Some(pref) = &plan.preference_detected {
-        let _ = state.memory_manager.handle_event(
+        let result = state.memory_manager.handle_event(
             ctx,
             MemoryEvent::PreferenceDetected {
                 key: pref.key.clone(),
@@ -94,10 +99,13 @@ fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Resul
                 source: pref.source.clone(),
             },
         );
+        if let Ok(r) = result {
+            all_saved.extend(r.saved);
+        }
     }
 
     if let Some(dec) = &plan.decision_detected {
-        state
+        let result = state
             .memory_manager
             .handle_event(
                 ctx,
@@ -107,8 +115,10 @@ fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Resul
                 },
             )
             .map_err(|e| e.to_string())?;
+        all_saved.extend(result.saved);
     }
 
+    spawn_index_saved(state, ctx, &all_saved);
     Ok(())
 }
 
@@ -123,8 +133,9 @@ async fn handle_handover_command(
     crate::memory_extraction::run_memory_extraction(state, ctx, &event, recent_messages).await?;
 
     let merged = state
-        .memory_manager
-        .retrieve_for_prompt(ctx, "")
+        .intelligence
+        .build_context(ctx, "")
+        .await
         .map_err(|e| e.to_string())?;
 
     let handover_text = merged
@@ -153,13 +164,37 @@ pub async fn send_message(
     let ctx = memory_context_for(&conversation_id, state);
 
     let merged = state
-        .memory_manager
-        .retrieve_for_prompt(&ctx, &text)
+        .intelligence
+        .build_context(&ctx, &text)
+        .await
         .map_err(|e| e.to_string())?;
 
     let trimmed_history = merged.conversation_messages.clone();
 
     maybe_handover_on_context_limit(state, &ctx, &merged, &trimmed_history).await;
+
+    if text.trim().starts_with("/maintain") {
+        state
+            .db
+            .add_message(&conversation_id, "user", &text)
+            .map_err(|e| e.to_string())?;
+        let report = state
+            .intelligence
+            .run_maintenance(&ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let msg = format!(
+            "Maintenance complete: merged {}, archived {}, conflicts {}.",
+            report.merged_duplicates, report.archived, report.conflicts_detected
+        );
+        state
+            .db
+            .add_message(&conversation_id, "assistant", &msg)
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit("chat-chunk", &msg);
+        let _ = app.emit("chat-done", ());
+        return Ok(());
+    }
 
     if text.trim().starts_with("/handover") {
         state
@@ -226,24 +261,28 @@ pub async fn send_message(
         if let (Some(tool_name), Some(tool_input)) = (&plan.tool, &plan.tool_input) {
             let start = Instant::now();
             let tool_result = match state.task_runner.run(tool_name, tool_input) {
-                Ok(result) => {
+                Ok(run_result) => {
+                    let output = run_result.output.clone();
                     let duration_ms = start.elapsed().as_millis() as u64;
-                    let _ = state.memory_manager.handle_event(
+                    let event_result = state.memory_manager.handle_event(
                         &ctx,
                         MemoryEvent::ToolExecuted {
                             tool: tool_name.clone(),
                             params: tool_input.clone(),
-                            result: result.output.clone(),
+                            result: output.clone(),
                             duration_ms,
                             success: true,
                         },
                     );
-                    Ok(result.output)
+                    if let Ok(r) = event_result {
+                        spawn_index_saved(state, &ctx, &r.saved);
+                    }
+                    Ok(output)
                 }
                 Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     let err_msg = e.to_string();
-                    let _ = state.memory_manager.handle_event(
+                    let exec_result = state.memory_manager.handle_event(
                         &ctx,
                         MemoryEvent::ToolExecuted {
                             tool: tool_name.clone(),
@@ -253,7 +292,10 @@ pub async fn send_message(
                             success: false,
                         },
                     );
-                    let _ = state.memory_manager.handle_event(
+                    if let Ok(r) = exec_result {
+                        spawn_index_saved(state, &ctx, &r.saved);
+                    }
+                    let fail_result = state.memory_manager.handle_event(
                         &ctx,
                         MemoryEvent::ToolFailed {
                             error: err_msg.clone(),
@@ -261,6 +303,9 @@ pub async fn send_message(
                             resolution: None,
                         },
                     );
+                    if let Ok(r) = fail_result {
+                        spawn_index_saved(state, &ctx, &r.saved);
+                    }
                     Err(err_msg)
                 }
             };
@@ -345,7 +390,7 @@ pub async fn send_message(
     );
 
     if plan.task_state == Some(TaskState::Completed) {
-        let followups = state
+        let event_result = state
             .memory_manager
             .handle_event(
                 &ctx,
@@ -354,6 +399,11 @@ pub async fn send_message(
                 },
             )
             .map_err(|e| e.to_string())?;
+
+        let _ = state
+            .intelligence
+            .on_task_complete(&ctx, &assistant_content)
+            .await;
 
         let mut all_messages = trimmed_history.clone();
         all_messages.push(HistoryMessage {
@@ -365,7 +415,9 @@ pub async fn send_message(
             content: assistant_content.clone(),
         });
 
-        process_memory_followups(state, &ctx, followups, &all_messages).await;
+        process_memory_followups(state, &ctx, event_result.followups, &all_messages).await;
+
+        state.intelligence.spawn_maintenance(ctx.clone()).await;
     }
 
     let _ = app.emit("chat-done", ());

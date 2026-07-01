@@ -35,6 +35,7 @@ impl Memory for DecisionMemory {
             created_at: now,
             updated_at: now,
             payload: payload.to_string(),
+            ..Default::default()
         };
         self.storage
             .insert(MemoryKind::Decision, &row)
@@ -87,6 +88,7 @@ impl Memory for DecisionMemory {
             created_at: record.created_at.unwrap_or_else(chrono_now),
             updated_at: chrono_now(),
             payload: record.payload.to_string(),
+            ..Default::default()
         };
         self.storage.update(MemoryKind::Decision, id, &row)?;
         Ok(())

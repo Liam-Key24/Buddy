@@ -2,6 +2,7 @@ use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent, MergedContext, CO
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::intelligence_hooks::index_saved_sync;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -14,6 +15,8 @@ pub struct BrainMemoryContext {
     pub errors: Option<String>,
     pub tools: Option<String>,
     pub reflections: Option<String>,
+    pub workspace: Option<String>,
+    pub learned_patterns: Option<String>,
 }
 
 impl From<&MergedContext> for BrainMemoryContext {
@@ -28,6 +31,8 @@ impl From<&MergedContext> for BrainMemoryContext {
             errors: payload.errors,
             tools: payload.tools,
             reflections: payload.reflections,
+            workspace: payload.workspace,
+            learned_patterns: payload.learned_patterns,
         }
     }
 }
@@ -70,7 +75,8 @@ pub async fn run_memory_extraction(
     };
 
     let workspace_summary = state
-        .memory_manager
+        .intelligence
+        .memory()
         .workspace_summary(ctx)
         .map_err(|e| e.to_string())?;
 
@@ -94,6 +100,8 @@ pub async fn run_memory_extraction(
         .json()
         .await
         .map_err(|e| format!("memory extract parse failed: {e}"))?;
+
+    let extraction_data = response.data.clone();
 
     let save_event = match response.kind.as_str() {
         "handover" => MemoryEvent::HandoverSaved {
@@ -144,10 +152,17 @@ pub async fn run_memory_extraction(
         }
     };
 
-    state
+    let result = state
         .memory_manager
         .handle_event(ctx, save_event)
         .map_err(|e| e.to_string())?;
+
+    index_saved_sync(state, ctx, &result.saved).await;
+
+    let _ = state
+        .intelligence
+        .on_extraction_saved(ctx, &extraction_data)
+        .await;
 
     info!(kind = %kind, "memory extraction saved");
     Ok(())

@@ -3,6 +3,7 @@ members = [
     "core",
     "database",
     "memory",
+    "intelligence",
     "plugins",
     "app/src-tauri",
 ]

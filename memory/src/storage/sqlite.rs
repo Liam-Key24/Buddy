@@ -16,6 +16,10 @@ impl SqliteStorageBackend {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
+
+    pub fn db(&self) -> Arc<Database> {
+        self.db.clone()
+    }
 }
 
 impl StorageBackend for SqliteStorageBackend {
@@ -32,12 +36,23 @@ impl StorageBackend for SqliteStorageBackend {
             row.id.clone()
         };
         let insert_id = id.clone();
+        let importance = row.importance.unwrap_or(default_importance(table));
         self.db.with_conn(|conn| {
             conn.execute(
                 &format!(
-                    "INSERT INTO {table_name} (id, workspace_path, created_at, updated_at, payload) VALUES (?1, ?2, ?3, ?4, ?5)"
+                    "INSERT INTO {table_name} (id, workspace_path, created_at, updated_at, payload, search_text, embedding, importance) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
                 ),
-                params![insert_id, row.workspace_path, row.created_at, row.updated_at, row.payload],
+                params![
+                    insert_id,
+                    row.workspace_path,
+                    row.created_at,
+                    row.updated_at,
+                    row.payload,
+                    row.search_text,
+                    row.embedding,
+                    importance,
+                ],
             )?;
             Ok(())
         })?;
@@ -54,8 +69,8 @@ impl StorageBackend for SqliteStorageBackend {
         let limit = query.limit.unwrap_or(100);
         let order = if query.order_desc { "DESC" } else { "ASC" };
         let sql = format!(
-            "SELECT id, workspace_path, created_at, updated_at, payload FROM {table_name} \
-             WHERE workspace_path = ?1 ORDER BY updated_at {order} LIMIT ?2"
+            "SELECT id, workspace_path, created_at, updated_at, payload, search_text, embedding, importance \
+             FROM {table_name} WHERE workspace_path = ?1 ORDER BY updated_at {order} LIMIT ?2"
         );
         self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(&sql)?;
@@ -68,6 +83,9 @@ impl StorageBackend for SqliteStorageBackend {
                         created_at: row.get(2)?,
                         updated_at: row.get(3)?,
                         payload: row.get(4)?,
+                        search_text: row.get(5)?,
+                        embedding: row.get(6)?,
+                        importance: row.get(7)?,
                     })
                 },
             )?;
@@ -81,9 +99,16 @@ impl StorageBackend for SqliteStorageBackend {
         self.db.with_conn(|conn| {
             conn.execute(
                 &format!(
-                    "UPDATE {table_name} SET payload = ?1, updated_at = ?2 WHERE id = ?3"
+                    "UPDATE {table_name} SET payload = ?1, updated_at = ?2, search_text = ?3, embedding = ?4, importance = ?5 WHERE id = ?6"
                 ),
-                params![row.payload, chrono_now(), id],
+                params![
+                    row.payload,
+                    chrono_now(),
+                    row.search_text,
+                    row.embedding,
+                    row.importance,
+                    id,
+                ],
             )?;
             Ok(())
         })?;
@@ -112,5 +137,19 @@ impl StorageBackend for SqliteStorageBackend {
             Ok(())
         })?;
         Ok(())
+    }
+}
+
+pub fn default_importance(kind: MemoryKind) -> f64 {
+    match kind {
+        MemoryKind::Working => 1.0,
+        MemoryKind::Handover => 0.9,
+        MemoryKind::Decision => 0.85,
+        MemoryKind::Project => 0.8,
+        MemoryKind::Reflection => 0.75,
+        MemoryKind::Preference => 0.7,
+        MemoryKind::Error => 0.7,
+        MemoryKind::Tool => 0.5,
+        MemoryKind::Conversation => 0.6,
     }
 }

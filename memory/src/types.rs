@@ -47,6 +47,19 @@ impl MemoryKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedMemory {
+    pub kind: MemoryKind,
+    pub id: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandleEventResult {
+    pub followups: Vec<crate::events::MemoryEvent>,
+    pub saved: Vec<SavedMemory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryContext {
     pub workspace_path: PathBuf,
     pub conversation_id: Option<String>,
@@ -101,6 +114,8 @@ pub struct MemoryContextPayload {
     pub errors: Option<String>,
     pub tools: Option<String>,
     pub reflections: Option<String>,
+    pub workspace: Option<String>,
+    pub learned_patterns: Option<String>,
 }
 
 impl From<&MergedContext> for MemoryContextPayload {
@@ -114,16 +129,32 @@ impl From<&MergedContext> for MemoryContextPayload {
             errors: None,
             tools: None,
             reflections: None,
+            workspace: None,
+            learned_patterns: None,
         };
         for section in &ctx.sections {
             match section.kind {
                 MemoryKind::Working => payload.working = Some(section.content.clone()),
-                MemoryKind::Project => payload.project = Some(section.content.clone()),
+                MemoryKind::Project => {
+                    if section.content.starts_with("Workspace overview:") {
+                        payload.workspace = Some(section.content.clone());
+                    } else if section.content.starts_with("Learned patterns:") {
+                        payload.learned_patterns = Some(section.content.clone());
+                    } else {
+                        payload.project = Some(section.content.clone());
+                    }
+                }
                 MemoryKind::Preference => payload.preferences = Some(section.content.clone()),
                 MemoryKind::Decision => payload.decisions = Some(section.content.clone()),
                 MemoryKind::Error => payload.errors = Some(section.content.clone()),
                 MemoryKind::Tool => payload.tools = Some(section.content.clone()),
-                MemoryKind::Reflection => payload.reflections = Some(section.content.clone()),
+                MemoryKind::Reflection => {
+                    if section.content.starts_with("Learned patterns:") {
+                        payload.learned_patterns = Some(section.content.clone());
+                    } else {
+                        payload.reflections = Some(section.content.clone());
+                    }
+                }
                 _ => {}
             }
         }

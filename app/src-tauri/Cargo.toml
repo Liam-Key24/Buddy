@@ -26,5 +26,6 @@ tracing-appender = "0.2"
 buddy-core = { path = "../../core" }
 buddy-database = { path = "../../database" }
 buddy-memory = { path = "../../memory" }
+buddy-intelligence = { path = "../../intelligence" }
 buddy-plugins = { path = "../../plugins" }
 dirs = "6"

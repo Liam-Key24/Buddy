@@ -43,7 +43,9 @@
         "decisions": { "type": ["string", "null"] },
         "errors": { "type": ["string", "null"] },
         "tools": { "type": ["string", "null"] },
-        "reflections": { "type": ["string", "null"] }
+        "reflections": { "type": ["string", "null"] },
+        "workspace": { "type": ["string", "null"] },
+        "learned_patterns": { "type": ["string", "null"] }
       }
     },
     "ContextSection": {

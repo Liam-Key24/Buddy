@@ -15,6 +15,22 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "003_storage",
         include_str!("../migrations/003_storage_improvements.sql"),
     ),
+    (
+        "004_intelligence",
+        include_str!("../migrations/004_intelligence.sql"),
+    ),
+    (
+        "005_knowledge_graph",
+        include_str!("../migrations/005_knowledge_graph.sql"),
+    ),
+    (
+        "006_learning",
+        include_str!("../migrations/006_learning.sql"),
+    ),
+    (
+        "007_workspace",
+        include_str!("../migrations/007_workspace.sql"),
+    ),
 ];
 
 #[derive(Debug, Error)]
