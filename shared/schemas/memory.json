@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Buddy Memory Schema",
+  "definitions": {
+    "MemoryKind": {
+      "type": "string",
+      "enum": [
+        "conversation",
+        "working",
+        "project",
+        "preference",
+        "handover",
+        "decision",
+        "error",
+        "tool",
+        "reflection"
+      ]
+    },
+    "HistoryMessage": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    },
+    "MemoryContext": {
+      "type": "object",
+      "required": ["workspace_path"],
+      "properties": {
+        "workspace_path": { "type": "string" },
+        "conversation_id": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "null"] }
+      }
+    },
+    "MemoryContextPayload": {
+      "type": "object",
+      "properties": {
+        "handover": { "type": ["string", "null"] },
+        "working": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "preferences": { "type": ["string", "null"] },
+        "decisions": { "type": ["string", "null"] },
+        "errors": { "type": ["string", "null"] },
+        "tools": { "type": ["string", "null"] },
+        "reflections": { "type": ["string", "null"] }
+      }
+    },
+    "ContextSection": {
+      "type": "object",
+      "required": ["kind", "content"],
+      "properties": {
+        "kind": { "$ref": "#/definitions/MemoryKind" },
+        "content": { "type": "string" }
+      }
+    },
+    "MergedContext": {
+      "type": "object",
+      "required": ["sections", "conversation_messages", "estimated_tokens"],
+      "properties": {
+        "handover": { "type": ["string", "null"] },
+        "sections": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ContextSection" }
+        },
+        "conversation_messages": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/HistoryMessage" }
+        },
+        "estimated_tokens": { "type": "integer" }
+      }
+    },
+    "ExtractRequest": {
+      "type": "object",
+      "required": ["kind", "workspace_summary"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["handover", "reflection", "project", "preference", "decision"]
+        },
+        "workspace_summary": { "type": "string" },
+        "recent_messages": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/HistoryMessage" }
+        },
+        "task_outcome": { "type": ["string", "null"] }
+      }
+    },
+    "HandoverSummary": {
+      "type": "object",
+      "properties": {
+        "objective": { "type": "string" },
+        "progress": { "type": "string" },
+        "active_tasks": { "type": "array", "items": { "type": "string" } },
+        "completed_work": { "type": "array", "items": { "type": "string" } },
+        "architectural_decisions": { "type": "array", "items": { "type": "string" } },
+        "outstanding_issues": { "type": "array", "items": { "type": "string" } },
+        "next_steps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ReflectionRecord": {
+      "type": "object",
+      "required": ["attempted", "successful", "improvements", "lessons"],
+      "properties": {
+        "attempted": { "type": "string" },
+        "successful": { "type": "boolean" },
+        "improvements": { "type": "string" },
+        "lessons": { "type": "string" }
+      }
+    },
+    "ProjectRecord": {
+      "type": "object",
+      "required": ["section", "content"],
+      "properties": {
+        "section": {
+          "type": "string",
+          "enum": ["description", "architecture", "stack", "features", "roadmap", "terminology", "general"]
+        },
+        "content": { "type": "string" }
+      }
+    },
+    "PreferenceRecord": {
+      "type": "object",
+      "required": ["key", "value", "confidence", "source"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "source": { "type": "string", "enum": ["explicit", "inferred"] }
+      }
+    },
+    "DecisionRecord": {
+      "type": "object",
+      "required": ["decision", "reason"],
+      "properties": {
+        "decision": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

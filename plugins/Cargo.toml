@@ -1,0 +1,14 @@
+[package]
+name = "buddy-plugins"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+buddy-core = { path = "../core" }
+
+[dev-dependencies]
+buddy-core = { path = "../core" }
+
+[[test]]
+name = "echo_tool"
+path = "tests/echo_tool.rs"

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Plan",
+  "type": "object",
+  "required": ["intent", "reasoning"],
+  "properties": {
+    "intent": {
+      "type": "string",
+      "enum": ["chat", "tool_use"]
+    },
+    "tool": {
+      "type": ["string", "null"]
+    },
+    "tool_input": {
+      "type": ["string", "null"]
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "response": {
+      "type": ["string", "null"]
+    }
+  }
+}
