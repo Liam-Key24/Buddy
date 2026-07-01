@@ -104,4 +104,11 @@ def parse_extraction(kind: str, raw: str) -> dict:
             }
         if kind == "project":
             return {"section": "general", "content": raw.strip()}
+        if kind == "conversation_archive":
+            return {
+                "summary": raw.strip() or "Archived conversation.",
+                "topics": [],
+                "key_facts": [],
+                "decisions": [],
+            }
         return {"raw": raw.strip()}

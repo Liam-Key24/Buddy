@@ -55,9 +55,10 @@ impl SemanticSearch for SqliteEmbeddingBackend {
         if text.trim().is_empty() {
             return Err(SearchError::Embed("empty text".into()));
         }
+        let embed_url = format!("{}/embed", self.brain_url);
         let response = self
             .client
-            .post(format!("{}/embed", self.brain_url))
+            .post(&embed_url)
             .json(&EmbedRequest {
                 text: text.to_string(),
             })

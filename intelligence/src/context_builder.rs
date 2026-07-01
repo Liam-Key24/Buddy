@@ -89,6 +89,11 @@ impl ContextBuilder {
             }
         }
 
+        let pinned_archived = memory
+            .summarize_archived_conversations(&retrieve_query)
+            .ok()
+            .filter(|s| !s.is_empty());
+
         // Semantic search for query-relevant memories
         let query_embedding = if query.trim().is_empty() {
             Vec::new()
@@ -137,13 +142,23 @@ impl ContextBuilder {
 
         for kind in ranked_kinds {
             let lines = kind_content.remove(&kind);
-            let content = if let Some(lines) = lines {
+            let mut content = if let Some(lines) = lines {
                 format_section(kind, &lines)
             } else if query.trim().is_empty() {
                 memory.summarize_kind(kind, &retrieve_query)?
             } else {
                 String::new()
             };
+
+            if kind == MemoryKind::Reflection {
+                if let Some(ref archived) = pinned_archived {
+                    content = if content.is_empty() {
+                        archived.clone()
+                    } else {
+                        format!("{archived}\n\n{content}")
+                    };
+                }
+            }
 
             if content.is_empty() {
                 continue;
@@ -261,6 +276,15 @@ fn format_memory_hit(hit: &ScoredMemory) -> String {
                 return format!("- {k}: {v}");
             }
             MemoryKind::Reflection => {
+                if payload
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    == Some("deleted_conversation")
+                {
+                    let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let summary = payload.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                    return format!("- [Archived chat: {title}] {summary}");
+                }
                 let l = payload.get("lessons").and_then(|v| v.as_str()).unwrap_or("");
                 return format!("- {l}");
             }

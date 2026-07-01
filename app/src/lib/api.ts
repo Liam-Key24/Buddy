@@ -42,11 +42,21 @@ export async function createConversation(title?: string) {
 }
 
 export async function deleteConversation(id: string) {
-  await invoke("delete_conversation", { id });
-  useConversationStore.getState().removeConversation(id);
+  try {
+    await invoke("delete_conversation", { id });
+  } finally {
+    await loadConversations();
+  }
 }
 
-export async function loadMessages(conversationId: string) {
+export async function loadMessages(
+  conversationId: string,
+  options?: { force?: boolean },
+) {
+  if (!options?.force && useChatStore.getState().isStreaming) {
+    return;
+  }
+
   const messages = await invoke<
     Array<{
       id: string;
@@ -66,16 +76,21 @@ export async function loadMessages(conversationId: string) {
   );
 }
 
-export async function sendMessage(conversationId: string, text: string) {
+export async function sendMessage(
+  conversationId: string,
+  text: string,
+  options?: { skipOptimistic?: boolean },
+) {
   const chat = useChatStore.getState();
-  chat.clearStreaming();
-  chat.setIsStreaming(true);
+  if (!options?.skipOptimistic) {
+    chat.beginSend(text);
+  }
 
   const unlistenChunk = await listen<string>("chat-chunk", (event) => {
     useChatStore.getState().appendStreaming(event.payload);
   });
   const unlistenDone = await listen("chat-done", async () => {
-    await loadMessages(conversationId);
+    await loadMessages(conversationId, { force: true });
     useChatStore.getState().clearStreaming();
     unlistenChunk();
     unlistenDone();
@@ -85,7 +100,7 @@ export async function sendMessage(conversationId: string, text: string) {
     await invoke("send_message", { conversationId, text });
     await loadConversations();
   } catch (error) {
-    chat.setIsStreaming(false);
+    chat.clearStreaming();
     unlistenChunk();
     unlistenDone();
     throw error;

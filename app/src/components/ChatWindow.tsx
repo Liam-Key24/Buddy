@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { ChatsCircle } from "@phosphor-icons/react";
 import { useChatStore } from "../stores/useChatStore";
 import { MessageBubble } from "./MessageBubble";
 
@@ -8,13 +9,14 @@ export function ChatWindow() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingContent]);
+  }, [messages, streamingContent, isStreaming]);
 
   if (messages.length === 0 && !isStreaming) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-gray-500">
-        <p className="text-lg font-medium">Welcome to Buddy</p>
-        <p className="mt-1 text-sm">Start a conversation or try &quot;echo hello&quot;</p>
+      <div className="flex flex-1 flex-col items-center justify-center text-zinc-500">
+        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-950 text-blue-400">
+          <ChatsCircle size={28} weight="duotone" />
+        </div>
       </div>
     );
   }
@@ -29,7 +31,7 @@ export function ChatWindow() {
       )}
       {isStreaming && !streamingContent && (
         <div className="mb-4 flex justify-start">
-          <div className="rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-400">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-500 shadow-sm">
             Thinking...
           </div>
         </div>

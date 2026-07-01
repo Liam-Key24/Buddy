@@ -49,6 +49,18 @@ Output schema:
 
 Only extract when confidence is high or the user was explicit."""
 
+CONVERSATION_ARCHIVE_PROMPT = """You are Buddy's memory module. Compress a deleted chat conversation into a durable memory summary as JSON only (no markdown fences).
+
+Output schema:
+{
+  "summary": "<concise prose summary of what was discussed and concluded>",
+  "topics": ["<topic1>", "<topic2>"],
+  "key_facts": ["<fact1>", "<fact2>"],
+  "decisions": ["<decision or conclusion1>"]
+}
+
+Be concise. Preserve important facts, decisions, and context the user may refer to later. Focus on substance, not conversational filler."""
+
 DECISION_PROMPT = """You are Buddy's memory module. Extract an architectural decision as JSON only (no markdown fences).
 
 Output schema:
@@ -63,4 +75,5 @@ EXTRACTION_PROMPTS = {
     "project": PROJECT_PROMPT,
     "preference": PREFERENCE_PROMPT,
     "decision": DECISION_PROMPT,
+    "conversation_archive": CONVERSATION_ARCHIVE_PROMPT,
 }

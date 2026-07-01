@@ -13,6 +13,45 @@ impl ReflectionMemory {
     pub fn new(storage: Arc<SqliteStorageBackend>) -> Self {
         Self { storage }
     }
+
+    /// Summaries of deleted chats, for injection into new conversation context.
+    pub fn summarize_archived_conversations(
+        &self,
+        query: &RetrieveQuery,
+        limit: usize,
+    ) -> Result<String, MemoryError> {
+        let records = self.retrieve(query)?;
+        let lines: Vec<String> = records
+            .iter()
+            .filter(|r| {
+                r.payload.get("source").and_then(|v| v.as_str())
+                    == Some("deleted_conversation")
+            })
+            .take(limit)
+            .filter_map(|r| format_archived_line(&r.payload))
+            .collect();
+        if lines.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!("Archived conversations:\n{}", lines.join("\n")))
+    }
+}
+
+fn format_archived_line(payload: &serde_json::Value) -> Option<String> {
+    let title = payload.get("title")?.as_str()?;
+    let summary = payload.get("summary")?.as_str()?;
+    let mut line = format!("- [Archived chat: {title}] {summary}");
+    if let Some(facts) = payload.get("key_facts").and_then(|v| v.as_array()) {
+        let fact_lines: Vec<&str> = facts
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !fact_lines.is_empty() {
+            line.push_str(&format!("\n  Key facts: {}", fact_lines.join("; ")));
+        }
+    }
+    Some(line)
 }
 
 impl Memory for ReflectionMemory {
@@ -79,6 +118,10 @@ impl Memory for ReflectionMemory {
         }
         let lines: Vec<String> = records
             .iter()
+            .filter(|r| {
+                r.payload.get("source").and_then(|v| v.as_str())
+                    != Some("deleted_conversation")
+            })
             .take(5)
             .filter_map(|r| {
                 let attempted = r.payload.get("attempted")?.as_str()?;

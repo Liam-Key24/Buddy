@@ -14,6 +14,7 @@ interface ChatState {
   streamingContent: string;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
+  beginSend: (text: string) => void;
   appendStreaming: (chunk: string) => void;
   finalizeStreaming: () => void;
   setActiveConversationId: (id: string | null) => void;
@@ -29,6 +30,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setMessages: (messages) => set({ messages }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
+  beginSend: (text) =>
+    set((state) => ({
+      messages: [
+        ...state.messages,
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: text,
+          created_at: Date.now() / 1000,
+        },
+      ],
+      streamingContent: "",
+      isStreaming: true,
+    })),
   appendStreaming: (chunk) =>
     set((state) => ({ streamingContent: state.streamingContent + chunk })),
   finalizeStreaming: () => {

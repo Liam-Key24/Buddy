@@ -20,6 +20,7 @@ use crate::types::{
 
 pub struct MemoryManager {
     modules: HashMap<MemoryKind, Arc<dyn Memory>>,
+    reflection: Arc<ReflectionMemory>,
     active_task_ids: Mutex<HashMap<String, String>>,
     token_budget: usize,
 }
@@ -61,13 +62,15 @@ impl MemoryManager {
             MemoryKind::Tool,
             Arc::new(ToolMemory::new(storage.clone())),
         );
+        let reflection = Arc::new(ReflectionMemory::new(storage.clone()));
         modules.insert(
             MemoryKind::Reflection,
-            Arc::new(ReflectionMemory::new(storage.clone())),
+            reflection.clone(),
         );
 
         Self {
             modules,
+            reflection,
             active_task_ids: Mutex::new(HashMap::new()),
             token_budget: DEFAULT_TOKEN_BUDGET,
         }
@@ -189,6 +192,13 @@ impl MemoryManager {
     ) -> Result<String, MemoryError> {
         let module = self.get_module(kind)?;
         module.summarize(query)
+    }
+
+    pub fn summarize_archived_conversations(
+        &self,
+        query: &RetrieveQuery,
+    ) -> Result<String, MemoryError> {
+        self.reflection.summarize_archived_conversations(query, 5)
     }
 
     #[instrument(skip(self, event))]
@@ -421,7 +431,8 @@ impl MemoryManager {
             }
             MemoryEvent::HandoverRequested
             | MemoryEvent::SessionEnding
-            | MemoryEvent::ContextLimitApproaching { .. } => {
+            | MemoryEvent::ContextLimitApproaching { .. }
+            | MemoryEvent::ConversationDeleted { .. } => {
                 follow_up.push(event.clone());
             }
             MemoryEvent::HandoverSaved { summary } => {
@@ -494,6 +505,45 @@ impl MemoryManager {
                     id,
                     payload,
                 });
+            }
+            MemoryEvent::ConversationArchivedSaved {
+                title,
+                conversation_id,
+                summary,
+                topics,
+                key_facts,
+                decisions,
+            } => {
+                let module = self.get_module(MemoryKind::Reflection)?;
+                let payload = serde_json::json!({
+                    "source": "deleted_conversation",
+                    "title": title,
+                    "conversation_id": conversation_id,
+                    "summary": summary,
+                    "topics": topics,
+                    "key_facts": key_facts,
+                    "decisions": decisions,
+                    "attempted": title,
+                    "successful": true,
+                    "improvements": "",
+                    "lessons": summary,
+                });
+                let id = module.save(
+                    ctx,
+                    MemoryRecord {
+                        id: None,
+                        kind: MemoryKind::Reflection,
+                        payload: payload.clone(),
+                        created_at: None,
+                        updated_at: None,
+                    },
+                )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Reflection,
+                    id,
+                    payload,
+                });
+                info!("archived deleted conversation to memory");
             }
         }
 

@@ -1,4 +1,5 @@
 import { useState, KeyboardEvent } from "react";
+import { PaperPlaneTilt } from "@phosphor-icons/react";
 import { useChatStore } from "../stores/useChatStore";
 import { sendMessage, createConversation } from "../lib/api";
 
@@ -12,15 +13,20 @@ export function ChatInput() {
     if (!trimmed || isStreaming) return;
 
     let convId = activeConversationId;
-    if (!convId) {
+    const isNew = !convId;
+    if (isNew) {
       const conv = await createConversation();
       convId = conv.id;
-      setActiveConversationId(conv.id);
     }
 
     setText("");
+    useChatStore.getState().beginSend(trimmed);
+    if (isNew) {
+      setActiveConversationId(convId);
+    }
+
     try {
-      await sendMessage(convId, trimmed);
+      await sendMessage(convId!, trimmed, { skipOptimistic: true });
     } catch (err) {
       console.error("send failed:", err);
     }
@@ -34,23 +40,23 @@ export function ChatInput() {
   }
 
   return (
-    <div className="border-t border-gray-800 p-4">
-      <div className="flex items-end gap-2 rounded-xl border border-gray-700 bg-gray-900/50 p-2">
+    <div className="border-t border-zinc-800 p-4">
+      <div className="flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-800/50 p-2 shadow-sm">
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={isStreaming}
-          placeholder="Message Buddy..."
+          placeholder="Message..."
           rows={1}
-          className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-gray-100 placeholder-gray-500 outline-none disabled:opacity-50"
+          className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 placeholder-zinc-500 outline-none disabled:opacity-50"
         />
         <button
           onClick={handleSend}
           disabled={!text.trim() || isStreaming}
-          className="rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-500 text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Send
+          <PaperPlaneTilt size={16} weight="fill" />
         </button>
       </div>
     </div>

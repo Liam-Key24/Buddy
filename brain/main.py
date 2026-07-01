@@ -71,7 +71,14 @@ class RespondRequest(BaseModel):
 
 
 class ExtractRequest(BaseModel):
-    kind: Literal["handover", "reflection", "project", "preference", "decision"]
+    kind: Literal[
+        "handover",
+        "reflection",
+        "project",
+        "preference",
+        "decision",
+        "conversation_archive",
+    ]
     workspace_summary: str
     recent_messages: list[HistoryMessage] = []
     task_outcome: Optional[str] = None

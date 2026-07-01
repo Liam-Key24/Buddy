@@ -85,6 +85,18 @@ pub enum MemoryEvent {
         section: String,
         content: String,
     },
+    ConversationDeleted {
+        title: String,
+        conversation_id: String,
+    },
+    ConversationArchivedSaved {
+        title: String,
+        conversation_id: String,
+        summary: String,
+        topics: Vec<String>,
+        key_facts: Vec<String>,
+        decisions: Vec<String>,
+    },
 }
 
 impl MemoryEvent {
@@ -96,6 +108,7 @@ impl MemoryEvent {
                 | MemoryEvent::HandoverRequested
                 | MemoryEvent::SessionEnding
                 | MemoryEvent::ContextLimitApproaching { .. }
+                | MemoryEvent::ConversationDeleted { .. }
         )
     }
 }

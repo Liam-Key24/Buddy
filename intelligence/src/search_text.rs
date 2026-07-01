@@ -45,6 +45,31 @@ pub fn extract_search_text(kind: MemoryKind, payload: &serde_json::Value) -> Str
             format!("{tool} {params} {result}")
         }
         MemoryKind::Reflection => {
+            if payload.get("source").and_then(|v| v.as_str()) == Some("deleted_conversation") {
+                let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let summary = payload.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                let topics = payload
+                    .get("topics")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let key_facts = payload
+                    .get("key_facts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                return format!("{title} {summary} {topics} {key_facts}");
+            }
             let attempted = payload.get("attempted").and_then(|v| v.as_str()).unwrap_or("");
             let improvements = payload.get("improvements").and_then(|v| v.as_str()).unwrap_or("");
             let lessons = payload.get("lessons").and_then(|v| v.as_str()).unwrap_or("");

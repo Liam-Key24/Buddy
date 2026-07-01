@@ -206,6 +206,26 @@ impl Database {
         Ok(())
     }
 
+    pub fn get_conversation(&self, id: &str) -> Result<Conversation, DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+            other => DbError::from(other),
+        })
+    }
+
     pub fn update_conversation_title(&self, id: &str, title: &str) -> Result<(), DbError> {
         let conn = self.conn.lock().unwrap();
         let affected = conn.execute(

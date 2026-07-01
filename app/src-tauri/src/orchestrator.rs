@@ -1,15 +1,19 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent, TaskState};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
+
+use buddy_database::DbError;
 
 use crate::intelligence_hooks::spawn_index_saved;
 use crate::memory_extraction::{
-    maybe_handover_on_context_limit, memory_context_for, process_memory_followups,
-    BrainMemoryContext,
+    archive_conversation_to_memory, maybe_handover_on_context_limit, memory_context_for,
+    process_memory_followups, save_fallback_conversation_archive, BrainMemoryContext,
 };
+use crate::services::ProcessManager;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,5 +425,78 @@ pub async fn send_message(
     }
 
     let _ = app.emit("chat-done", ());
+    Ok(())
+}
+
+async fn archive_before_delete(
+    state: &AppState,
+    ctx: &MemoryContext,
+    title: &str,
+    conversation_id: &str,
+    history: &[HistoryMessage],
+) {
+    if history.is_empty() {
+        return;
+    }
+
+    let brain_ok = ProcessManager::check_brain_ready(state).await;
+    if brain_ok {
+        if let Err(e) = archive_conversation_to_memory(state, ctx, title, conversation_id, history)
+            .await
+        {
+            warn!(error = %e, "conversation archive failed, using fallback");
+            if let Err(e) =
+                save_fallback_conversation_archive(state, ctx, title, conversation_id, history).await
+            {
+                warn!(error = %e, "fallback archive failed");
+            }
+        }
+    } else {
+        info!("brain offline, using fallback archive for delete");
+        if let Err(e) =
+            save_fallback_conversation_archive(state, ctx, title, conversation_id, history).await
+        {
+            warn!(error = %e, "fallback archive failed");
+        }
+    }
+}
+
+#[instrument(skip(state), fields(conversation_id = %conversation_id))]
+pub async fn delete_conversation(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+) -> Result<(), String> {
+    let conversation = match state.db.get_conversation(conversation_id) {
+        Ok(conv) => conv,
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let messages = state
+        .db
+        .get_messages(conversation_id)
+        .map_err(|e| e.to_string())?;
+
+    let title = conversation.title;
+    let conv_id = conversation_id.to_string();
+    let ctx = memory_context_for(&conv_id, state);
+    let history: Vec<HistoryMessage> = messages
+        .iter()
+        .map(|m| HistoryMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+
+    // Summarize and persist to memory before removing from DB.
+    archive_before_delete(state, &ctx, &title, &conv_id, &history).await;
+
+    match state.db.delete_conversation(conversation_id) {
+        Ok(()) => {}
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    }
+
+    info!(conversation_id = %conversation_id, "conversation deleted");
     Ok(())
 }

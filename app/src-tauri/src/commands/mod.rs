@@ -49,8 +49,11 @@ pub fn create_conversation(
 }
 
 #[tauri::command]
-pub fn delete_conversation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.db.delete_conversation(&id).map_err(|e| e.to_string())
+pub async fn delete_conversation(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    orchestrator::delete_conversation(state.inner(), &id).await
 }
 
 #[tauri::command]

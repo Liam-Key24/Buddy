@@ -38,10 +38,10 @@ pub fn run() {
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
                 for _ in 0..10 {
-                    if ProcessManager::check_brain(&st).await {
+                    if ProcessManager::check_brain_ready(&st).await {
                         break;
                     }
-                    let _ = pm.start_brain(&st);
+                    let _ = pm.ensure_brain(&st).await;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 let ctx = MemoryContext {

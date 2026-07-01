@@ -71,6 +71,7 @@ pub async fn run_memory_extraction(
         MemoryEvent::HandoverRequested => "handover",
         MemoryEvent::SessionEnding => "handover",
         MemoryEvent::ContextLimitApproaching { .. } => "handover",
+        MemoryEvent::ConversationDeleted { .. } => "conversation_archive",
         _ => return Ok(()),
     };
 
@@ -82,11 +83,15 @@ pub async fn run_memory_extraction(
 
     let task_outcome = match event {
         MemoryEvent::TaskCompleted { outcome } => Some(outcome.clone()),
+        MemoryEvent::ConversationDeleted { title, .. } => Some(format!("Conversation title: {title}")),
         _ => None,
     };
 
-    let client = reqwest::Client::new();
-    let response: ExtractResponse = client
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let http_response = client
         .post(format!("{}/memory/extract", state.brain_url()))
         .json(&ExtractRequest {
             kind: kind.to_string(),
@@ -96,17 +101,85 @@ pub async fn run_memory_extraction(
         })
         .send()
         .await
-        .map_err(|e| format!("memory extract request failed: {e}"))?
+        .map_err(|e| format!("memory extract request failed: {e}"))?;
+
+    if !http_response.status().is_success() {
+        let status = http_response.status();
+        let body = http_response.text().await.unwrap_or_default();
+        return Err(format!("memory extract returned {status}: {body}"));
+    }
+
+    let response: ExtractResponse = http_response
         .json()
         .await
         .map_err(|e| format!("memory extract parse failed: {e}"))?;
 
     let extraction_data = response.data.clone();
 
+    let conversation_meta = match event {
+        MemoryEvent::ConversationDeleted {
+            title,
+            conversation_id,
+        } => Some((title.clone(), conversation_id.clone())),
+        _ => None,
+    };
+
     let save_event = match response.kind.as_str() {
         "handover" => MemoryEvent::HandoverSaved {
             summary: response.data,
         },
+        "conversation_archive" => {
+            let (title, conversation_id) = match conversation_meta {
+                Some(meta) => meta,
+                None => {
+                    warn!("conversation_archive without ConversationDeleted metadata");
+                    return Ok(());
+                }
+            };
+            let topics = response
+                .data
+                .get("topics")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let key_facts = response
+                .data
+                .get("key_facts")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let decisions = response
+                .data
+                .get("decisions")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            MemoryEvent::ConversationArchivedSaved {
+                title,
+                conversation_id,
+                summary: response
+                    .data
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                topics,
+                key_facts,
+                decisions,
+            }
+        }
         "reflection" => MemoryEvent::ReflectionSaved {
             attempted: response
                 .data
@@ -210,4 +283,59 @@ pub async fn session_end_handover(state: &AppState, ctx: &MemoryContext) {
         warn!(error = %e, "session end handover failed");
     }
     let _ = state.memory_manager.prune_expired_working(ctx);
+}
+
+pub async fn archive_conversation_to_memory(
+    state: &AppState,
+    ctx: &MemoryContext,
+    title: &str,
+    conversation_id: &str,
+    recent_messages: &[HistoryMessage],
+) -> Result<(), String> {
+    let event = MemoryEvent::ConversationDeleted {
+        title: title.to_string(),
+        conversation_id: conversation_id.to_string(),
+    };
+    run_memory_extraction(state, ctx, &event, recent_messages).await
+}
+
+pub async fn save_fallback_conversation_archive(
+    state: &AppState,
+    ctx: &MemoryContext,
+    title: &str,
+    conversation_id: &str,
+    recent_messages: &[HistoryMessage],
+) -> Result<(), String> {
+    let mut transcript = String::new();
+    for msg in recent_messages {
+        transcript.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        if transcript.len() > 2000 {
+            transcript.truncate(2000);
+            transcript.push_str("...");
+            break;
+        }
+    }
+    let summary = if transcript.is_empty() {
+        format!("Archived chat: {title}")
+    } else {
+        format!("Archived chat \"{title}\":\n{transcript}")
+    };
+
+    let event = MemoryEvent::ConversationArchivedSaved {
+        title: title.to_string(),
+        conversation_id: conversation_id.to_string(),
+        summary: summary.clone(),
+        topics: vec![],
+        key_facts: vec![],
+        decisions: vec![],
+    };
+
+    let result = state
+        .memory_manager
+        .handle_event(ctx, event)
+        .map_err(|e| e.to_string())?;
+
+    index_saved_sync(state, ctx, &result.saved).await;
+    info!("fallback conversation archive saved");
+    Ok(())
 }
