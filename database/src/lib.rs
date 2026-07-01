@@ -102,12 +102,10 @@ impl Database {
             )?;
             if legacy_db > 0 {
                 let now = chrono_now();
-                for version in ["001_init", "002_memory"] {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                        params![version, now],
-                    )?;
-                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params!["001_init", now],
+                )?;
             }
         }
 
@@ -118,6 +116,9 @@ impl Database {
                 |row| row.get(0),
             )?;
             if applied > 0 {
+                if *version == "002_memory" && !Self::memory_tables_exist(&conn)? {
+                    conn.execute_batch(sql)?;
+                }
                 continue;
             }
             conn.execute_batch(sql)?;
@@ -128,6 +129,15 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    fn memory_tables_exist(conn: &Connection) -> Result<bool, DbError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_handover'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn with_conn<F, T>(&self, f: F) -> Result<T, DbError>
@@ -362,6 +372,7 @@ pub fn chrono_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::fs;
 
     #[test]
@@ -402,6 +413,50 @@ mod tests {
             })
             .unwrap();
         assert!(versions.contains(&"003_storage".to_string()));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_db_repairs_missing_memory_tables() {
+        let dir = std::env::temp_dir().join(format!("buddy-db-legacy-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buddy.db");
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("../migrations/001_init.sql"))
+                .unwrap();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            let now = chrono_now();
+            for version in ["001_init", "002_memory"] {
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![version, now],
+                )
+                .unwrap();
+            }
+        }
+
+        let db = Database::open(&path).unwrap();
+        let handover_exists: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_handover'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .unwrap();
+        assert_eq!(handover_exists, 1);
 
         let _ = fs::remove_dir_all(dir);
     }
