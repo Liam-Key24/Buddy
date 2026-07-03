@@ -24,7 +24,7 @@ impl AppState {
         let db = Arc::new(db);
         seed_default_settings(&db);
 
-        let registry = Arc::new(create_registry());
+        let registry = Arc::new(create_registry(db.clone()));
         let task_runner = Arc::new(TaskRunner::new(registry));
         let memory_manager = Arc::new(MemoryManager::new(db.clone()));
         let brain_url = DEFAULT_BRAIN_URL.to_string();

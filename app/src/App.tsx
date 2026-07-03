@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { ChatWindow } from "./components/ChatWindow";
@@ -6,22 +7,42 @@ import { ChatInput } from "./components/ChatInput";
 import { PageTransition } from "./components/PageTransition";
 import { Settings } from "./pages/Settings";
 import { Dashboard } from "./pages/Dashboard";
+import { Spark } from "./pages/Spark";
 import { useAppStore } from "./stores/useAppStore";
 import { useChatStore } from "./stores/useChatStore";
+import { useSparkStore } from "./stores/useSparkStore";
 import {
   fetchServiceStatus,
   loadConversations,
   loadMessages,
   startBrain,
+  subscribeSparkEvents,
 } from "./lib/api";
 
 function App() {
-  const { currentPage, setMlxStatus, setBrainStatus } = useAppStore();
+  const { currentPage, setMlxStatus, setBrainStatus, setCurrentPage } =
+    useAppStore();
   const { activeConversationId } = useChatStore();
+  const { refresh, refreshStale } = useSparkStore();
 
   useEffect(() => {
     loadConversations();
     startBrain().catch(console.error);
+    refresh().catch(console.error);
+
+    isPermissionGranted()
+      .then((granted) => {
+        if (!granted) return requestPermission();
+      })
+      .catch(console.error);
+
+    const unsub = subscribeSparkEvents(
+      (count) => useSparkStore.setState({ staleCount: count }),
+      () => {
+        refresh().catch(console.error);
+      },
+      () => setCurrentPage("spark"),
+    );
 
     async function pollStatus() {
       try {
@@ -36,8 +57,13 @@ function App() {
 
     pollStatus();
     const interval = setInterval(pollStatus, 5000);
-    return () => clearInterval(interval);
-  }, [setMlxStatus, setBrainStatus]);
+    const staleInterval = setInterval(() => refreshStale().catch(console.error), 60 * 60 * 1000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(staleInterval);
+      unsub();
+    };
+  }, [setMlxStatus, setBrainStatus, refresh, refreshStale, setCurrentPage]);
 
   useEffect(() => {
     if (activeConversationId && !useChatStore.getState().isStreaming) {
@@ -57,6 +83,8 @@ function App() {
               <Settings />
             ) : page === "dashboard" ? (
               <Dashboard />
+            ) : page === "spark" ? (
+              <Spark />
             ) : (
               <>
                 <ChatWindow />

@@ -6,6 +6,7 @@ import {
   CircleNotch,
   Cpu,
   Gear,
+  Lightning,
   Plus,
   SquaresFour,
   Trash,
@@ -14,6 +15,7 @@ import { useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
 import { useConversationStore } from "../stores/useConversationStore";
 import { useChatStore } from "../stores/useChatStore";
+import { useSparkStore } from "../stores/useSparkStore";
 import { createConversation, deleteConversation } from "../lib/api";
 
 function StatusIcon({
@@ -92,6 +94,7 @@ export function Sidebar() {
     toggleSidebar,
     setSidebarCollapsed,
   } = useAppStore();
+  const { staleCount } = useSparkStore();
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   async function handleNewChat() {
@@ -175,6 +178,23 @@ export function Sidebar() {
               size={20}
               weight={currentPage === "chat" ? "fill" : "regular"}
             />
+          </RailButton>
+          <RailButton
+            active={currentPage === "spark"}
+            onClick={() => setCurrentPage("spark")}
+            title="Spark"
+          >
+            <span className="relative">
+              <Lightning
+                size={20}
+                weight={currentPage === "spark" ? "fill" : "regular"}
+              />
+              {staleCount > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-rose-500 px-0.5 text-[8px] font-bold text-white">
+                  {staleCount > 9 ? "9+" : staleCount}
+                </span>
+              )}
+            </span>
           </RailButton>
           <RailButton
             active={currentPage === "settings"}

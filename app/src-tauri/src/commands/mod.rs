@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::ToolResult;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::orchestrator;
 use crate::services::{ProcessManager, ServiceStatus};
@@ -117,4 +117,94 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, Stri
 #[tauri::command]
 pub fn set_setting(state: State<'_, Arc<AppState>>, key: String, value: String) -> Result<(), String> {
     state.db.set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_sparks(
+    state: State<'_, Arc<AppState>>,
+    status: Option<String>,
+) -> Result<Vec<buddy_database::Spark>, String> {
+    state
+        .db
+        .list_sparks(status.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_spark(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    content: String,
+    tags: Vec<String>,
+) -> Result<buddy_database::Spark, String> {
+    let spark = state
+        .db
+        .create_spark(&content, &tags, None)
+        .map_err(|e| e.to_string())?;
+    let count = state
+        .db
+        .count_stale_sparks(
+            buddy_database::SPARK_STALE_AGE_MS,
+            buddy_database::SPARK_NUDGE_COOLDOWN_MS,
+        )
+        .unwrap_or(0);
+    let _ = app.emit("sparks-stale", count);
+    let _ = app.emit("sparks-updated", ());
+    Ok(spark)
+}
+
+#[tauri::command]
+pub fn update_spark(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    action: String,
+    content: Option<String>,
+    tags: Option<Vec<String>>,
+) -> Result<buddy_database::Spark, String> {
+    let spark = state
+        .db
+        .update_spark(&id, &action, content.as_deref(), tags.as_deref())
+        .map_err(|e| e.to_string())?;
+    let count = state
+        .db
+        .count_stale_sparks(
+            buddy_database::SPARK_STALE_AGE_MS,
+            buddy_database::SPARK_NUDGE_COOLDOWN_MS,
+        )
+        .unwrap_or(0);
+    let _ = app.emit("sparks-stale", count);
+    let _ = app.emit("sparks-updated", ());
+    Ok(spark)
+}
+
+#[tauri::command]
+pub async fn delete_spark(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    orchestrator::delete_spark_with_archive(state.inner(), &app, &id).await
+}
+
+#[tauri::command]
+pub fn get_stale_spark_count(state: State<'_, Arc<AppState>>) -> Result<i64, String> {
+    state
+        .db
+        .count_stale_sparks(
+            buddy_database::SPARK_STALE_AGE_MS,
+            buddy_database::SPARK_NUDGE_COOLDOWN_MS,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_stale_sparks(state: State<'_, Arc<AppState>>) -> Result<Vec<buddy_database::Spark>, String> {
+    state
+        .db
+        .get_stale_sparks(
+            buddy_database::SPARK_STALE_AGE_MS,
+            buddy_database::SPARK_NUDGE_COOLDOWN_MS,
+        )
+        .map_err(|e| e.to_string())
 }

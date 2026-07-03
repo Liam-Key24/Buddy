@@ -285,6 +285,24 @@ fn format_memory_hit(hit: &ScoredMemory) -> String {
                     let summary = payload.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                     return format!("- [Archived chat: {title}] {summary}");
                 }
+                if payload
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    == Some("deleted_spark")
+                {
+                    let tags = payload
+                        .get("tags")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let summary = payload.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                    return format!("- [Deleted spark: {tags}] {summary}");
+                }
                 let l = payload.get("lessons").and_then(|v| v.as_str()).unwrap_or("");
                 return format!("- {l}");
             }

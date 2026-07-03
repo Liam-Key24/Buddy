@@ -28,6 +28,26 @@ class PlanResponse(BaseModel):
     decision_detected: Optional[DecisionDetected] = None
 
 
+IDEA_TRIGGERS = [
+    r"\bi have an idea\b",
+    r"\bidea for\b",
+    r"\bwhat if we\b",
+    r"\bwhat if i\b",
+    r"\bthought about\b",
+    r"\bthinking about\b",
+    r"\bnote to self\b",
+    r"\bremember to\b",
+    r"\bdon'?t forget\b",
+    r"\bmaybe we could\b",
+    r"\bmaybe i could\b",
+    r"\bwould be (?:cool|nice|good) if\b",
+    r"\bi('ve| have) been thinking\b",
+    r"\bsomething to (?:try|do|look into)\b",
+    r"\bspark:\s*",
+    r"\bspark\s+\w",
+]
+
+
 def _extract_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
@@ -40,6 +60,34 @@ def _extract_json(text: str) -> dict:
         text = text[start : end + 1]
 
     return json.loads(text)
+
+
+def _looks_like_idea(message: str) -> bool:
+    lower = message.strip().lower()
+    return any(re.search(pattern, lower) for pattern in IDEA_TRIGGERS)
+
+
+def _extract_idea_content(message: str) -> str:
+    text = message.strip()
+    lead_ins = [
+        r"^i have an idea(?: for)?\s*[:—–-]?\s*",
+        r"^idea for\s*[:—–-]?\s*",
+        r"^what if we\s*[:—–-]?\s*",
+        r"^what if i\s*[:—–-]?\s*",
+        r"^note to self\s*[:—–-]?\s*",
+        r"^thinking about\s*[:—–-]?\s*",
+        r"^thought about\s*[:—–-]?\s*",
+        r"^maybe we could\s*[:—–-]?\s*",
+        r"^maybe i could\s*[:—–-]?\s*",
+        r"^i('ve| have) been thinking(?: about)?\s*[:—–-]?\s*",
+        r"^spark:\s*",
+        r"^spark\s+",
+    ]
+    for pattern in lead_ins:
+        stripped = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+        if stripped and stripped != text:
+            return stripped
+    return text
 
 
 def _heuristic_plan(message: str) -> PlanResponse:
@@ -61,6 +109,16 @@ def _heuristic_plan(message: str) -> PlanResponse:
             reasoning="User requested echo with no input.",
             response=None,
         )
+    if _looks_like_idea(message):
+        content = _extract_idea_content(message)
+        tags = _infer_spark_tags(content.lower())
+        return PlanResponse(
+            intent="tool_use",
+            tool="save_spark",
+            tool_input=json.dumps({"content": content, "tags": tags}),
+            reasoning="User shared an idea in natural language.",
+            response=None,
+        )
     return PlanResponse(
         intent="chat",
         tool=None,
@@ -68,6 +126,21 @@ def _heuristic_plan(message: str) -> PlanResponse:
         reasoning="General conversation fallback.",
         response="I'm Buddy, your local assistant. How can I help?",
     )
+
+
+def _infer_spark_tags(text: str) -> list[str]:
+    tags: list[str] = []
+    if any(w in text for w in ("van", "camper", "roof rack", "solar panel")):
+        tags.append("the_van")
+    if any(w in text for w in ("land", "garden", "fence", "trees", "property")):
+        tags.append("the_land")
+    if any(w in text for w in ("trip", "travel", "road trip", "scotland", "journey")):
+        tags.append("travelling")
+    if any(w in text for w in ("project", "app", "build", "code")):
+        tags.append("projects")
+    if not tags:
+        tags.append("general_life")
+    return tags
 
 
 def parse_plan(raw: str, message: str) -> PlanResponse:
@@ -110,5 +183,11 @@ def parse_extraction(kind: str, raw: str) -> dict:
                 "topics": [],
                 "key_facts": [],
                 "decisions": [],
+            }
+        if kind == "spark_archive":
+            return {
+                "summary": raw.strip() or "Deleted spark.",
+                "topics": [],
+                "key_facts": [],
             }
         return {"raw": raw.strip()}

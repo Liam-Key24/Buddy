@@ -432,7 +432,8 @@ impl MemoryManager {
             MemoryEvent::HandoverRequested
             | MemoryEvent::SessionEnding
             | MemoryEvent::ContextLimitApproaching { .. }
-            | MemoryEvent::ConversationDeleted { .. } => {
+            | MemoryEvent::ConversationDeleted { .. }
+            | MemoryEvent::SparkDeleted { .. } => {
                 follow_up.push(event.clone());
             }
             MemoryEvent::HandoverSaved { summary } => {
@@ -544,6 +545,46 @@ impl MemoryManager {
                     payload,
                 });
                 info!("archived deleted conversation to memory");
+            }
+            MemoryEvent::SparkArchivedSaved {
+                spark_id,
+                content,
+                tags,
+                summary,
+                topics,
+                key_facts,
+            } => {
+                let module = self.get_module(MemoryKind::Reflection)?;
+                let tags_str = tags.join(", ");
+                let payload = serde_json::json!({
+                    "source": "deleted_spark",
+                    "spark_id": spark_id,
+                    "content": content,
+                    "tags": tags,
+                    "summary": summary,
+                    "topics": topics,
+                    "key_facts": key_facts,
+                    "attempted": format!("Deleted spark [{tags_str}]"),
+                    "successful": true,
+                    "improvements": "",
+                    "lessons": summary,
+                });
+                let id = module.save(
+                    ctx,
+                    MemoryRecord {
+                        id: None,
+                        kind: MemoryKind::Reflection,
+                        payload: payload.clone(),
+                        created_at: None,
+                        updated_at: None,
+                    },
+                )?;
+                saved.push(crate::types::SavedMemory {
+                    kind: MemoryKind::Reflection,
+                    id,
+                    payload,
+                });
+                info!("archived deleted spark to memory");
             }
         }
 

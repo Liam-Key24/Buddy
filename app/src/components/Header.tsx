@@ -6,6 +6,7 @@ export function Header() {
   const titles: Record<string, string> = {
     dashboard: "Dashboard",
     chat: "Chat",
+    spark: "Spark",
     settings: "Settings",
   };
 

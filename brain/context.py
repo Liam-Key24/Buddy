@@ -17,6 +17,7 @@ class MemoryContextPayload(BaseModel):
     reflections: str | None = None
     workspace: str | None = None
     learned_patterns: str | None = None
+    stale_sparks: str | None = None
 
 
 def format_history(history: list) -> list[dict]:
@@ -53,6 +54,11 @@ def build_memory_block(memory: MemoryContextPayload | None) -> str:
         sections.append(f"## Recent Tools\n{memory.tools}")
     if memory.reflections:
         sections.append(f"## Reflections\n{memory.reflections}")
+    if memory.stale_sparks:
+        sections.append(
+            f"## Stale Sparks (need attention)\n{memory.stale_sparks}\n"
+            "Gently nudge the user about these when relevant. Use update_spark to archive, respark, or delete when they decide."
+        )
     if not sections:
         return ""
     return "Relevant project memory:\n\n" + "\n\n".join(sections)

@@ -1,12 +1,21 @@
-import { useState, KeyboardEvent } from "react";
+import { useState, KeyboardEvent, useEffect } from "react";
 import { PaperPlaneTilt } from "@phosphor-icons/react";
 import { useChatStore } from "../stores/useChatStore";
+import { useAppStore } from "../stores/useAppStore";
 import { sendMessage, createConversation } from "../lib/api";
 
 export function ChatInput() {
   const [text, setText] = useState("");
   const { activeConversationId, isStreaming, setActiveConversationId } =
     useChatStore();
+  const { pendingChatMessage, setPendingChatMessage } = useAppStore();
+
+  useEffect(() => {
+    if (pendingChatMessage) {
+      setText(pendingChatMessage);
+      setPendingChatMessage(null);
+    }
+  }, [pendingChatMessage, setPendingChatMessage]);
 
   async function handleSend() {
     const trimmed = text.trim();

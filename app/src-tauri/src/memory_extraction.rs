@@ -2,6 +2,8 @@ use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent, MergedContext, CO
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use buddy_database::Spark;
+
 use crate::intelligence_hooks::index_saved_sync;
 use crate::state::AppState;
 
@@ -17,6 +19,7 @@ pub struct BrainMemoryContext {
     pub reflections: Option<String>,
     pub workspace: Option<String>,
     pub learned_patterns: Option<String>,
+    pub stale_sparks: Option<String>,
 }
 
 impl From<&MergedContext> for BrainMemoryContext {
@@ -33,6 +36,7 @@ impl From<&MergedContext> for BrainMemoryContext {
             reflections: payload.reflections,
             workspace: payload.workspace,
             learned_patterns: payload.learned_patterns,
+            stale_sparks: None,
         }
     }
 }
@@ -59,6 +63,18 @@ pub fn memory_context_for(conversation_id: &str, state: &AppState) -> MemoryCont
     }
 }
 
+pub fn spark_memory_context(spark: &Spark, state: &AppState) -> MemoryContext {
+    if let Some(conv_id) = &spark.source_conversation_id {
+        memory_context_for(conv_id, state)
+    } else {
+        MemoryContext {
+            workspace_path: state.project_root.clone(),
+            conversation_id: None,
+            task_id: None,
+        }
+    }
+}
+
 pub async fn run_memory_extraction(
     state: &AppState,
     ctx: &MemoryContext,
@@ -72,6 +88,7 @@ pub async fn run_memory_extraction(
         MemoryEvent::SessionEnding => "handover",
         MemoryEvent::ContextLimitApproaching { .. } => "handover",
         MemoryEvent::ConversationDeleted { .. } => "conversation_archive",
+        MemoryEvent::SparkDeleted { .. } => "spark_archive",
         _ => return Ok(()),
     };
 
@@ -83,7 +100,12 @@ pub async fn run_memory_extraction(
 
     let task_outcome = match event {
         MemoryEvent::TaskCompleted { outcome } => Some(outcome.clone()),
-        MemoryEvent::ConversationDeleted { title, .. } => Some(format!("Conversation title: {title}")),
+        MemoryEvent::ConversationDeleted { title, .. } => {
+            Some(format!("Conversation title: {title}"))
+        }
+        MemoryEvent::SparkDeleted { content, tags, .. } => {
+            Some(format!("Tags: {}. Idea: {content}", tags.join(", ")))
+        }
         _ => None,
     };
 
@@ -121,6 +143,15 @@ pub async fn run_memory_extraction(
             title,
             conversation_id,
         } => Some((title.clone(), conversation_id.clone())),
+        _ => None,
+    };
+
+    let spark_meta = match event {
+        MemoryEvent::SparkDeleted {
+            spark_id,
+            content,
+            tags,
+        } => Some((spark_id.clone(), content.clone(), tags.clone())),
         _ => None,
     };
 
@@ -178,6 +209,48 @@ pub async fn run_memory_extraction(
                 topics,
                 key_facts,
                 decisions,
+            }
+        }
+        "spark_archive" => {
+            let (spark_id, content, tags) = match spark_meta {
+                Some(meta) => meta,
+                None => {
+                    warn!("spark_archive without SparkDeleted metadata");
+                    return Ok(());
+                }
+            };
+            let topics = response
+                .data
+                .get("topics")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let key_facts = response
+                .data
+                .get("key_facts")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            MemoryEvent::SparkArchivedSaved {
+                spark_id,
+                content,
+                tags,
+                summary: response
+                    .data
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                topics,
+                key_facts,
             }
         }
         "reflection" => MemoryEvent::ReflectionSaved {
@@ -297,6 +370,50 @@ pub async fn archive_conversation_to_memory(
         conversation_id: conversation_id.to_string(),
     };
     run_memory_extraction(state, ctx, &event, recent_messages).await
+}
+
+pub async fn archive_spark_to_memory(
+    state: &AppState,
+    ctx: &MemoryContext,
+    spark: &Spark,
+) -> Result<(), String> {
+    let event = MemoryEvent::SparkDeleted {
+        spark_id: spark.id.clone(),
+        content: spark.content.clone(),
+        tags: spark.tags.clone(),
+    };
+    run_memory_extraction(state, ctx, &event, &[]).await
+}
+
+pub async fn save_fallback_spark_archive(
+    state: &AppState,
+    ctx: &MemoryContext,
+    spark: &Spark,
+) -> Result<(), String> {
+    let tags = spark.tags.join(", ");
+    let summary = if spark.content.len() > 500 {
+        format!("{}...", &spark.content[..500])
+    } else {
+        spark.content.clone()
+    };
+
+    let event = MemoryEvent::SparkArchivedSaved {
+        spark_id: spark.id.clone(),
+        content: spark.content.clone(),
+        tags: spark.tags.clone(),
+        summary: format!("Deleted spark [{tags}]: {summary}"),
+        topics: vec![],
+        key_facts: vec![],
+    };
+
+    let result = state
+        .memory_manager
+        .handle_event(ctx, event)
+        .map_err(|e| e.to_string())?;
+
+    index_saved_sync(state, ctx, &result.saved).await;
+    info!("fallback spark archive saved");
+    Ok(())
 }
 
 pub async fn save_fallback_conversation_archive(

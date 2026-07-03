@@ -78,6 +78,7 @@ class ExtractRequest(BaseModel):
         "preference",
         "decision",
         "conversation_archive",
+        "spark_archive",
     ]
     workspace_summary: str
     recent_messages: list[HistoryMessage] = []

@@ -61,6 +61,17 @@ Output schema:
 
 Be concise. Preserve important facts, decisions, and context the user may refer to later. Focus on substance, not conversational filler."""
 
+SPARK_ARCHIVE_PROMPT = """You are Buddy's memory module. Compress a deleted spark (idea/note) into a durable memory summary as JSON only (no markdown fences).
+
+Output schema:
+{
+  "summary": "<concise prose summary of the idea and why it mattered>",
+  "topics": ["<topic1>", "<topic2>"],
+  "key_facts": ["<fact1>", "<fact2>"]
+}
+
+Be concise. Preserve the core idea and any actionable details the user may refer to later."""
+
 DECISION_PROMPT = """You are Buddy's memory module. Extract an architectural decision as JSON only (no markdown fences).
 
 Output schema:
@@ -76,4 +87,5 @@ EXTRACTION_PROMPTS = {
     "preference": PREFERENCE_PROMPT,
     "decision": DECISION_PROMPT,
     "conversation_archive": CONVERSATION_ARCHIVE_PROMPT,
+    "spark_archive": SPARK_ARCHIVE_PROMPT,
 }

@@ -31,7 +31,40 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "007_workspace",
         include_str!("../migrations/007_workspace.sql"),
     ),
+    ("008_sparks", include_str!("../migrations/008_sparks.sql")),
 ];
+
+pub const SPARK_STALE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+pub const SPARK_NUDGE_COOLDOWN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+pub const SPARK_TAGS: &[&str] = &[
+    "projects",
+    "the_land",
+    "the_van",
+    "general_life",
+    "travelling",
+];
+
+pub fn validate_spark_tags(tags: &[String]) -> Result<Vec<String>, DbError> {
+    if tags.is_empty() {
+        return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "at least one tag required".into(),
+        )));
+    }
+    let mut validated = Vec::new();
+    for tag in tags {
+        if SPARK_TAGS.contains(&tag.as_str()) {
+            if !validated.contains(tag) {
+                validated.push(tag.clone());
+            }
+        } else {
+            return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+                format!("invalid tag: {tag}").into(),
+            )));
+        }
+    }
+    Ok(validated)
+}
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -67,6 +100,20 @@ pub struct MessageSearchResult {
     pub role: String,
     pub content: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Spark {
+    pub id: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_nudged_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_conversation_id: Option<String>,
 }
 
 pub struct Database {
@@ -395,6 +442,223 @@ impl Database {
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    fn row_to_spark(row: &rusqlite::Row<'_>) -> Result<Spark, rusqlite::Error> {
+        let tags_json: String = row.get(2)?;
+        let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        Ok(Spark {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            tags,
+            status: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+            last_nudged_at: row.get(6)?,
+            source_conversation_id: row.get(7)?,
+        })
+    }
+
+    pub fn create_spark(
+        &self,
+        content: &str,
+        tags: &[String],
+        source_conversation_id: Option<&str>,
+    ) -> Result<Spark, DbError> {
+        let tags = validate_spark_tags(tags)?;
+        let now = chrono_now();
+        let spark = Spark {
+            id: Uuid::new_v4().to_string(),
+            content: content.trim().to_string(),
+            tags,
+            status: "active".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_nudged_at: None,
+            source_conversation_id: source_conversation_id.map(str::to_string),
+        };
+        let tags_json = serde_json::to_string(&spark.tags).map_err(|e| {
+            DbError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sparks (id, content, tags, status, created_at, updated_at, last_nudged_at, source_conversation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                spark.id,
+                spark.content,
+                tags_json,
+                spark.status,
+                spark.created_at,
+                spark.updated_at,
+                spark.last_nudged_at,
+                spark.source_conversation_id,
+            ],
+        )?;
+        Ok(spark)
+    }
+
+    pub fn list_sparks(&self, status: Option<&str>) -> Result<Vec<Spark>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, use_status) = match status {
+            Some(_) => (
+                "SELECT id, content, tags, status, created_at, updated_at, last_nudged_at, source_conversation_id
+                 FROM sparks WHERE status = ?1 ORDER BY updated_at DESC",
+                true,
+            ),
+            None => (
+                "SELECT id, content, tags, status, created_at, updated_at, last_nudged_at, source_conversation_id
+                 FROM sparks ORDER BY updated_at DESC",
+                false,
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if use_status {
+            stmt.query_map(params![status.unwrap()], Self::row_to_spark)?
+        } else {
+            stmt.query_map([], Self::row_to_spark)?
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn get_spark(&self, id: &str) -> Result<Spark, DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, content, tags, status, created_at, updated_at, last_nudged_at, source_conversation_id
+             FROM sparks WHERE id = ?1",
+            params![id],
+            Self::row_to_spark,
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+            other => DbError::from(other),
+        })
+    }
+
+    pub fn get_stale_sparks(
+        &self,
+        age_ms: i64,
+        nudge_cooldown_ms: i64,
+    ) -> Result<Vec<Spark>, DbError> {
+        let now = chrono_now();
+        let stale_before = now - age_ms;
+        let nudge_before = now - nudge_cooldown_ms;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, content, tags, status, created_at, updated_at, last_nudged_at, source_conversation_id
+             FROM sparks
+             WHERE status = 'active'
+               AND updated_at < ?1
+               AND (last_nudged_at IS NULL OR last_nudged_at < ?2)
+             ORDER BY updated_at ASC",
+        )?;
+        let rows = stmt.query_map(params![stale_before, nudge_before], Self::row_to_spark)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn count_stale_sparks(&self, age_ms: i64, nudge_cooldown_ms: i64) -> Result<i64, DbError> {
+        let now = chrono_now();
+        let stale_before = now - age_ms;
+        let nudge_before = now - nudge_cooldown_ms;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sparks
+             WHERE status = 'active'
+               AND updated_at < ?1
+               AND (last_nudged_at IS NULL OR last_nudged_at < ?2)",
+            params![stale_before, nudge_before],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)
+    }
+
+    pub fn update_spark(
+        &self,
+        id: &str,
+        action: &str,
+        content: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<Spark, DbError> {
+        let mut spark = self.get_spark(id)?;
+        let now = chrono_now();
+
+        match action {
+            "respark" => {
+                if let Some(c) = content {
+                    spark.content = c.trim().to_string();
+                }
+                if let Some(t) = tags {
+                    spark.tags = validate_spark_tags(t)?;
+                }
+                spark.updated_at = now;
+                spark.status = "active".to_string();
+            }
+            "archive" => {
+                spark.status = "archived".to_string();
+                spark.updated_at = now;
+            }
+            "edit" => {
+                if let Some(c) = content {
+                    spark.content = c.trim().to_string();
+                }
+                if let Some(t) = tags {
+                    spark.tags = validate_spark_tags(t)?;
+                }
+            }
+            other => {
+                return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    format!("unknown action: {other}").into(),
+                )));
+            }
+        }
+
+        let tags_json = serde_json::to_string(&spark.tags).map_err(|e| {
+            DbError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE sparks SET content = ?1, tags = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+            params![spark.content, tags_json, spark.status, spark.updated_at, spark.id],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(spark)
+    }
+
+    pub fn mark_sparks_nudged(&self, ids: &[String]) -> Result<(), DbError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = chrono_now();
+        let conn = self.conn.lock().unwrap();
+        for id in ids {
+            conn.execute(
+                "UPDATE sparks SET last_nudged_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_spark(&self, id: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM sparks WHERE id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn format_stale_sparks_context(sparks: &[Spark]) -> String {
+        sparks
+            .iter()
+            .map(|s| {
+                let tags = s.tags.join(", ");
+                format!("- [{}] (id: {}) {}", tags, s.id, s.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

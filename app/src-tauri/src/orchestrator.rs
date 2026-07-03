@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent, TaskState};
@@ -6,12 +5,13 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tracing::{error, info, instrument, warn};
 
-use buddy_database::DbError;
+use buddy_database::{DbError, SPARK_NUDGE_COOLDOWN_MS, SPARK_STALE_AGE_MS};
 
 use crate::intelligence_hooks::spawn_index_saved;
 use crate::memory_extraction::{
-    archive_conversation_to_memory, maybe_handover_on_context_limit, memory_context_for,
-    process_memory_followups, save_fallback_conversation_archive, BrainMemoryContext,
+    archive_conversation_to_memory, archive_spark_to_memory, maybe_handover_on_context_limit,
+    memory_context_for, process_memory_followups, save_fallback_conversation_archive,
+    save_fallback_spark_archive, spark_memory_context, BrainMemoryContext,
 };
 use crate::services::ProcessManager;
 use crate::state::AppState;
@@ -234,7 +234,9 @@ pub async fn send_message(
         let _ = state.db.update_conversation_title(&conversation_id, &title);
     }
 
-    let memory = BrainMemoryContext::from(&merged);
+    let mut memory = BrainMemoryContext::from(&merged);
+    memory.stale_sparks = build_stale_sparks_context(state);
+
     let client = reqwest::Client::new();
 
     let plan: Plan = client
@@ -264,54 +266,50 @@ pub async fn send_message(
     if plan.intent == "tool_use" {
         if let (Some(tool_name), Some(tool_input)) = (&plan.tool, &plan.tool_input) {
             let start = Instant::now();
-            let tool_result = match state.task_runner.run(tool_name, tool_input) {
-                Ok(run_result) => {
-                    let output = run_result.output.clone();
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    let event_result = state.memory_manager.handle_event(
-                        &ctx,
-                        MemoryEvent::ToolExecuted {
-                            tool: tool_name.clone(),
-                            params: tool_input.clone(),
-                            result: output.clone(),
-                            duration_ms,
-                            success: true,
-                        },
-                    );
-                    if let Ok(r) = event_result {
-                        spawn_index_saved(state, &ctx, &r.saved);
+            let enriched_input =
+                enrich_spark_tool_input(tool_name, tool_input, &conversation_id);
+
+            let tool_result = if tool_name == "update_spark" {
+                if let Some(spark_id) = parse_spark_delete_id(&enriched_input) {
+                    match delete_spark_with_archive(state, &app, &spark_id).await {
+                        Ok(()) => {
+                            let output =
+                                format!("Spark {spark_id} deleted and archived to memory");
+                            let duration_ms = start.elapsed().as_millis() as u64;
+                            let _ = state.memory_manager.handle_event(
+                                &ctx,
+                                MemoryEvent::ToolExecuted {
+                                    tool: tool_name.clone(),
+                                    params: enriched_input.clone(),
+                                    result: output.clone(),
+                                    duration_ms,
+                                    success: true,
+                                },
+                            );
+                            emit_spark_updates(&app, state);
+                            Ok(output)
+                        }
+                        Err(e) => Err(e),
                     }
-                    Ok(output)
+                } else {
+                    run_tool_with_tracking(
+                        state,
+                        &app,
+                        &ctx,
+                        tool_name,
+                        &enriched_input,
+                        start,
+                    )
                 }
-                Err(e) => {
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    let err_msg = e.to_string();
-                    let exec_result = state.memory_manager.handle_event(
-                        &ctx,
-                        MemoryEvent::ToolExecuted {
-                            tool: tool_name.clone(),
-                            params: tool_input.clone(),
-                            result: err_msg.clone(),
-                            duration_ms,
-                            success: false,
-                        },
-                    );
-                    if let Ok(r) = exec_result {
-                        spawn_index_saved(state, &ctx, &r.saved);
-                    }
-                    let fail_result = state.memory_manager.handle_event(
-                        &ctx,
-                        MemoryEvent::ToolFailed {
-                            error: err_msg.clone(),
-                            cause: err_msg.clone(),
-                            resolution: None,
-                        },
-                    );
-                    if let Ok(r) = fail_result {
-                        spawn_index_saved(state, &ctx, &r.saved);
-                    }
-                    Err(err_msg)
-                }
+            } else {
+                run_tool_with_tracking(
+                    state,
+                    &app,
+                    &ctx,
+                    tool_name,
+                    &enriched_input,
+                    start,
+                )
             };
 
             match tool_result {
@@ -463,7 +461,7 @@ async fn archive_before_delete(
 
 #[instrument(skip(state), fields(conversation_id = %conversation_id))]
 pub async fn delete_conversation(
-    state: &Arc<AppState>,
+    state: &AppState,
     conversation_id: &str,
 ) -> Result<(), String> {
     let conversation = match state.db.get_conversation(conversation_id) {
@@ -499,4 +497,158 @@ pub async fn delete_conversation(
 
     info!(conversation_id = %conversation_id, "conversation deleted");
     Ok(())
+}
+
+async fn archive_spark_before_delete(
+    state: &AppState,
+    ctx: &MemoryContext,
+    spark: &buddy_database::Spark,
+) {
+    let brain_ok = ProcessManager::check_brain_ready(state).await;
+    if brain_ok {
+        if let Err(e) = archive_spark_to_memory(state, ctx, spark).await {
+            warn!(error = %e, "spark archive failed, using fallback");
+            if let Err(e) = save_fallback_spark_archive(state, ctx, spark).await {
+                warn!(error = %e, "fallback spark archive failed");
+            }
+        }
+    } else {
+        info!("brain offline, using fallback archive for spark delete");
+        if let Err(e) = save_fallback_spark_archive(state, ctx, spark).await {
+            warn!(error = %e, "fallback spark archive failed");
+        }
+    }
+}
+
+#[instrument(skip(state, app), fields(spark_id = %spark_id))]
+pub async fn delete_spark_with_archive(
+    state: &AppState,
+    app: &AppHandle,
+    spark_id: &str,
+) -> Result<(), String> {
+    let spark = match state.db.get_spark(spark_id) {
+        Ok(spark) => spark,
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let ctx = spark_memory_context(&spark, state);
+    archive_spark_before_delete(state, &ctx, &spark).await;
+
+    match state.db.delete_spark(spark_id) {
+        Ok(()) => {}
+        Err(DbError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    }
+
+    emit_spark_updates(app, state);
+    info!(spark_id = %spark_id, "spark deleted");
+    Ok(())
+}
+
+fn parse_spark_delete_id(input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    let action = value.get("action")?.as_str()?;
+    if action != "delete" {
+        return None;
+    }
+    value.get("id")?.as_str().map(String::from)
+}
+
+fn run_tool_with_tracking(
+    state: &AppState,
+    app: &AppHandle,
+    ctx: &MemoryContext,
+    tool_name: &str,
+    tool_input: &str,
+    start: Instant,
+) -> Result<String, String> {
+    match state.task_runner.run(tool_name, tool_input) {
+        Ok(run_result) => {
+            let output = run_result.output.clone();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let event_result = state.memory_manager.handle_event(
+                ctx,
+                MemoryEvent::ToolExecuted {
+                    tool: tool_name.to_string(),
+                    params: tool_input.to_string(),
+                    result: output.clone(),
+                    duration_ms,
+                    success: true,
+                },
+            );
+            if let Ok(r) = event_result {
+                spawn_index_saved(state, ctx, &r.saved);
+            }
+            if tool_name == "save_spark" || tool_name == "update_spark" {
+                emit_spark_updates(app, state);
+            }
+            Ok(output)
+        }
+        Err(e) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let err_msg = e.to_string();
+            let exec_result = state.memory_manager.handle_event(
+                ctx,
+                MemoryEvent::ToolExecuted {
+                    tool: tool_name.to_string(),
+                    params: tool_input.to_string(),
+                    result: err_msg.clone(),
+                    duration_ms,
+                    success: false,
+                },
+            );
+            if let Ok(r) = exec_result {
+                spawn_index_saved(state, ctx, &r.saved);
+            }
+            let fail_result = state.memory_manager.handle_event(
+                ctx,
+                MemoryEvent::ToolFailed {
+                    error: err_msg.clone(),
+                    cause: err_msg.clone(),
+                    resolution: None,
+                },
+            );
+            if let Ok(r) = fail_result {
+                spawn_index_saved(state, ctx, &r.saved);
+            }
+            Err(err_msg)
+        }
+    }
+}
+
+fn build_stale_sparks_context(state: &AppState) -> Option<String> {
+    let sparks = state
+        .db
+        .get_stale_sparks(SPARK_STALE_AGE_MS, SPARK_NUDGE_COOLDOWN_MS)
+        .ok()?;
+    if sparks.is_empty() {
+        return None;
+    }
+    Some(buddy_database::Database::format_stale_sparks_context(
+        &sparks,
+    ))
+}
+
+fn enrich_spark_tool_input(tool_name: &str, tool_input: &str, conversation_id: &str) -> String {
+    if tool_name != "save_spark" {
+        return tool_input.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(tool_input) else {
+        return tool_input.to_string();
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("source_conversation_id")
+            .or_insert_with(|| serde_json::Value::String(conversation_id.to_string()));
+    }
+    value.to_string()
+}
+
+fn emit_spark_updates(app: &AppHandle, state: &AppState) {
+    let count = state
+        .db
+        .count_stale_sparks(SPARK_STALE_AGE_MS, SPARK_NUDGE_COOLDOWN_MS)
+        .unwrap_or(0);
+    let _ = app.emit("sparks-stale", count);
+    let _ = app.emit("sparks-updated", ());
 }

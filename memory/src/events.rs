@@ -97,6 +97,19 @@ pub enum MemoryEvent {
         key_facts: Vec<String>,
         decisions: Vec<String>,
     },
+    SparkDeleted {
+        spark_id: String,
+        content: String,
+        tags: Vec<String>,
+    },
+    SparkArchivedSaved {
+        spark_id: String,
+        content: String,
+        tags: Vec<String>,
+        summary: String,
+        topics: Vec<String>,
+        key_facts: Vec<String>,
+    },
 }
 
 impl MemoryEvent {
@@ -109,6 +122,7 @@ impl MemoryEvent {
                 | MemoryEvent::SessionEnding
                 | MemoryEvent::ContextLimitApproaching { .. }
                 | MemoryEvent::ConversationDeleted { .. }
+                | MemoryEvent::SparkDeleted { .. }
         )
     }
 }

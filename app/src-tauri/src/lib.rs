@@ -4,6 +4,7 @@ mod logging;
 mod memory_extraction;
 mod orchestrator;
 mod services;
+mod spark_checker;
 mod state;
 
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let path = db_path(app.handle());
             info!(path = %path.display(), "opening database");
@@ -33,6 +35,8 @@ pub fn run() {
 
             app.manage(state.clone());
             app.manage(process_manager.clone());
+
+            spark_checker::spawn_spark_checker(app.handle().clone(), state.clone());
 
             let pm = process_manager.clone();
             let st = state.clone();
@@ -65,6 +69,12 @@ pub fn run() {
             commands::run_tool,
             commands::get_settings,
             commands::set_setting,
+            commands::list_sparks,
+            commands::create_spark,
+            commands::update_spark,
+            commands::delete_spark,
+            commands::get_stale_spark_count,
+            commands::get_stale_sparks,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
