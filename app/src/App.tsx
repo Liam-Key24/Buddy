@@ -8,14 +8,18 @@ import { PageTransition } from "./components/PageTransition";
 import { Settings } from "./pages/Settings";
 import { Dashboard } from "./pages/Dashboard";
 import { Spark } from "./pages/Spark";
+import { CodeAgent } from "./pages/CodeAgent";
 import { useAppStore } from "./stores/useAppStore";
 import { useChatStore } from "./stores/useChatStore";
+import { useCodeAgentStore } from "./stores/useCodeAgentStore";
 import { useSparkStore } from "./stores/useSparkStore";
 import {
   fetchServiceStatus,
+  loadCodexMessages,
   loadConversations,
   loadMessages,
   startBrain,
+  subscribeCodexEvents,
   subscribeSparkEvents,
 } from "./lib/api";
 
@@ -44,6 +48,19 @@ function App() {
       () => setCurrentPage("spark"),
     );
 
+    const unsubCodex = subscribeCodexEvents(
+      (chunk) => useCodeAgentStore.getState().appendStreaming(chunk),
+      () => {
+        const convId = useCodeAgentStore.getState().activeConversationId;
+        if (convId) {
+          loadCodexMessages(convId).catch(console.error);
+        }
+        useCodeAgentStore.getState().clearStreaming();
+      },
+      (message) => console.error("codex error:", message),
+      (url) => useCodeAgentStore.getState().setPreviewUrl(url),
+    );
+
     async function pollStatus() {
       try {
         const status = await fetchServiceStatus();
@@ -62,6 +79,7 @@ function App() {
       clearInterval(interval);
       clearInterval(staleInterval);
       unsub();
+      unsubCodex();
     };
   }, [setMlxStatus, setBrainStatus, refresh, refreshStale, setCurrentPage]);
 
@@ -85,6 +103,8 @@ function App() {
               <Dashboard />
             ) : page === "spark" ? (
               <Spark />
+            ) : page === "code" ? (
+              <CodeAgent />
             ) : (
               <>
                 <ChatWindow />

@@ -32,6 +32,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../migrations/007_workspace.sql"),
     ),
     ("008_sparks", include_str!("../migrations/008_sparks.sql")),
+    (
+        "009_agents_and_audit",
+        include_str!("../migrations/009_agents_and_audit.sql"),
+    ),
+    ("010_calendar", include_str!("../migrations/010_calendar.sql")),
 ];
 
 pub const SPARK_STALE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -80,6 +85,27 @@ pub struct Conversation {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default = "default_conversation_kind")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+}
+
+fn default_conversation_kind() -> String {
+    "buddy".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalAction {
+    pub id: String,
+    pub action_type: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_json: Option<String>,
+    pub approved: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +140,50 @@ pub struct Spark {
     pub last_nudged_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    pub start_at: i64,
+    pub end_at: i64,
+    pub timezone: String,
+    pub priority: String,
+    pub movable: bool,
+    pub confidence: f64,
+    pub kind: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_event_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Fields required to create a new calendar event in the local mirror.
+#[derive(Debug, Clone, Default)]
+pub struct NewCalendarEvent {
+    pub title: String,
+    pub description: Option<String>,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub start_at: i64,
+    pub end_at: i64,
+    pub timezone: String,
+    pub priority: String,
+    pub movable: bool,
+    pub confidence: f64,
+    pub kind: String,
+    pub status: String,
+    pub provider: Option<String>,
+    pub provider_event_id: Option<String>,
 }
 
 pub struct Database {
@@ -213,35 +283,106 @@ impl Database {
 
     #[instrument(skip(self))]
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, DbError> {
+        self.list_conversations_by_kind(None)
+    }
+
+    pub fn list_conversations_by_kind(
+        &self,
+        kind: Option<&str>,
+    ) -> Result<Vec<Conversation>, DbError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
+        let mut sql = String::from(
+            "SELECT id, title, created_at, updated_at, kind, focus_mode, workspace_path \
+             FROM conversations",
+        );
+        if kind.is_some() {
+            sql.push_str(" WHERE kind = ?1");
+        }
+        sql.push_str(" ORDER BY updated_at DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(Conversation {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 created_at: row.get(2)?,
                 updated_at: row.get(3)?,
+                kind: row.get(4)?,
+                focus_mode: row.get(5)?,
+                workspace_path: row.get(6)?,
             })
-        })?;
+        };
+        let rows = if let Some(kind) = kind {
+            stmt.query_map(params![kind], map_row)?
+        } else {
+            stmt.query_map([], map_row)?
+        };
         rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
     }
 
     pub fn create_conversation(&self, title: &str) -> Result<Conversation, DbError> {
+        self.create_conversation_with_kind(title, "buddy", None, None)
+    }
+
+    pub fn create_conversation_with_kind(
+        &self,
+        title: &str,
+        kind: &str,
+        focus_mode: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<Conversation, DbError> {
         let now = chrono_now();
         let conv = Conversation {
             id: Uuid::new_v4().to_string(),
             title: title.to_string(),
             created_at: now,
             updated_at: now,
+            kind: kind.to_string(),
+            focus_mode: focus_mode.map(str::to_string),
+            workspace_path: workspace_path.map(str::to_string),
         };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            params![conv.id, conv.title, conv.created_at, conv.updated_at],
+            "INSERT INTO conversations (id, title, created_at, updated_at, kind, focus_mode, workspace_path) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                conv.id,
+                conv.title,
+                conv.created_at,
+                conv.updated_at,
+                conv.kind,
+                conv.focus_mode,
+                conv.workspace_path
+            ],
         )?;
         Ok(conv)
+    }
+
+    pub fn set_conversation_focus(&self, id: &str, focus_mode: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE conversations SET focus_mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![focus_mode, chrono_now(), id],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_conversation_workspace(
+        &self,
+        id: &str,
+        workspace_path: &str,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE conversations SET workspace_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![workspace_path, chrono_now(), id],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
     }
 
     pub fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
@@ -256,7 +397,8 @@ impl Database {
     pub fn get_conversation(&self, id: &str) -> Result<Conversation, DbError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?1",
+            "SELECT id, title, created_at, updated_at, kind, focus_mode, workspace_path \
+             FROM conversations WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Conversation {
@@ -264,6 +406,9 @@ impl Database {
                     title: row.get(1)?,
                     created_at: row.get(2)?,
                     updated_at: row.get(3)?,
+                    kind: row.get(4)?,
+                    focus_mode: row.get(5)?,
+                    workspace_path: row.get(6)?,
                 })
             },
         )
@@ -442,6 +587,78 @@ impl Database {
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn log_external_action(
+        &self,
+        action_type: &str,
+        summary: &str,
+        detail_json: Option<&str>,
+        approved: bool,
+    ) -> Result<ExternalAction, DbError> {
+        let action = ExternalAction {
+            id: Uuid::new_v4().to_string(),
+            action_type: action_type.to_string(),
+            summary: summary.to_string(),
+            detail_json: detail_json.map(str::to_string),
+            approved,
+            created_at: chrono_now(),
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO external_actions (id, action_type, summary, detail_json, approved, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                action.id,
+                action.action_type,
+                action.summary,
+                action.detail_json,
+                action.approved as i64,
+                action.created_at
+            ],
+        )?;
+        Ok(action)
+    }
+
+    pub fn list_external_actions(&self, limit: usize) -> Result<Vec<ExternalAction>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, action_type, summary, detail_json, approved, created_at \
+             FROM external_actions ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let approved: i64 = row.get(4)?;
+            Ok(ExternalAction {
+                id: row.get(0)?,
+                action_type: row.get(1)?,
+                summary: row.get(2)?,
+                detail_json: row.get(3)?,
+                approved: approved != 0,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn log_file_operation(
+        &self,
+        path: &str,
+        op: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO file_operations (id, path, op, conversation_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                path,
+                op,
+                conversation_id,
+                chrono_now()
+            ],
+        )?;
+        Ok(())
     }
 
     fn row_to_spark(row: &rusqlite::Row<'_>) -> Result<Spark, rusqlite::Error> {
@@ -650,6 +867,226 @@ impl Database {
         Ok(())
     }
 
+    fn row_to_calendar_event(row: &rusqlite::Row<'_>) -> Result<CalendarEvent, rusqlite::Error> {
+        let movable: i64 = row.get(9)?;
+        Ok(CalendarEvent {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            description: row.get(2)?,
+            source_type: row.get(3)?,
+            source_id: row.get(4)?,
+            start_at: row.get(5)?,
+            end_at: row.get(6)?,
+            timezone: row.get(7)?,
+            priority: row.get(8)?,
+            movable: movable != 0,
+            confidence: row.get(10)?,
+            kind: row.get(11)?,
+            status: row.get(12)?,
+            provider: row.get(13)?,
+            provider_event_id: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    }
+
+    const CALENDAR_COLUMNS: &'static str = "id, title, description, source_type, source_id, \
+         start_at, end_at, timezone, priority, movable, confidence, kind, status, \
+         provider, provider_event_id, created_at, updated_at";
+
+    pub fn create_calendar_event(
+        &self,
+        input: NewCalendarEvent,
+    ) -> Result<CalendarEvent, DbError> {
+        let now = chrono_now();
+        let event = CalendarEvent {
+            id: Uuid::new_v4().to_string(),
+            title: input.title,
+            description: input.description,
+            source_type: if input.source_type.is_empty() {
+                "manual".to_string()
+            } else {
+                input.source_type
+            },
+            source_id: input.source_id,
+            start_at: input.start_at,
+            end_at: input.end_at,
+            timezone: if input.timezone.is_empty() {
+                "UTC".to_string()
+            } else {
+                input.timezone
+            },
+            priority: if input.priority.is_empty() {
+                "normal".to_string()
+            } else {
+                input.priority
+            },
+            movable: input.movable,
+            confidence: input.confidence,
+            kind: if input.kind.is_empty() {
+                "focus".to_string()
+            } else {
+                input.kind
+            },
+            status: if input.status.is_empty() {
+                "proposed".to_string()
+            } else {
+                input.status
+            },
+            provider: input.provider,
+            provider_event_id: input.provider_event_id,
+            created_at: now,
+            updated_at: now,
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO calendar_events (id, title, description, source_type, source_id, \
+             start_at, end_at, timezone, priority, movable, confidence, kind, status, \
+             provider, provider_event_id, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                event.id,
+                event.title,
+                event.description,
+                event.source_type,
+                event.source_id,
+                event.start_at,
+                event.end_at,
+                event.timezone,
+                event.priority,
+                event.movable as i64,
+                event.confidence,
+                event.kind,
+                event.status,
+                event.provider,
+                event.provider_event_id,
+                event.created_at,
+                event.updated_at,
+            ],
+        )?;
+        Ok(event)
+    }
+
+    pub fn get_calendar_event(&self, id: &str) -> Result<CalendarEvent, DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM calendar_events WHERE id = ?1",
+                Self::CALENDAR_COLUMNS
+            ),
+            params![id],
+            Self::row_to_calendar_event,
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+            other => DbError::from(other),
+        })
+    }
+
+    /// Lists events whose start falls at or after `from_ms`, ordered soonest
+    /// first. Cancelled events are excluded so the scheduler ignores freed slots.
+    pub fn list_upcoming_calendar_events(
+        &self,
+        from_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<CalendarEvent>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM calendar_events \
+             WHERE end_at >= ?1 AND status != 'cancelled' \
+             ORDER BY start_at ASC LIMIT ?2",
+            Self::CALENDAR_COLUMNS
+        ))?;
+        let rows = stmt.query_map(params![from_ms, limit as i64], Self::row_to_calendar_event)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    /// Returns active (non-cancelled) events that overlap the given window,
+    /// optionally excluding a specific event id (e.g. the one being moved).
+    pub fn calendar_events_overlapping(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        exclude_id: Option<&str>,
+    ) -> Result<Vec<CalendarEvent>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM calendar_events \
+             WHERE status != 'cancelled' AND start_at < ?2 AND end_at > ?1 \
+             AND (?3 IS NULL OR id != ?3) \
+             ORDER BY start_at ASC",
+            Self::CALENDAR_COLUMNS
+        ))?;
+        let rows = stmt.query_map(
+            params![start_at, end_at, exclude_id],
+            Self::row_to_calendar_event,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn update_calendar_event_time(
+        &self,
+        id: &str,
+        start_at: i64,
+        end_at: i64,
+        status: &str,
+    ) -> Result<CalendarEvent, DbError> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let affected = conn.execute(
+                "UPDATE calendar_events SET start_at = ?1, end_at = ?2, status = ?3, updated_at = ?4 \
+                 WHERE id = ?5",
+                params![start_at, end_at, status, chrono_now(), id],
+            )?;
+            if affected == 0 {
+                return Err(DbError::NotFound(id.to_string()));
+            }
+        }
+        self.get_calendar_event(id)
+    }
+
+    pub fn update_calendar_event_provider(
+        &self,
+        id: &str,
+        provider: Option<&str>,
+        provider_event_id: Option<&str>,
+        status: &str,
+    ) -> Result<CalendarEvent, DbError> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let affected = conn.execute(
+                "UPDATE calendar_events SET provider = ?1, provider_event_id = ?2, status = ?3, \
+                 updated_at = ?4 WHERE id = ?5",
+                params![provider, provider_event_id, status, chrono_now(), id],
+            )?;
+            if affected == 0 {
+                return Err(DbError::NotFound(id.to_string()));
+            }
+        }
+        self.get_calendar_event(id)
+    }
+
+    pub fn set_calendar_event_status(&self, id: &str, status: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE calendar_events SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, chrono_now(), id],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn delete_calendar_event(&self, id: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM calendar_events WHERE id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn format_stale_sparks_context(sparks: &[Spark]) -> String {
         sparks
             .iter()
@@ -713,6 +1150,68 @@ mod tests {
             })
             .unwrap();
         assert!(versions.contains(&"003_storage".to_string()));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn calendar_events_crud_and_overlap() {
+        let dir = std::env::temp_dir().join(format!("buddy-db-cal-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buddy.db");
+
+        let db = Database::open(&path).unwrap();
+        let base = 1_000_000_000_000i64;
+        let event = db
+            .create_calendar_event(NewCalendarEvent {
+                title: "Deep code block".to_string(),
+                start_at: base,
+                end_at: base + 90 * 60 * 1000,
+                movable: true,
+                confidence: 1.0,
+                priority: "normal".to_string(),
+                kind: "focus".to_string(),
+                status: "scheduled".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(event.source_type, "manual");
+        assert_eq!(event.timezone, "UTC");
+
+        let upcoming = db.list_upcoming_calendar_events(base - 1000, 10).unwrap();
+        assert_eq!(upcoming.len(), 1);
+
+        // Overlapping window should find the event.
+        let overlap = db
+            .calendar_events_overlapping(base + 60 * 60 * 1000, base + 120 * 60 * 1000, None)
+            .unwrap();
+        assert_eq!(overlap.len(), 1);
+
+        // Excluding the event id should return nothing.
+        let overlap_excluded = db
+            .calendar_events_overlapping(base, base + 90 * 60 * 1000, Some(&event.id))
+            .unwrap();
+        assert!(overlap_excluded.is_empty());
+
+        // Move the event two hours later; old slot should now be free.
+        let moved = db
+            .update_calendar_event_time(
+                &event.id,
+                base + 2 * 60 * 60 * 1000,
+                base + 2 * 60 * 60 * 1000 + 90 * 60 * 1000,
+                "moved",
+            )
+            .unwrap();
+        assert_eq!(moved.status, "moved");
+        let old_slot = db
+            .calendar_events_overlapping(base, base + 90 * 60 * 1000, None)
+            .unwrap();
+        assert!(old_slot.is_empty());
+
+        // Cancelled events are excluded from overlap and upcoming queries.
+        db.set_calendar_event_status(&event.id, "cancelled").unwrap();
+        let after_cancel = db.list_upcoming_calendar_events(base - 1000, 10).unwrap();
+        assert!(after_cancel.is_empty());
 
         let _ = fs::remove_dir_all(dir);
     }

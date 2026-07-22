@@ -63,6 +63,30 @@ fn seed_default_settings(db: &Database) {
     let defaults = [
         ("brain_url", DEFAULT_BRAIN_URL),
         ("mlx_url", DEFAULT_MLX_URL),
+        (
+            "fs_excluded_paths",
+            r#"["Library",".Trash",".ssh",".gnupg",".cache","Pictures"]"#,
+        ),
+        ("email_greeting", "Hi,"),
+        ("email_signature", ""),
+        (
+            "email_body_template",
+            "{greeting}\n\n{body}\n\n{signature}",
+        ),
+        ("codex_model", "gpt-5.5"),
+        ("code_agent_backend", "cursor"),
+        ("code_model", "auto"),
+        ("calendar_provider", "calcom_self_hosted"),
+        ("calcom_base_url", ""),
+        ("calcom_api_version", "2024-08-13"),
+        ("calcom_event_type_id", ""),
+        ("calcom_username", ""),
+        ("calcom_timezone", ""),
+        ("calendar_default_duration_min", "30"),
+        ("calendar_auto_create_threshold", "0.85"),
+        ("calendar_working_windows", "09:00-12:00,14:00-18:00"),
+        ("calendar_min_focus_min", "90"),
+        ("calendar_move_horizon_hours", "48"),
     ];
     for (key, value) in defaults {
         if db.get_setting(key).ok().flatten().is_none() {

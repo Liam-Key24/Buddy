@@ -5,12 +5,14 @@ export type ServiceStatus = "online" | "offline" | "checking";
 interface AppState {
   mlxStatus: ServiceStatus;
   brainStatus: ServiceStatus;
-  currentPage: "dashboard" | "chat" | "spark" | "settings";
+  currentPage: "dashboard" | "chat" | "spark" | "settings" | "code";
   sidebarCollapsed: boolean;
   pendingChatMessage: string | null;
   setMlxStatus: (status: ServiceStatus) => void;
   setBrainStatus: (status: ServiceStatus) => void;
-  setCurrentPage: (page: "dashboard" | "chat" | "spark" | "settings") => void;
+  setCurrentPage: (
+    page: "dashboard" | "chat" | "spark" | "settings" | "code",
+  ) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
   setPendingChatMessage: (message: string | null) => void;

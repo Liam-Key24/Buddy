@@ -4,6 +4,7 @@ import {
   CaretDoubleRight,
   ChatsCircle,
   CircleNotch,
+  Code,
   Cpu,
   Gear,
   Lightning,
@@ -15,8 +16,17 @@ import { useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
 import { useConversationStore } from "../stores/useConversationStore";
 import { useChatStore } from "../stores/useChatStore";
+import {
+  FocusMode,
+  useCodeAgentStore,
+} from "../stores/useCodeAgentStore";
 import { useSparkStore } from "../stores/useSparkStore";
-import { createConversation, deleteConversation } from "../lib/api";
+import {
+  createConversation,
+  createCodexConversation,
+  deleteConversation,
+  loadCodexMessages,
+} from "../lib/api";
 
 function StatusIcon({
   icon,
@@ -95,7 +105,20 @@ export function Sidebar() {
     setSidebarCollapsed,
   } = useAppStore();
   const { staleCount } = useSparkStore();
+  const {
+    setActiveConversationId: setCodeConversationId,
+    setMessages: setCodeMessages,
+    setFocus: setCodeFocus,
+    setWorkspacePath: setCodeWorkspacePath,
+    setPreviewUrl: setCodePreviewUrl,
+    activeConversationId: activeCodeConversationId,
+  } = useCodeAgentStore();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const isCodePage = currentPage === "code";
+  const visibleConversations = conversations.filter((c) =>
+    isCodePage ? c.kind === "codex" : c.kind !== "codex",
+  );
 
   async function handleNewChat() {
     const conv = await createConversation();
@@ -103,6 +126,31 @@ export function Sidebar() {
     setMessages([]);
     setCurrentPage("chat");
     setSidebarCollapsed(false);
+  }
+
+  async function handleNewProject() {
+    const conv = await createCodexConversation("New project", "planning");
+    useConversationStore.getState().addConversation(conv);
+    setCodeConversationId(conv.id);
+    setCodeMessages([]);
+    setCodeFocus("planning");
+    setCodeWorkspacePath(conv.workspace_path ?? null);
+    setCodePreviewUrl(null);
+    setCurrentPage("code");
+    setSidebarCollapsed(false);
+  }
+
+  function openCodeConversation(
+    id: string,
+    focus?: string | null,
+    workspacePath?: string | null,
+  ) {
+    setCodeConversationId(id);
+    setCodeFocus((focus as FocusMode) || "planning");
+    setCodeWorkspacePath(workspacePath ?? null);
+    setCodePreviewUrl(null);
+    loadCodexMessages(id).catch(console.error);
+    setCurrentPage("code");
   }
 
   async function handleDelete(id: string, e: React.MouseEvent) {
@@ -197,6 +245,19 @@ export function Sidebar() {
             </span>
           </RailButton>
           <RailButton
+            active={currentPage === "code"}
+            onClick={() => {
+              setCurrentPage("code");
+              if (sidebarCollapsed) setSidebarCollapsed(false);
+            }}
+            title="Code Agent"
+          >
+            <Code
+              size={20}
+              weight={currentPage === "code" ? "fill" : "regular"}
+            />
+          </RailButton>
+          <RailButton
             active={currentPage === "settings"}
             onClick={() => setCurrentPage("settings")}
             title="Settings"
@@ -233,41 +294,53 @@ export function Sidebar() {
               <CaretDoubleLeft size={16} />
             </button>
             <p className="text-center text-[10px] font-medium tracking-wider text-zinc-500">
-              CHATS
+              {isCodePage ? "PROJECTS" : "CHATS"}
             </p>
             <button
               type="button"
-              onClick={handleNewChat}
+              onClick={isCodePage ? handleNewProject : handleNewChat}
               className="flex h-7 w-7 items-center justify-center justify-self-end rounded-lg text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300"
-              title="New chat"
+              title={isCodePage ? "New project" : "New chat"}
             >
               <Plus size={14} weight="bold" />
             </button>
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 pb-3">
-            {conversations.map((conv) => {
-              const isActive =
-                activeConversationId === conv.id && currentPage === "chat";
+            {visibleConversations.map((conv) => {
+              const isActive = isCodePage
+                ? activeCodeConversationId === conv.id
+                : activeConversationId === conv.id && currentPage === "chat";
               const deleteBlocked =
-                isStreaming && activeConversationId === conv.id;
+                !isCodePage && isStreaming && activeConversationId === conv.id;
               const showDelete =
                 deletingId === conv.id || isActive;
+              const accent = isCodePage
+                ? "bg-violet-500/10 font-medium text-violet-400"
+                : "bg-blue-500/10 font-medium text-blue-400";
 
               return (
                 <div
                   key={conv.id}
                   className={`group mb-0.5 flex w-full items-center rounded-lg text-sm transition ${
                     isActive
-                      ? "bg-blue-500/10 font-medium text-blue-400"
+                      ? accent
                       : "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
                   }`}
                 >
                   <button
                     type="button"
                     onClick={() => {
-                      setActiveConversationId(conv.id);
-                      setCurrentPage("chat");
+                      if (isCodePage) {
+                        openCodeConversation(
+                          conv.id,
+                          conv.focus_mode,
+                          conv.workspace_path,
+                        );
+                      } else {
+                        setActiveConversationId(conv.id);
+                        setCurrentPage("chat");
+                      }
                     }}
                     className="min-w-0 flex-1 truncate px-2.5 py-2 text-left"
                   >

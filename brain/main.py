@@ -99,6 +99,26 @@ class EmbedResponse(BaseModel):
     dimensions: int
 
 
+def _planner_error_notice(err: Exception) -> str:
+    err_type = type(err).__name__
+    if err_type == "APIConnectionError":
+        return (
+            "Heads up: I couldn't reach the MLX model service just now "
+            "(connection error)."
+        )
+    return f"Heads up: the planner hit an error ({err_type})."
+
+
+def _responder_error_notice(err: Exception) -> str:
+    err_type = type(err).__name__
+    if err_type == "APIConnectionError":
+        return (
+            "I couldn't reach the MLX responder right now "
+            "(connection error), so this is a fallback reply."
+        )
+    return f"The responder hit an error ({err_type}), so this is a fallback reply."
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -111,6 +131,7 @@ def chat_plan(req: PlanRequest):
 
     messages = build_messages(req.memory, req.history, req.message)
 
+    raw = ""
     try:
         raw = mlx.complete(
             system=PLAN_SYSTEM_PROMPT,
@@ -121,7 +142,42 @@ def chat_plan(req: PlanRequest):
         plan = parse_plan(raw, req.message)
     except Exception as e:
         logger.warning("mlx unavailable, using heuristic plan: %s", e)
+        # #region agent log
+        try:
+            import json as _json
+            import time as _time
+
+            with open(
+                "/Users/liamgk/Desktop/BUDDY/.cursor/debug-500eec.log", "a"
+            ) as _f:
+                _f.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "500eec",
+                            "location": "main.py:chat_plan",
+                            "message": "mlx complete/parse exception, heuristic fallback",
+                            "data": {
+                                "error": type(e).__name__,
+                                "errorMsg": str(e)[:200],
+                                "messagePreview": req.message[:120],
+                                "rawPreview": raw[:200],
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                            "hypothesisId": "H2",
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # #endregion
         plan = parse_plan("", req.message)
+        if plan.intent == "chat":
+            base_response = plan.response or "I'm here to help."
+            plan.response = (
+                f"{_planner_error_notice(e)} {base_response} "
+                "Please check that MLX is running and reachable."
+            )
 
     logger.info(
         "plan parsed intent=%s tool=%s latency_ms=%d",
@@ -173,7 +229,10 @@ def chat_respond(req: RespondRequest):
             if req.tool_name and req.tool_result is not None:
                 yield f"The echo tool returned: {req.tool_result}"
             else:
-                yield "I'm Buddy, your local assistant. Start the MLX server for full AI responses."
+                yield (
+                    f"{_responder_error_notice(e)} "
+                    "Start or restart the MLX service for full AI responses."
+                )
 
     return StreamingResponse(generate(), media_type="text/plain")
 

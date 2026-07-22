@@ -1,11 +1,16 @@
+mod codex_orchestrator;
+mod codex_runner;
 mod commands;
+mod cursor_runner;
 mod intelligence_hooks;
 mod logging;
 mod memory_extraction;
 mod orchestrator;
+mod secrets;
 mod services;
 mod spark_checker;
 mod state;
+mod terminal;
 
 use std::sync::Arc;
 
@@ -14,6 +19,7 @@ use buddy_memory::MemoryContext;
 use memory_extraction::session_end_handover;
 use services::ProcessManager;
 use state::{db_path, find_project_root, logs_dir, AppState};
+use terminal::TerminalManager;
 use tauri::{Manager, RunEvent};
 use tracing::info;
 
@@ -26,6 +32,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let path = db_path(app.handle());
             info!(path = %path.display(), "opening database");
@@ -35,6 +42,7 @@ pub fn run() {
 
             app.manage(state.clone());
             app.manage(process_manager.clone());
+            app.manage(Arc::new(TerminalManager::new()));
 
             spark_checker::spawn_spark_checker(app.handle().clone(), state.clone());
 
@@ -75,6 +83,19 @@ pub fn run() {
             commands::delete_spark,
             commands::get_stale_spark_count,
             commands::get_stale_sparks,
+            commands::set_secret,
+            commands::delete_secret,
+            commands::get_secret_status,
+            commands::list_external_actions,
+            commands::refresh_cache,
+            commands::list_codex_conversations,
+            commands::create_codex_conversation,
+            commands::set_conversation_focus,
+            commands::send_codex_message,
+            commands::terminal_open,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

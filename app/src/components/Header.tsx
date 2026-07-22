@@ -7,6 +7,7 @@ export function Header() {
     dashboard: "Dashboard",
     chat: "Chat",
     spark: "Spark",
+    code: "Code Agent",
     settings: "Settings",
   };
 

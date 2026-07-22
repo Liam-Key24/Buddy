@@ -259,6 +259,41 @@ pub async fn send_message(
         "brain plan received"
     );
 
+    // #region agent log
+    {
+        let branch = if plan.intent == "tool_use" {
+            "tool_use"
+        } else {
+            "chat_direct"
+        };
+        let entry = serde_json::json!({
+            "sessionId": "500eec",
+            "location": "orchestrator.rs:send_message",
+            "message": "plan branch selected",
+            "data": {
+                "intent": plan.intent,
+                "tool": plan.tool,
+                "branch": branch,
+                "messagePreview": text.chars().take(120).collect::<String>(),
+                "reasoningPreview": plan.reasoning.chars().take(120).collect::<String>(),
+            },
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            "hypothesisId": "H3",
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-500eec.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{entry}");
+        }
+    }
+    // #endregion
+
     emit_task_events(state, &ctx, &plan)?;
 
     let mut assistant_content = String::new();

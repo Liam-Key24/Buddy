@@ -5,6 +5,9 @@ export interface Conversation {
   title: string;
   created_at: number;
   updated_at: number;
+  kind?: string;
+  focus_mode?: string | null;
+  workspace_path?: string | null;
 }
 
 interface ConversationState {

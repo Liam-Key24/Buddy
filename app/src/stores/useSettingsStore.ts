@@ -6,6 +6,30 @@ interface SettingsState {
   modelName: string;
   logLevel: string;
   autoStartMlx: boolean;
+  modelNameChat: string;
+  modelNameCode: string;
+  llmProfileRouter: string;
+  codexModel: string;
+  codexWorkspace: string;
+  codeAgentBackend: string;
+  codeModel: string;
+  cursorPath: string;
+  codexPath: string;
+  emailSignature: string;
+  emailGreeting: string;
+  emailBodyTemplate: string;
+  fsExcludedPaths: string[];
+  calendarProvider: string;
+  calcomBaseUrl: string;
+  calcomApiVersion: string;
+  calcomEventTypeId: string;
+  calcomUsername: string;
+  calcomTimezone: string;
+  calendarDefaultDurationMin: string;
+  calendarAutoCreateThreshold: string;
+  calendarWorkingWindows: string;
+  calendarMinFocusMin: string;
+  calendarMoveHorizonHours: string;
   setSettings: (settings: Partial<Omit<SettingsState, "setSettings">>) => void;
 }
 
@@ -15,5 +39,29 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   modelName: "mlx-community/Llama-3.2-3B-Instruct-4bit",
   logLevel: "info",
   autoStartMlx: false,
+  modelNameChat: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  modelNameCode: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  llmProfileRouter: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  codexModel: "gpt-5.5",
+  codexWorkspace: "",
+  codeAgentBackend: "cursor",
+  codeModel: "auto",
+  cursorPath: "",
+  codexPath: "",
+  emailSignature: "",
+  emailGreeting: "Hi,",
+  emailBodyTemplate: "{greeting}\n\n{body}\n\n{signature}",
+  fsExcludedPaths: [],
+  calendarProvider: "calcom_self_hosted",
+  calcomBaseUrl: "",
+  calcomApiVersion: "2024-08-13",
+  calcomEventTypeId: "",
+  calcomUsername: "",
+  calcomTimezone: "",
+  calendarDefaultDurationMin: "30",
+  calendarAutoCreateThreshold: "0.85",
+  calendarWorkingWindows: "09:00-12:00,14:00-18:00",
+  calendarMinFocusMin: "90",
+  calendarMoveHorizonHours: "48",
   setSettings: (settings) => set(settings),
 }));

@@ -1,8 +1,43 @@
 import json
 import re
+import time
 from typing import Optional
 
 from pydantic import BaseModel
+
+
+# #region agent log
+def _debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    try:
+        with open(
+            "/Users/liamgk/Desktop/BUDDY/.cursor/debug-500eec.log", "a"
+        ) as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "500eec",
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                        "hypothesisId": hypothesis_id,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+def _matched_idea_trigger(message: str) -> str | None:
+    lower = message.strip().lower()
+    for pattern in IDEA_TRIGGERS:
+        if re.search(pattern, lower):
+            return pattern
+    return None
+
+
+# #endregion
 
 
 class PreferenceDetected(BaseModel):
@@ -92,6 +127,17 @@ def _extract_idea_content(message: str) -> str:
 
 def _heuristic_plan(message: str) -> PlanResponse:
     lower = message.strip().lower()
+    # #region agent log
+    _debug_log(
+        "parser.py:_heuristic_plan",
+        "heuristic plan invoked",
+        {
+            "messagePreview": message[:120],
+            "matchedTrigger": _matched_idea_trigger(message),
+        },
+        "H1",
+    )
+    # #endregion
     if lower.startswith("echo "):
         tool_input = message.strip()[5:].strip()
         return PlanResponse(
@@ -119,12 +165,13 @@ def _heuristic_plan(message: str) -> PlanResponse:
             reasoning="User shared an idea in natural language.",
             response=None,
         )
+    fallback_response = _heuristic_chat_response(message)
     return PlanResponse(
         intent="chat",
         tool=None,
         tool_input=None,
-        reasoning="General conversation fallback.",
-        response="I'm Buddy, your local assistant. How can I help?",
+        reasoning="General conversation fallback (MLX unavailable).",
+        response=fallback_response,
     )
 
 
@@ -143,12 +190,24 @@ def _infer_spark_tags(text: str) -> list[str]:
     return tags
 
 
+def _heuristic_chat_response(message: str) -> str:
+    text = message.strip()
+    if not text:
+        return "I'm here and listening. What would you like to work on?"
+    lowered = text.lower()
+    if "?" in text:
+        if any(greet in lowered for greet in ("how are you", "how's it going", "hows it going")):
+            return "Doing well and ready to help. What would you like to focus on?"
+        return f"I got your question: \"{text}\". I can help sketch an answer while MLX reconnects."
+    return f"Noted: \"{text}\". I can help you structure or refine this while full chat is reconnecting."
+
+
 def parse_plan(raw: str, message: str) -> PlanResponse:
     try:
         data = _extract_json(raw)
         pref = data.get("preference_detected")
         dec = data.get("decision_detected")
-        return PlanResponse(
+        plan = PlanResponse(
             intent=data.get("intent", "chat"),
             tool=data.get("tool"),
             tool_input=data.get("tool_input"),
@@ -158,7 +217,33 @@ def parse_plan(raw: str, message: str) -> PlanResponse:
             preference_detected=PreferenceDetected(**pref) if pref else None,
             decision_detected=DecisionDetected(**dec) if dec else None,
         )
-    except (json.JSONDecodeError, KeyError, TypeError):
+        # #region agent log
+        _debug_log(
+            "parser.py:parse_plan",
+            "mlx plan parsed",
+            {
+                "intent": plan.intent,
+                "tool": plan.tool,
+                "messagePreview": message[:120],
+                "source": "mlx",
+            },
+            "H2",
+        )
+        # #endregion
+        return plan
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        # #region agent log
+        _debug_log(
+            "parser.py:parse_plan",
+            "mlx json parse failed, using heuristic",
+            {
+                "error": type(e).__name__,
+                "messagePreview": message[:120],
+                "rawPreview": raw[:200] if raw else "",
+            },
+            "H2",
+        )
+        # #endregion
         return _heuristic_plan(message)
 
 
