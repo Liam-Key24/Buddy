@@ -7,6 +7,8 @@ import { useConversationStore } from "../stores/useConversationStore";
 import type {
   CalendarEvent,
   CreateEventInput,
+  DayCapacity,
+  DaySummary,
   ReminderDelivery,
   UpdateEventInput,
   CreateDreamInput,
@@ -446,6 +448,14 @@ export async function calendarDismissReminder(id: string): Promise<void> {
 
 export async function calendarNotificationCount(): Promise<number> {
   return invoke<number>("calendar_notification_count");
+}
+
+export async function calendarGetCapacity(day: number): Promise<DayCapacity> {
+  return invoke<DayCapacity>("calendar_get_capacity", { day });
+}
+
+export async function calendarDaySummary(day: number): Promise<DaySummary> {
+  return invoke<DaySummary>("calendar_day_summary", { day });
 }
 
 export async function lifestyleListBlocks(

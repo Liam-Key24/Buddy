@@ -173,7 +173,7 @@ impl BuddyPlugin for CalendarPlugin {
             },
             ToolDecl {
                 name: "calendar.create_event",
-                planner_line: "calendar.create_event: create a native BUDDY calendar event. tool_input JSON: {\"title\": \"...\", \"start_time\": <unix_ms>, \"end_time\": <unix_ms>, \"description\": \"optional\", \"location\": \"optional\", \"category\": \"work|personal|birthdays|holidays|general\", \"all_day\": false, \"timezone\": \"optional IANA\", \"reminders\": [{\"minutes_before\":15}], \"recurrence\": {\"frequency\":\"WEEKLY\",\"interval\":1}}",
+                planner_line: "calendar.create_event: create a native BUDDY calendar event. tool_input JSON: {\"title\": \"...\", \"start_time\": <unix_ms>, \"end_time\": <unix_ms>, \"description\": \"optional\", \"location\": \"optional\", \"category\": \"work|personal|birthdays|holidays|general\", \"all_day\": false, \"timezone\": \"optional IANA\", \"reminders\": [{\"minutes_before\":15}], \"recurrence\": {\"frequency\":\"WEEKLY\",\"interval\":1}, \"flexibility\":\"fixed|flexible|optional\", \"force\":false}. Returns status ok or conflict with suggestions.",
             },
             ToolDecl {
                 name: "calendar.update_event",
@@ -239,6 +239,38 @@ impl BuddyPlugin for CalendarPlugin {
                 name: "work.get_stats",
                 planner_line: "work.get_stats: hours and sales for today/week/month. tool_input may be empty JSON {}.",
             },
+            ToolDecl {
+                name: "calendar.find_free_time",
+                planner_line: "calendar.find_free_time: find ranked free slots respecting sleep/work/buffers. tool_input JSON: {\"duration_minutes\":120, \"start\": <unix_ms>, \"end\": <unix_ms>, \"limit\":5}",
+            },
+            ToolDecl {
+                name: "calendar.block_time",
+                planner_line: "calendar.block_time: smart focus time block. tool_input JSON: {\"title\":\"Coding\",\"duration_minutes\":180, \"start\": <optional>, \"end\": <optional>, \"apply\":true}",
+            },
+            ToolDecl {
+                name: "calendar.schedule_task",
+                planner_line: "calendar.schedule_task: auto-schedule a task or tasks[]. tool_input JSON: {\"title\":\"Design report\",\"duration_minutes\":120, \"deadline\": <unix_ms>, \"priority\":\"high\", \"flexibility\":\"flexible\", \"apply\":true} OR {\"tasks\":[...]}",
+            },
+            ToolDecl {
+                name: "calendar.plan_day",
+                planner_line: "calendar.plan_day: plan a day around protected blocks. tool_input JSON: {\"day\": <unix_ms>, \"tasks\":[{\"title\":\"...\",\"duration_minutes\":60}], \"include_breaks\":true, \"apply\":false}",
+            },
+            ToolDecl {
+                name: "calendar.detect_conflicts",
+                planner_line: "calendar.detect_conflicts: check a proposed window. tool_input JSON: {\"start\": <unix_ms>, \"end\": <unix_ms>, \"exclude_event_id\":\"optional\"}",
+            },
+            ToolDecl {
+                name: "calendar.resolve_conflict",
+                planner_line: "calendar.resolve_conflict: create event at a chosen resolution slot (force). tool_input JSON: {\"title\":\"...\", \"start\": <unix_ms>, \"end\": <unix_ms>}",
+            },
+            ToolDecl {
+                name: "calendar.get_capacity",
+                planner_line: "calendar.get_capacity: daily workload capacity. tool_input JSON: {\"day\": <unix_ms>} or {}",
+            },
+            ToolDecl {
+                name: "calendar.day_summary",
+                planner_line: "calendar.day_summary: intelligent daily summary + suggestions. tool_input JSON: {\"day\": <unix_ms>} or {}",
+            },
         ]
     }
 
@@ -260,6 +292,10 @@ impl BuddyPlugin for CalendarPlugin {
                 key: "calendar_default_reminders_json",
                 value: "[{\"minutes_before\":15,\"method\":\"popup\"}]",
             },
+            SettingSeed {
+                key: "calendar_buffer_minutes",
+                value: "10",
+            },
         ]
     }
 
@@ -273,6 +309,10 @@ impl BuddyPlugin for CalendarPlugin {
             | "calendar.update_event"
             | "calendar.delete_event"
             | "calendar.duplicate_event"
+            | "calendar.block_time"
+            | "calendar.schedule_task"
+            | "calendar.plan_day"
+            | "calendar.resolve_conflict"
             | "dream.log"
             | "dream.update"
             | "dream.delete"

@@ -1,9 +1,14 @@
+import type { RefObject } from "react";
 import { BellSlash, Clock } from "@phosphor-icons/react";
 import { SNOOZE_OPTIONS_MINUTES } from "@buddy/calendar/notifications";
 import { useCalendarNotificationStore } from "../../stores/useCalendarNotificationStore";
 import { useCalendarStore } from "../../stores/useCalendarStore";
 
-export function NotificationPanel() {
+export function NotificationPanel({
+  panelRef,
+}: {
+  panelRef?: RefObject<HTMLDivElement | null>;
+} = {}) {
   const { notifications, panelOpen, setPanelOpen, snooze, dismiss } =
     useCalendarNotificationStore();
   const selectEvent = useCalendarStore((s) => s.selectEvent);
@@ -11,7 +16,10 @@ export function NotificationPanel() {
   if (!panelOpen) return null;
 
   return (
-    <div className="absolute right-0 top-12 z-30 w-80 rounded-2xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl shadow-black/40">
+    <div
+      ref={panelRef}
+      className="absolute right-0 top-12 z-30 w-80 rounded-2xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl shadow-black/40"
+    >
       <div className="mb-2 flex items-center justify-between px-1">
         <h4 className="text-sm font-medium text-zinc-200">Reminders</h4>
         <button

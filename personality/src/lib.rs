@@ -106,13 +106,36 @@ fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
         return Some(msg);
     }
 
+    if let Some(msg) = phrase_scheduling(tool, value) {
+        return Some(msg);
+    }
+
     if let Some(arr) = value.as_array() {
+        if tool.contains("find_free_time") {
+            return Some(phrase_free_slots(arr));
+        }
         return Some(phrase_list(tool, arr));
     }
 
     if let Some(obj) = value.as_object() {
+        // Conflict-aware create/update: { status: "ok"|"conflict", ... }
+        if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
+            if status == "conflict" {
+                return Some(phrase_conflict(obj));
+            }
+            if status == "ok" {
+                if let Some(event) = obj.get("event") {
+                    if let Some(title) = event.get("title").and_then(|v| v.as_str()) {
+                        return Some(format!("Created “{title}”."));
+                    }
+                }
+            }
+        }
+
         if let Some(title) = obj.get("title").and_then(|v| v.as_str()) {
-            let action = if tool.contains("create") || tool.contains("duplicate") {
+            let action = if tool.contains("block_time") {
+                "Blocked time for"
+            } else if tool.contains("create") || tool.contains("duplicate") {
                 "Created"
             } else if tool.contains("update") {
                 "Updated"
@@ -131,15 +154,259 @@ fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
                 .filter(|s| !s.is_empty())
                 .map(|s| format!(" at {s}"))
                 .unwrap_or_default();
-            return Some(format!("{action} “{title}”{loc}."));
+            let when = phrase_time_range(
+                obj.get("start").or_else(|| obj.get("start_time")),
+                obj.get("end").or_else(|| obj.get("end_time")),
+            );
+            if tool.contains("block_time") {
+                return Some(format!("{action} “{title}”{when}."));
+            }
+            return Some(format!("{action} “{title}”{loc}{when}."));
         }
 
-        if tool.contains("stats") || obj.contains_key("total_sales") || obj.contains_key("hours") {
+        if tool.contains("stats") || obj.contains_key("total_sales") || obj.contains_key("hours")
+        {
             return Some(format_object_summary(obj));
         }
     }
 
     None
+}
+
+fn phrase_scheduling(tool: &str, value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+
+    if tool.contains("get_capacity")
+        || (obj.contains_key("free_hours") && obj.contains_key("booked_hours"))
+    {
+        return Some(phrase_capacity(obj));
+    }
+
+    if tool.contains("day_summary") || obj.contains_key("focus_blocks") {
+        return Some(phrase_day_summary(obj));
+    }
+
+    if tool.contains("schedule_task")
+        || (obj.contains_key("scheduled") && obj.contains_key("unscheduled"))
+    {
+        return Some(phrase_schedule_result(obj));
+    }
+
+    if tool.contains("plan_day") || obj.contains_key("proposed") {
+        return Some(phrase_plan_day(obj));
+    }
+
+    None
+}
+
+fn phrase_capacity(obj: &serde_json::Map<String, Value>) -> String {
+    let free = num_field(obj, "free_hours");
+    let booked = num_field(obj, "booked_hours");
+    let meeting = num_field(obj, "meeting_hours");
+    let focus = num_field(obj, "focus_hours");
+    let waking = num_field(obj, "waking_hours");
+    let overloaded = obj
+        .get("overloaded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut msg = format!(
+        "Today: {free:.1}h free · {booked:.1}h booked (meetings {meeting:.1}h, focus {focus:.1}h) · {waking:.1}h waking."
+    );
+    if overloaded {
+        msg.push_str(" Day looks overloaded.");
+    }
+    msg
+}
+
+fn phrase_day_summary(obj: &serde_json::Map<String, Value>) -> String {
+    let mut parts = Vec::new();
+    if let Some(cap) = obj.get("capacity").and_then(|v| v.as_object()) {
+        parts.push(phrase_capacity(cap));
+    }
+    if let Some(suggestions) = obj.get("suggestions").and_then(|v| v.as_array()) {
+        let tips: Vec<&str> = suggestions
+            .iter()
+            .filter_map(|s| s.get("message").and_then(|m| m.as_str()))
+            .take(2)
+            .collect();
+        if !tips.is_empty() {
+            parts.push(format!("Suggestions: {}", tips.join(" · ")));
+        }
+    }
+    if parts.is_empty() {
+        "Here's your day summary.".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn phrase_schedule_result(obj: &serde_json::Map<String, Value>) -> String {
+    let scheduled = obj
+        .get("scheduled")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let unscheduled = obj
+        .get("unscheduled")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+
+    let mut parts = Vec::new();
+    if !scheduled.is_empty() {
+        let titles = scheduled
+            .iter()
+            .filter_map(|s| s.get("title").and_then(|t| t.as_str()))
+            .map(|t| format!("“{t}”"))
+            .collect::<Vec<_>>();
+        parts.push(format!(
+            "Scheduled {}: {}.",
+            if titles.len() == 1 {
+                "1 block".into()
+            } else {
+                format!("{} blocks", titles.len())
+            },
+            join_natural(&titles)
+        ));
+    }
+    if !unscheduled.is_empty() {
+        let titles = unscheduled
+            .iter()
+            .filter_map(|s| s.get("title").and_then(|t| t.as_str()))
+            .map(|t| format!("“{t}”"))
+            .collect::<Vec<_>>();
+        parts.push(format!(
+            "Could not fit {} without violating Work/Sleep/buffers.",
+            join_natural(&titles)
+        ));
+    }
+    if let Some(suggestions) = obj.get("suggestions").and_then(|v| v.as_array()) {
+        if let Some(msg) = suggestions
+            .first()
+            .and_then(|s| s.get("message").and_then(|m| m.as_str()))
+        {
+            parts.push(msg.to_string());
+        }
+    }
+    if parts.is_empty() {
+        "No tasks were scheduled.".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn phrase_plan_day(obj: &serde_json::Map<String, Value>) -> String {
+    let proposed = obj
+        .get("proposed")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    if proposed.is_empty() {
+        let unscheduled = obj
+            .get("unscheduled")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if unscheduled > 0 {
+            return format!(
+                "Couldn't place {unscheduled} task(s) without overlapping Work, Sleep, or buffers."
+            );
+        }
+        return "No plan blocks proposed for that day.".into();
+    }
+    let mut items: Vec<&Value> = proposed.iter().collect();
+    items.sort_by_key(|p| {
+        p.get("start")
+            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+            .unwrap_or(0)
+    });
+    let lines: Vec<String> = items
+        .iter()
+        .filter_map(|p| {
+            let title = p.get("title")?.as_str()?;
+            let when = phrase_time_range(p.get("start"), p.get("end"));
+            Some(format!("“{title}”{when}"))
+        })
+        .take(6)
+        .collect();
+    format!("Planned {}: {}.", lines.len(), join_natural(&lines))
+}
+
+fn phrase_free_slots(items: &[Value]) -> String {
+    if items.is_empty() {
+        return "No free slots found that respect Work, Sleep, and buffers.".into();
+    }
+    let slots: Vec<String> = items
+        .iter()
+        .take(3)
+        .filter_map(|s| {
+            let when = phrase_time_range(s.get("start"), s.get("end"));
+            if when.is_empty() {
+                None
+            } else {
+                Some(when.trim().trim_start_matches(' ').to_string())
+            }
+        })
+        .collect();
+    if slots.is_empty() {
+        format!("Found {} free slot(s).", items.len())
+    } else if slots.len() == 1 {
+        format!("You're free {}.", slots[0].trim_start_matches("from "))
+    } else {
+        format!("Best free times: {}.", join_natural(&slots))
+    }
+}
+
+fn phrase_conflict(obj: &serde_json::Map<String, Value>) -> String {
+    let report = obj.get("report").and_then(|v| v.as_object()).unwrap_or(obj);
+    let msg = report
+        .get("conflicts")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("message").and_then(|m| m.as_str()))
+        .unwrap_or("That time conflicts with your schedule.");
+    let alt = report
+        .get("suggestions")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("action").and_then(|a| a.as_str()) == Some("use_slot"))
+        .and_then(|s| s.get("message").and_then(|m| m.as_str()));
+    match alt {
+        Some(a) => format!("{msg} {a}"),
+        None => msg.to_string(),
+    }
+}
+
+fn phrase_time_range(start: Option<&Value>, end: Option<&Value>) -> String {
+    let Some(s) = start.and_then(value_as_i64) else {
+        return String::new();
+    };
+    let Some(e) = end.and_then(value_as_i64) else {
+        return format!(" from {}", format_local_time(s));
+    };
+    format!(" from {} to {}", format_local_time(s), format_local_time(e))
+}
+
+fn value_as_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .or_else(|| v.as_str()?.parse().ok())
+}
+
+fn format_local_time(ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%I:%M %p").to_string().trim_start_matches('0').to_string())
+        .unwrap_or_else(|| ms.to_string())
+}
+
+fn num_field(obj: &serde_json::Map<String, Value>, key: &str) -> f64 {
+    obj.get(key)
+        .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+        .unwrap_or(0.0)
 }
 
 fn phrase_delete(value: &Value) -> Option<String> {
@@ -371,8 +638,44 @@ mod tests {
     }
 
     #[test]
-    fn leaves_plain_strings_alone() {
-        let msg = phrase_tool_result("echo", "hello there");
-        assert_eq!(msg, "hello there");
+    fn phrases_capacity() {
+        let msg = phrase_tool_result(
+            "calendar.get_capacity",
+            r#"{"date":"2026-07-22","booked_hours":0.0,"meeting_hours":0.0,"focus_hours":0.0,"free_hours":6.75,"waking_hours":14.75,"overloaded":false}"#,
+        );
+        assert!(msg.contains("6.8h free") || msg.contains("6.75h free"));
+        assert!(msg.contains("waking"));
+        assert!(!msg.contains("8 hours of capacity"));
+    }
+
+    #[test]
+    fn phrases_schedule_task_unscheduled() {
+        let msg = phrase_tool_result(
+            "calendar.schedule_task",
+            r#"{"scheduled":[],"unscheduled":[{"title":"Design report","duration_minutes":120}],"suggestions":[{"action":"redistribute","message":"Could not find a free slot."}]}"#,
+        );
+        assert!(msg.contains("Design report"));
+        assert!(msg.contains("Could not"));
+        assert!(!msg.contains("\"scheduled\""));
+    }
+
+    #[test]
+    fn phrases_block_time() {
+        let msg = phrase_tool_result(
+            "calendar.block_time",
+            r#"{"title":"Coding","start":1784800000000,"end":1784810800000,"flexibility":"flexible","priority":"normal","score":100.0,"reasons":[]}"#,
+        );
+        assert!(msg.contains("Coding"));
+        assert!(msg.contains("Blocked"));
+    }
+
+    #[test]
+    fn phrases_free_slots() {
+        let msg = phrase_tool_result(
+            "calendar.find_free_time",
+            r#"[{"start":1784810800000,"end":1784818000000,"score":90.0,"reasons":["preferred focus period"]}]"#,
+        );
+        assert!(msg.contains("free") || msg.contains("Free") || msg.contains("from"));
+        assert!(!msg.contains("\"score\""));
     }
 }

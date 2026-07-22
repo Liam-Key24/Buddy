@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "@phosphor-icons/react";
 import type {
   CreateEventInput,
+  Flexibility,
   RecurrenceRule,
   Reminder,
 } from "@buddy/calendar/models";
-import { CATEGORIES } from "@buddy/calendar/models";
+import { CATEGORIES, FLEXIBILITY_OPTIONS } from "@buddy/calendar/models";
 import {
+  colorForCategory,
   fromLocalInputValue,
   toDateInputValue,
   toLocalInputValue,
@@ -24,6 +26,7 @@ export interface EventFormInitial {
   timezone: string;
   reminders?: Reminder[];
   recurrence?: RecurrenceRule | null;
+  flexibility?: Flexibility | null;
 }
 
 export function EventFormModal({
@@ -55,8 +58,22 @@ export function EventFormModal({
   const [recurrenceFreq, setRecurrenceFreq] = useState(
     initial.recurrence?.frequency ?? "",
   );
+  const [flexibility, setFlexibility] = useState<Flexibility>(
+    initial.flexibility ?? "fixed",
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (saving) return;
+      e.preventDefault();
+      onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, saving]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -102,12 +119,15 @@ export function EventFormModal({
         description: description.trim() || null,
         location: location.trim() || null,
         category,
+        color: colorForCategory(category),
         start_time: startMs,
         end_time: endMs,
         all_day: allDay,
         timezone,
         reminders,
         recurrence,
+        flexibility,
+        force: true,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -116,9 +136,16 @@ export function EventFormModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      onClick={() => {
+        if (!saving) onClose();
+      }}
+      role="presentation"
+    >
       <form
         onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
         className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl shadow-black/40"
       >
         <div className="mb-4 flex items-center justify-between">
@@ -175,17 +202,58 @@ export function EventFormModal({
             />
             All day
           </label>
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500"
-          >
-            {CATEGORIES.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label}
-              </option>
-            ))}
-          </select>
+          <div>
+            <label className="mb-1.5 block text-[10px] uppercase tracking-wider text-zinc-500">
+              Category
+            </label>
+            <div className="flex items-center gap-2">
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500"
+              >
+                {CATEGORIES.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {CATEGORIES.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    title={c.label}
+                    aria-label={`Category ${c.label}`}
+                    aria-pressed={category === c.id}
+                    onClick={() => setCategory(c.id)}
+                    className={`h-5 w-5 rounded-full transition ${
+                      category === c.id
+                        ? "ring-2 ring-white/50 ring-offset-1 ring-offset-zinc-900"
+                        : "opacity-60 hover:opacity-100"
+                    }`}
+                    style={{ backgroundColor: c.color }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-zinc-500">
+              Flexibility
+            </label>
+            <select
+              value={flexibility}
+              onChange={(e) => setFlexibility(e.target.value as Flexibility)}
+              className="w-full rounded-xl border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500"
+            >
+              {FLEXIBILITY_OPTIONS.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <input
             value={location}
             onChange={(e) => setLocation(e.target.value)}

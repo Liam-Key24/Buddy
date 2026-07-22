@@ -1,7 +1,9 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { WarningCircle } from "@phosphor-icons/react";
-import type { CreateEventInput } from "@buddy/calendar/models";
+import type { CreateEventInput, DaySummary } from "@buddy/calendar/models";
 import { addDays, addMonths, startOfWeek } from "@buddy/calendar/utils";
+import { useDismissible } from "../../hooks/useDismissible";
+import { calendarDaySummary } from "../../lib/api";
 import { useCalendarStore } from "../../stores/useCalendarStore";
 import { useCalendarNotificationStore } from "../../stores/useCalendarNotificationStore";
 import {
@@ -11,6 +13,7 @@ import {
 import { AgendaView } from "./AgendaView";
 import { CalendarHeader } from "./CalendarHeader";
 import { CalendarSidebar } from "./CalendarSidebar";
+import { DayCapacityPanel } from "./DayCapacityPanel";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { DreamLogPanel } from "./DreamLogPanel";
 import { EventDetailsDrawer } from "./EventDetailsDrawer";
@@ -69,11 +72,53 @@ export function CalendarWorkspace() {
   } = useLifestyleStore();
 
   const { count, panelOpen, setPanelOpen } = useCalendarNotificationStore();
+  const [daySummary, setDaySummary] = useState<DaySummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
+
+  const modalOpen = formOpen || !!deleteConfirmId;
+  const overlayOpen = !!selectedEventId || !!selectedBlockId || panelOpen;
+
+  const dismissOverlays = useCallback(() => {
+    selectEvent(null);
+    selectBlock(null);
+    setPanelOpen(false);
+  }, [selectEvent, selectBlock, setPanelOpen]);
+
+  useDismissible({
+    enabled: overlayOpen && !modalOpen,
+    onDismiss: dismissOverlays,
+    refs: [drawerRef, notifRef],
+  });
 
   useEffect(() => {
     void loadRange();
     void loadBlocks();
   }, [loadRange, loadBlocks, view, cursorDate]);
+
+  useEffect(() => {
+    if (view !== "day") {
+      setDaySummary(null);
+      return;
+    }
+    let cancelled = false;
+    setSummaryLoading(true);
+    void calendarDaySummary(cursorDate.getTime())
+      .then((s) => {
+        if (!cancelled) setDaySummary(s);
+      })
+      .catch(() => {
+        if (!cancelled) setDaySummary(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSummaryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, cursorDate, events.length]);
 
   const selected = events.find((e) => e.id === selectedEventId) ?? null;
   const selectedBlock =
@@ -150,7 +195,7 @@ export function CalendarWorkspace() {
           onViewChange={setView}
           onToggleNotifications={() => setPanelOpen(!panelOpen)}
         />
-        <NotificationPanel />
+        <NotificationPanel panelRef={notifRef} />
 
         {error && (
           <div className="mb-3 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -192,25 +237,34 @@ export function CalendarWorkspace() {
             }}
           />
         ) : (
-          <TimeGridView
-            days={view === "day" ? [cursorDate] : weekDays}
-            events={events}
-            scheduleBlocks={visibleBlocks}
-            selectedEventId={selectedEventId}
-            selectedBlockId={selectedBlockId}
-            onSelectEvent={(id) => {
-              selectBlock(null);
-              selectEvent(id);
-            }}
-            onSelectBlock={selectBlock}
-            onCreateAt={(day, hour) => openCreate(day, hour)}
-          />
+          <>
+            {view === "day" && (
+              <DayCapacityPanel
+                summary={daySummary}
+                loading={summaryLoading}
+              />
+            )}
+            <TimeGridView
+              days={view === "day" ? [cursorDate] : weekDays}
+              events={events}
+              scheduleBlocks={visibleBlocks}
+              selectedEventId={selectedEventId}
+              selectedBlockId={selectedBlockId}
+              onSelectEvent={(id) => {
+                selectBlock(null);
+                selectEvent(id);
+              }}
+              onSelectBlock={selectBlock}
+              onCreateAt={(day, hour) => openCreate(day, hour)}
+            />
+          </>
         )}
       </div>
 
       {!selectedBlock && (
         <EventDetailsDrawer
           event={selected}
+          panelRef={drawerRef}
           onClose={() => selectEvent(null)}
           onEdit={() => {
             if (!selected) return;
@@ -226,6 +280,7 @@ export function CalendarWorkspace() {
               timezone: selected.timezone,
               reminders: selected.reminders,
               recurrence: selected.recurrence,
+              flexibility: selected.flexibility ?? "fixed",
             });
           }}
           onDuplicate={() => {
@@ -242,6 +297,7 @@ export function CalendarWorkspace() {
           block={selectedBlock}
           dreams={dreams}
           loading={panelLoading}
+          panelRef={drawerRef}
           onClose={() => selectBlock(null)}
           onAdd={async (body) => {
             await addDream({ body });
@@ -258,6 +314,7 @@ export function CalendarWorkspace() {
           stats={workStats}
           dayLog={workDayLog}
           loading={panelLoading}
+          panelRef={drawerRef}
           onClose={() => selectBlock(null)}
           onSaveSales={saveSales}
           onSaveEndTime={saveEndTime}
@@ -282,6 +339,7 @@ export function CalendarWorkspace() {
               "UTC",
             reminders: draftDefaults.reminders,
             recurrence: draftDefaults.recurrence,
+            flexibility: draftDefaults.flexibility ?? "fixed",
           }}
           onClose={() => setFormOpen(false)}
           onSubmit={async (input) => {
@@ -299,6 +357,7 @@ export function CalendarWorkspace() {
                 recurrence: input.recurrence ?? undefined,
                 clear_recurrence: !input.recurrence,
                 reminders: input.reminders ?? [],
+                flexibility: input.flexibility ?? undefined,
               });
             } else {
               await createEvent(input);

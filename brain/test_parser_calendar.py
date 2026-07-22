@@ -58,6 +58,48 @@ def test_fast_heuristic_calendar():
     assert plan.respond_mode == "passthrough"
 
 
+def test_heuristic_free_time_tomorrow():
+    plan = try_fast_heuristic_plan("When am I free tomorrow for 2 hours?")
+    assert plan is not None
+    assert plan.tool == "calendar.find_free_time"
+    payload = json.loads(plan.tool_input)
+    assert payload["duration_minutes"] == 120
+    assert payload["end"] > payload["start"]
+
+
+def test_heuristic_plan_day():
+    plan = try_fast_heuristic_plan(
+        "Plan my day for tomorrow, tennis, bath and cooking dinner"
+    )
+    assert plan is not None
+    assert plan.tool == "calendar.plan_day"
+    payload = json.loads(plan.tool_input)
+    assert payload["apply"] is True
+    titles = [t["title"].lower() for t in payload["tasks"]]
+    assert any("tennis" in t for t in titles)
+    assert any("bath" in t for t in titles)
+    assert any("cook" in t for t in titles)
+
+
+def test_heuristic_schedule_task_week_deadline():
+    plan = try_fast_heuristic_plan("Finish the design report this week, 2 hours")
+    assert plan is not None
+    assert plan.tool == "calendar.schedule_task"
+    payload = json.loads(plan.tool_input)
+    assert payload["duration_minutes"] == 120
+    assert "report" in payload["title"].lower() or "design" in payload["title"].lower()
+    # Deadline must be meaningfully after now (not ~now).
+    import time
+
+    assert payload["deadline"] > int(time.time() * 1000) + 3_600_000
+
+
+def test_heuristic_capacity():
+    plan = try_fast_heuristic_plan("What's my capacity today?")
+    assert plan is not None
+    assert plan.tool == "calendar.get_capacity"
+
+
 def test_fast_heuristic_skips_coder():
     # Code stays on MLX plan path even if heuristics would match.
     plan = try_fast_heuristic_plan("refactor the login module and fix the bug")
@@ -77,6 +119,10 @@ if __name__ == "__main__":
     test_heuristic_today()
     test_fast_heuristic_skips_chat()
     test_fast_heuristic_calendar()
+    test_heuristic_free_time_tomorrow()
+    test_heuristic_plan_day()
+    test_heuristic_schedule_task_week_deadline()
+    test_heuristic_capacity()
     test_fast_heuristic_skips_coder()
     test_coder_respond_mode_is_llm()
     print("ok")

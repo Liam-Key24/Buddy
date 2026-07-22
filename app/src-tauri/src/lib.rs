@@ -121,6 +121,8 @@ pub fn run() {
             commands::calendar_snooze_reminder,
             commands::calendar_dismiss_reminder,
             commands::calendar_notification_count,
+            commands::calendar_get_capacity,
+            commands::calendar_day_summary,
             commands::lifestyle_list_blocks,
             commands::lifestyle_last_sleep_date,
             commands::dream_list,

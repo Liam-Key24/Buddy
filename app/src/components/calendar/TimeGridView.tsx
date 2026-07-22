@@ -1,7 +1,7 @@
 import type { ScheduleBlock } from "@buddy/calendar/models";
 import { SCHEDULE_LAYER } from "@buddy/calendar/models";
 import type { CalendarEvent } from "@buddy/calendar/models";
-import { colorForEvent, formatTime, sameDay } from "@buddy/calendar/utils";
+import { colorForEvent, formatTime, sameDay, withAlpha } from "@buddy/calendar/utils";
 import { eventsOnDay } from "@buddy/calendar/services";
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -124,50 +124,71 @@ export function TimeGridView({
                   if (!seg) return null;
                   const layer = SCHEDULE_LAYER[block.kind];
                   const selected = selectedBlockId === block.id;
-                  const isSleep = block.kind === "sleep";
                   return (
                     <button
                       key={`${block.id}-${day.toISOString()}`}
                       type="button"
-                      onClick={() => onSelectBlock?.(block.id)}
-                      className={`absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-1 text-left text-[10px] transition ${
-                        selected ? "ring-1 ring-white/30" : ""
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectBlock?.(block.id);
+                      }}
+                      className={`absolute left-0.5 right-0.5 overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left text-[10px] transition ${
+                        selected
+                          ? "ring-2 ring-white/35 ring-offset-1 ring-offset-zinc-950"
+                          : "hover:brightness-110"
                       }`}
                       style={{
                         top: seg.top,
                         height: seg.height,
                         zIndex: 1,
-                        backgroundColor: isSleep
-                          ? "rgba(99, 102, 241, 0.18)"
-                          : "rgba(249, 115, 22, 0.28)",
-                        color: isSleep ? "rgba(199, 210, 254, 0.7)" : "#FED7AA",
-                        borderLeft: `2px solid ${layer.color}`,
+                        backgroundColor: withAlpha(
+                          layer.color,
+                          selected ? 0.28 : 0.16,
+                        ),
+                        color: withAlpha(layer.color, 0.95),
+                        borderLeftColor: layer.color,
                       }}
-                      title={`${block.title} · schedule`}
+                      title={`${block.title} · protected`}
                     >
-                      <div className="truncate font-medium opacity-80">
+                      <div className="truncate font-medium text-zinc-100/90">
                         {block.title}
+                      </div>
+                      <div className="truncate text-[9px] uppercase tracking-wide text-zinc-400">
+                        Protected
                       </div>
                     </button>
                   );
                 })}
-                {allDay.map((ev, i) => (
-                  <button
-                    key={ev.id}
-                    type="button"
-                    onClick={() => onSelectEvent(ev.id)}
-                    className={`absolute left-1 right-1 truncate rounded-md px-1.5 py-0.5 text-left text-[10px] font-medium text-white ${
-                      selectedEventId === ev.id ? "ring-1 ring-white/40" : ""
-                    }`}
-                    style={{
-                      top: 2 + i * 18,
-                      backgroundColor: colorForEvent(ev),
-                      zIndex: 2,
-                    }}
-                  >
-                    {ev.title}
-                  </button>
-                ))}
+                {allDay.map((ev, i) => {
+                  const accent = colorForEvent(ev);
+                  const selected = selectedEventId === ev.id;
+                  return (
+                    <button
+                      key={ev.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectEvent(ev.id);
+                      }}
+                      className={`absolute left-1 right-1 truncate rounded-md border-l-[3px] px-1.5 py-0.5 text-left text-[10px] font-medium text-zinc-100 ${
+                        selected
+                          ? "ring-2 ring-white/40 ring-offset-1 ring-offset-zinc-950"
+                          : ""
+                      }`}
+                      style={{
+                        top: 2 + i * 18,
+                        backgroundColor: withAlpha(
+                          accent,
+                          selected ? 0.35 : 0.22,
+                        ),
+                        borderLeftColor: accent,
+                        zIndex: 2,
+                      }}
+                    >
+                      {ev.title}
+                    </button>
+                  );
+                })}
                 {dayEvents.map((ev) => {
                   const start = new Date(ev.start_time);
                   const end = new Date(ev.end_time);
@@ -178,24 +199,35 @@ export function TimeGridView({
                     24,
                     ((end.getTime() - start.getTime()) / 3_600_000) * PX_PER_HOUR,
                   );
+                  const accent = colorForEvent(ev);
+                  const selected = selectedEventId === ev.id;
                   return (
                     <button
                       key={ev.id}
                       type="button"
-                      onClick={() => onSelectEvent(ev.id)}
-                      className={`absolute left-1 right-1 overflow-hidden rounded-lg px-1.5 py-1 text-left text-[11px] font-medium text-white shadow-sm transition ${
-                        selectedEventId === ev.id ? "ring-1 ring-white/50" : ""
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectEvent(ev.id);
+                      }}
+                      className={`absolute left-1 right-1 overflow-hidden rounded-lg border-l-[3px] px-1.5 py-1 text-left text-[11px] font-medium text-zinc-100 shadow-sm transition ${
+                        selected
+                          ? "ring-2 ring-white/45 ring-offset-1 ring-offset-zinc-950"
+                          : "hover:brightness-110"
                       }`}
                       style={{
                         top,
                         height,
-                        backgroundColor: colorForEvent(ev),
+                        backgroundColor: withAlpha(
+                          accent,
+                          selected ? 0.38 : 0.24,
+                        ),
+                        borderLeftColor: accent,
                         zIndex: 3,
                       }}
                       title={`${ev.title} · ${formatTime(ev.start_time)}`}
                     >
                       <div className="truncate">{ev.title}</div>
-                      <div className="truncate text-[10px] opacity-80">
+                      <div className="truncate text-[10px] text-zinc-300/90">
                         {formatTime(ev.start_time)}
                       </div>
                     </button>

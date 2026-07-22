@@ -1,3 +1,4 @@
+import type { RefObject } from "react";
 import {
   Copy,
   MapPin,
@@ -15,12 +16,14 @@ import {
 
 export function EventDetailsDrawer({
   event,
+  panelRef,
   onClose,
   onEdit,
   onDuplicate,
   onDelete,
 }: {
   event: CalendarEvent | null;
+  panelRef?: RefObject<HTMLDivElement | null>;
   onClose: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
@@ -32,7 +35,10 @@ export function EventDetailsDrawer({
     CATEGORIES.find((c) => c.id === event.category)?.label ?? event.category;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]">
+    <div
+      ref={panelRef}
+      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]"
+    >
       <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
         <h3 className="text-sm font-semibold text-zinc-100">Event details</h3>
         <button

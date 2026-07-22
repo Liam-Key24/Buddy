@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type RefObject } from "react";
 import { MoonStars, Trash, X } from "@phosphor-icons/react";
 import type { DreamEntry, ScheduleBlock } from "@buddy/calendar/models";
 
@@ -6,6 +6,7 @@ export function DreamLogPanel({
   block,
   dreams,
   loading,
+  panelRef,
   onClose,
   onAdd,
   onDelete,
@@ -13,6 +14,7 @@ export function DreamLogPanel({
   block: ScheduleBlock;
   dreams: DreamEntry[];
   loading: boolean;
+  panelRef?: RefObject<HTMLDivElement | null>;
   onClose: () => void;
   onAdd: (body: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -33,7 +35,10 @@ export function DreamLogPanel({
   }
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]">
+    <div
+      ref={panelRef}
+      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]"
+    >
       <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
         <div className="flex items-center gap-2">
           <MoonStars size={18} className="text-indigo-400" />

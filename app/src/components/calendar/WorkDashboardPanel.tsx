@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type RefObject } from "react";
 import { Briefcase, X } from "@phosphor-icons/react";
 import type { ScheduleBlock, WorkDayLog, WorkStats } from "@buddy/calendar/models";
 
@@ -23,6 +23,7 @@ export function WorkDashboardPanel({
   stats,
   dayLog,
   loading,
+  panelRef,
   onClose,
   onSaveSales,
   onSaveEndTime,
@@ -31,6 +32,7 @@ export function WorkDashboardPanel({
   stats: WorkStats | null;
   dayLog: WorkDayLog | null;
   loading: boolean;
+  panelRef?: RefObject<HTMLDivElement | null>;
   onClose: () => void;
   onSaveSales: (amount: number) => Promise<void>;
   onSaveEndTime: (endMs: number) => Promise<void>;
@@ -66,7 +68,10 @@ export function WorkDashboardPanel({
   }
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]">
+    <div
+      ref={panelRef}
+      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/40 animate-[slideIn_0.2s_ease-out]"
+    >
       <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
         <div className="flex items-center gap-2">
           <Briefcase size={18} className="text-orange-400" />

@@ -6,12 +6,18 @@ use uuid::Uuid;
 
 use crate::error::CalendarError;
 use crate::models::{
-    default_color_for_category, CreateEventInput, DateRange, Event, EventFilters, ReminderDelivery,
-    UpdateEventInput,
+    default_color_for_category, CreateEventInput, DateRange, Event, EventFilters, EventPriority,
+    Flexibility, ReminderDelivery, UpdateEventInput,
 };
 use crate::notifications::{
     dismiss_reminder, list_due_deliveries, list_notifications, mark_reminder_sent,
     parse_reminders, rebuild_reminders_for_event, serialize_reminders, snooze_reminder,
+};
+use crate::scheduling::{
+    block_focus_time, compose_day_summary, detect_conflicts, find_free_slots, plan_day,
+    reschedule_flexible, schedule_items, ConflictReport, DayCapacity, DaySummary, FreeSlot,
+    PlanDayRequest, PlanDayResult, ProposedBlock, ScheduleItem, ScheduleItemsResult,
+    SchedulingContext, SchedulingPolicy, WriteEventOutcome,
 };
 use crate::services::recurrence::{
     expand_event_in_range, parse_recurrence, serialize_recurrence,
@@ -75,6 +81,8 @@ impl CalendarService {
             created_at: row.created_at,
             updated_at: row.updated_at,
             occurrence_of: None,
+            flexibility: Flexibility::parse(&row.flexibility),
+            priority: EventPriority::parse(&row.priority),
         }
     }
 
@@ -97,7 +105,38 @@ impl CalendarService {
             sync_status: event.sync_status.clone(),
             created_at: event.created_at,
             updated_at: event.updated_at,
+            flexibility: event.flexibility.as_str().to_string(),
+            priority: event.priority.as_str().to_string(),
         }
+    }
+
+    fn scheduling_policy(&self) -> SchedulingPolicy {
+        let mut policy = SchedulingPolicy::default();
+        if let Some(v) = self.settings.get("calendar_buffer_minutes") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                policy.buffer_minutes = n.clamp(0, 60);
+            }
+        }
+        policy
+    }
+
+    async fn build_scheduling_context(
+        &self,
+        range: DateRange,
+        allow_reduce_buffer: bool,
+    ) -> Result<SchedulingContext, CalendarError> {
+        let mut policy = self.scheduling_policy();
+        policy.allow_reduce_buffer = allow_reduce_buffer;
+        let events = self.list_events(range, EventFilters::default()).await?;
+        let lifestyle_blocks = self
+            .list_schedule_blocks(range.start, range.end)
+            .await?;
+        Ok(SchedulingContext::new(
+            events,
+            lifestyle_blocks,
+            policy,
+            range,
+        ))
     }
 
     fn validate_times(start: i64, end: i64) -> Result<(), CalendarError> {
@@ -152,11 +191,37 @@ impl CalendarService {
     }
 
     pub async fn create_event(&self, input: CreateEventInput) -> Result<Event, CalendarError> {
+        match self.create_event_checked(input).await? {
+            WriteEventOutcome::Ok { event } => Ok(event),
+            WriteEventOutcome::Conflict { report } => Err(CalendarError::Conflict(
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| "conflict".into()),
+            )),
+        }
+    }
+
+    /// Conflict-aware create. Returns suggestions instead of writing when blocked.
+    pub async fn create_event_checked(
+        &self,
+        input: CreateEventInput,
+    ) -> Result<WriteEventOutcome, CalendarError> {
         let title = input.title.trim().to_string();
         if title.is_empty() {
             return Err(CalendarError::InvalidInput("title is required".into()));
         }
         Self::validate_times(input.start_time, input.end_time)?;
+
+        if !input.force && !input.all_day {
+            let pad = self.scheduling_policy().buffer_ms() + (input.end_time - input.start_time);
+            let range = DateRange {
+                start: input.start_time - pad,
+                end: input.end_time + pad,
+            };
+            let ctx = self.build_scheduling_context(range, false).await?;
+            let report = detect_conflicts(&ctx, input.start_time, input.end_time, None);
+            if report.has_conflicts {
+                return Ok(WriteEventOutcome::Conflict { report });
+            }
+        }
 
         let category = input
             .category
@@ -189,11 +254,14 @@ impl CalendarService {
             created_at: now,
             updated_at: now,
             occurrence_of: None,
+            flexibility: input.flexibility.unwrap_or(Flexibility::Fixed),
+            priority: input.priority.unwrap_or(EventPriority::Normal),
         };
 
-        self.db.upsert_buddy_calendar_event(&Self::event_to_row(&event))?;
+        self.db
+            .upsert_buddy_calendar_event(&Self::event_to_row(&event))?;
         rebuild_reminders_for_event(&self.db, &event)?;
-        Ok(event)
+        Ok(WriteEventOutcome::Ok { event })
     }
 
     pub async fn update_event(
@@ -201,6 +269,19 @@ impl CalendarService {
         id: &str,
         input: UpdateEventInput,
     ) -> Result<Event, CalendarError> {
+        match self.update_event_checked(id, input).await? {
+            WriteEventOutcome::Ok { event } => Ok(event),
+            WriteEventOutcome::Conflict { report } => Err(CalendarError::Conflict(
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| "conflict".into()),
+            )),
+        }
+    }
+
+    pub async fn update_event_checked(
+        &self,
+        id: &str,
+        input: UpdateEventInput,
+    ) -> Result<WriteEventOutcome, CalendarError> {
         let master_id = id.split("::").next().unwrap_or(id);
         let mut event = Self::row_to_event(self.db.get_buddy_calendar_event(master_id)?);
 
@@ -258,13 +339,35 @@ impl CalendarService {
         if let Some(reminders) = input.reminders {
             event.reminders = reminders;
         }
+        if let Some(flex) = input.flexibility {
+            event.flexibility = flex;
+        }
+        if let Some(priority) = input.priority {
+            event.priority = priority;
+        }
 
         Self::validate_times(event.start_time, event.end_time)?;
+
+        if !input.force && !event.all_day {
+            let pad = self.scheduling_policy().buffer_ms() + (event.end_time - event.start_time);
+            let range = DateRange {
+                start: event.start_time - pad,
+                end: event.end_time + pad,
+            };
+            let ctx = self.build_scheduling_context(range, false).await?;
+            let report =
+                detect_conflicts(&ctx, event.start_time, event.end_time, Some(&event.id));
+            if report.has_conflicts {
+                return Ok(WriteEventOutcome::Conflict { report });
+            }
+        }
+
         event.updated_at = chrono_now();
 
-        self.db.upsert_buddy_calendar_event(&Self::event_to_row(&event))?;
+        self.db
+            .upsert_buddy_calendar_event(&Self::event_to_row(&event))?;
         rebuild_reminders_for_event(&self.db, &event)?;
-        Ok(event)
+        Ok(WriteEventOutcome::Ok { event })
     }
 
     pub async fn delete_event(&self, id: &str) -> Result<(), CalendarError> {
@@ -311,6 +414,8 @@ impl CalendarService {
             created_at: now,
             updated_at: now,
             occurrence_of: None,
+            flexibility: src.flexibility,
+            priority: src.priority,
         };
         self.db.upsert_buddy_calendar_event(&Self::event_to_row(&event))?;
         rebuild_reminders_for_event(&self.db, &event)?;
@@ -475,6 +580,196 @@ impl CalendarService {
 
     pub async fn last_sleep_date(&self) -> Result<String, CalendarError> {
         crate::services::schedule_service::last_sleep_date(&self.db, None)
+    }
+
+    // --- AI scheduling ---
+
+    pub async fn find_free_time(
+        &self,
+        duration_minutes: u32,
+        range: DateRange,
+        limit: Option<usize>,
+        allow_reduce_buffer: bool,
+    ) -> Result<Vec<FreeSlot>, CalendarError> {
+        let ctx = self
+            .build_scheduling_context(range, allow_reduce_buffer)
+            .await?;
+        let duration_ms = duration_minutes.max(1) as i64 * 60_000;
+        Ok(find_free_slots(
+            &ctx,
+            duration_ms,
+            limit.unwrap_or(5),
+            None,
+        ))
+    }
+
+    pub async fn detect_event_conflicts(
+        &self,
+        start: i64,
+        end: i64,
+        exclude_event_id: Option<String>,
+        allow_reduce_buffer: bool,
+    ) -> Result<ConflictReport, CalendarError> {
+        let pad = self.scheduling_policy().buffer_ms() + (end - start);
+        let range = DateRange {
+            start: start - pad,
+            end: end + pad,
+        };
+        let ctx = self
+            .build_scheduling_context(range, allow_reduce_buffer)
+            .await?;
+        Ok(detect_conflicts(
+            &ctx,
+            start,
+            end,
+            exclude_event_id.as_deref(),
+        ))
+    }
+
+    pub async fn get_capacity(
+        &self,
+        day_ms: i64,
+    ) -> Result<DayCapacity, CalendarError> {
+        let (start, end) = crate::scheduling::local_day_bounds_ms(day_ms);
+        let ctx = self
+            .build_scheduling_context(DateRange { start, end }, false)
+            .await?;
+        Ok(crate::scheduling::compute_day_capacity(&ctx, day_ms))
+    }
+
+    pub async fn day_summary(&self, day_ms: i64) -> Result<DaySummary, CalendarError> {
+        let (start, end) = crate::scheduling::local_day_bounds_ms(day_ms);
+        let ctx = self
+            .build_scheduling_context(DateRange { start, end }, false)
+            .await?;
+        Ok(compose_day_summary(&ctx, day_ms))
+    }
+
+    pub async fn schedule_task_items(
+        &self,
+        items: Vec<ScheduleItem>,
+        range: DateRange,
+        apply: bool,
+    ) -> Result<ScheduleItemsResult, CalendarError> {
+        let ctx = self.build_scheduling_context(range, false).await?;
+        let mut result = schedule_items(&ctx, &items);
+        if apply {
+            result.scheduled = self.persist_proposals(&result.scheduled).await?;
+        }
+        Ok(result)
+    }
+
+    pub async fn plan_my_day(
+        &self,
+        request: PlanDayRequest,
+    ) -> Result<PlanDayResult, CalendarError> {
+        let (start, end) = crate::scheduling::local_day_bounds_ms(request.day);
+        let ctx = self
+            .build_scheduling_context(DateRange { start, end }, false)
+            .await?;
+        let mut result = plan_day(&ctx, &request);
+        if request.apply {
+            result.proposed = self.persist_proposals(&result.proposed).await?;
+        }
+        Ok(result)
+    }
+
+    pub async fn block_time(
+        &self,
+        title: String,
+        duration_minutes: u32,
+        range: DateRange,
+        apply: bool,
+    ) -> Result<Option<ProposedBlock>, CalendarError> {
+        let ctx = self.build_scheduling_context(range, false).await?;
+        let Some(mut proposed) = block_focus_time(&ctx, &title, duration_minutes) else {
+            return Ok(None);
+        };
+        if apply {
+            let persisted = self.persist_proposals(std::slice::from_ref(&proposed)).await?;
+            proposed = persisted.into_iter().next().unwrap_or(proposed);
+        }
+        Ok(Some(proposed))
+    }
+
+    pub async fn resolve_conflict(
+        &self,
+        title: String,
+        start: i64,
+        end: i64,
+        flexibility: Option<Flexibility>,
+        priority: Option<EventPriority>,
+        category: Option<String>,
+        description: Option<String>,
+    ) -> Result<Event, CalendarError> {
+        let mut input = CreateEventInput {
+            title,
+            description,
+            location: None,
+            category,
+            color: None,
+            start_time: start,
+            end_time: end,
+            all_day: false,
+            timezone: None,
+            recurrence: None,
+            reminders: vec![],
+            flexibility,
+            priority,
+            force: true,
+        };
+        // force writes after user chose a resolution slot
+        input.force = true;
+        self.create_event(input).await
+    }
+
+    pub async fn suggest_reschedule(
+        &self,
+        event_id: &str,
+        range: DateRange,
+    ) -> Result<Vec<FreeSlot>, CalendarError> {
+        let event = self.get_event(event_id).await?;
+        let ctx = self.build_scheduling_context(range, false).await?;
+        reschedule_flexible(&ctx, &event).map_err(CalendarError::InvalidInput)
+    }
+
+    async fn persist_proposals(
+        &self,
+        proposed: &[ProposedBlock],
+    ) -> Result<Vec<ProposedBlock>, CalendarError> {
+        let mut out = Vec::new();
+        for block in proposed {
+            let created = self
+                .create_event(CreateEventInput {
+                    title: block.title.clone(),
+                    description: block.description.clone(),
+                    location: None,
+                    category: block.category.clone(),
+                    color: None,
+                    start_time: block.start,
+                    end_time: block.end,
+                    all_day: false,
+                    timezone: None,
+                    recurrence: None,
+                    reminders: vec![],
+                    flexibility: Some(block.flexibility),
+                    priority: Some(block.priority),
+                    force: true,
+                })
+                .await?;
+            out.push(ProposedBlock {
+                title: created.title,
+                start: created.start_time,
+                end: created.end_time,
+                flexibility: created.flexibility,
+                priority: created.priority,
+                category: Some(created.category),
+                description: created.description,
+                score: block.score,
+                reasons: block.reasons.clone(),
+            });
+        }
+        Ok(out)
     }
 }
 

@@ -129,6 +129,40 @@ CALENDAR_QUERY_WEEK = [
     r"\bthis week'?s (?:schedule|agenda|events|calendar)\b",
 ]
 
+CALENDAR_FREE_TIME = [
+    r"\bwhen am i free\b",
+    r"\bfind (?:me )?(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)|free time|a (?:free )?slot)\b",
+    r"\b(?:am i|do i have) (?:any )?free\b",
+    r"\bwhat(?:'s| is) (?:my )?availability\b",
+    r"\bfree (?:tomorrow|today|this week)\b",
+]
+
+CALENDAR_BLOCK_TIME = [
+    r"\bblock\b.+\b(?:hours?|hrs?|time|for)\b",
+    r"\b(?:focus|deep work)\b.+\b(?:hours?|block)\b",
+    r"\bblock\b.+\b(?:coding|writing|focus)\b",
+]
+
+CALENDAR_SCHEDULE_TASK = [
+    r"\bfinish\b.+\b(?:this week|today|tomorrow)\b",
+    r"\bschedule (?:the |a |my )?(?:task|report|project)\b",
+    r"\bauto[- ]?schedule\b",
+]
+
+CALENDAR_PLAN_DAY = [
+    r"\bplan my day\b",
+    r"\bplan (?:out )?(?:my |the )?day\b",
+    r"\bschedule my day\b",
+]
+
+CALENDAR_CAPACITY = [
+    r"\b(?:what(?:'s| is)|how(?:'s| is)) (?:my )?(?:capacity|workload)\b",
+    r"\bcapacity (?:today|tomorrow)\b",
+    r"\bhow(?:'s| is) (?:my )?day looking\b",
+    r"\bdaily (?:summary|capacity)\b",
+    r"\bsummar(?:y|ise|ize) (?:my )?(?:day|today)\b",
+]
+
 CALENDAR_CREATE = [
     r"\b(?:add|create|schedule|book|put)\b.+\b(?:event|meeting|appointment|call|reminder)\b",
     r"\b(?:add|put|schedule)\b.+\b(?:on|to)\b.+\bcalend(?:a|e)r\b",
@@ -542,6 +576,194 @@ def _heuristic_work_hours_input(message: str) -> str:
     return json.dumps({"end_hm": f"{hour:02d}:{minute:02d}"})
 
 
+def _end_of_local_week_ms(now: Optional[datetime] = None) -> int:
+    """Sunday 23:59:59.999 local — used for 'this week' deadlines."""
+    now = now or datetime.now().astimezone()
+    # Monday=0 … Sunday=6
+    days_until_sunday = (6 - now.weekday()) % 7
+    end = (now + timedelta(days=days_until_sunday)).replace(
+        hour=23, minute=59, second=59, microsecond=999000
+    )
+    return int(end.timestamp() * 1000)
+
+
+def _local_day_bounds_ms(day: datetime) -> tuple[int, int]:
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def _heuristic_free_time_input(message: str) -> str:
+    lower = message.lower()
+    now = datetime.now().astimezone()
+    hours = _parse_duration_hours(lower)
+    minutes = int(round((hours if hours is not None else 2.0) * 60))
+    # Also catch "120 minutes" / "90 min"
+    m = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower)
+    if m and hours is None:
+        minutes = int(m.group(1))
+
+    if "tomorrow" in lower:
+        day = now + timedelta(days=1)
+        start, end = _local_day_bounds_ms(day)
+    elif "today" in lower:
+        start, end = _local_day_bounds_ms(now)
+        start = max(start, int(now.timestamp() * 1000))
+    else:
+        start = int(now.timestamp() * 1000)
+        end = _end_of_local_week_ms(now)
+
+    return json.dumps(
+        {
+            "duration_minutes": max(minutes, 15),
+            "start": start,
+            "end": end,
+            "limit": 5,
+        }
+    )
+
+
+def _heuristic_block_time_input(message: str) -> str:
+    lower = message.lower()
+    now = datetime.now().astimezone()
+    hours = _parse_duration_hours(lower)
+    minutes = int(round((hours if hours is not None else 3.0) * 60))
+    title = "Focus"
+    if "cod" in lower:
+        title = "Coding"
+    elif "writ" in lower:
+        title = "Writing"
+    elif "read" in lower:
+        title = "Reading"
+    m = re.search(
+        r"\bblock\b(?:\s+\d+\s*(?:hours?|hrs?|minutes?|mins?))?\s+(?:for\s+)?(.+)$",
+        message.strip(),
+        flags=re.IGNORECASE,
+    )
+    if m:
+        raw = re.sub(
+            r"\b(?:this week|today|tomorrow|for)\b.*$",
+            "",
+            m.group(1),
+            flags=re.IGNORECASE,
+        ).strip(" .,:-")
+        if raw and len(raw) < 60:
+            title = raw[:1].upper() + raw[1:]
+    return json.dumps(
+        {
+            "title": title,
+            "duration_minutes": max(minutes, 30),
+            "start": int(now.timestamp() * 1000),
+            "end": _end_of_local_week_ms(now),
+            "apply": True,
+        }
+    )
+
+
+def _heuristic_schedule_task_input(message: str) -> str:
+    lower = message.lower()
+    now = datetime.now().astimezone()
+    hours = _parse_duration_hours(lower)
+    minutes = int(round((hours if hours is not None else 2.0) * 60))
+    m = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower)
+    if m and hours is None:
+        minutes = int(m.group(1))
+
+    title = re.sub(
+        r"^(?:please\s+)?(?:finish|schedule|complete|do)\s+(?:the\s+|my\s+|a\s+)?",
+        "",
+        message.strip(),
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"\b(?:this week|today|tomorrow|,?\s*\d+\s*(?:hours?|hrs?|minutes?|mins?)).*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    ).strip(" .,:-")
+    if not title:
+        title = "Task"
+
+    if "tomorrow" in lower:
+        deadline_day = now + timedelta(days=1)
+        deadline = _local_day_bounds_ms(deadline_day)[1] - 1
+    elif "today" in lower:
+        deadline = _local_day_bounds_ms(now)[1] - 1
+    else:
+        deadline = _end_of_local_week_ms(now)
+
+    return json.dumps(
+        {
+            "title": title[:80],
+            "duration_minutes": max(minutes, 15),
+            "deadline": deadline,
+            "priority": "high" if "urgent" in lower or "asap" in lower else "normal",
+            "flexibility": "flexible",
+            "start": int(now.timestamp() * 1000),
+            "end": deadline,
+            "apply": True,
+        }
+    )
+
+
+def _heuristic_plan_day_input(message: str) -> str:
+    lower = message.lower()
+    now = datetime.now().astimezone()
+    day = now + timedelta(days=1) if "tomorrow" in lower else now
+    day_ms = int(day.replace(hour=12, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+    # Pull task-like phrases after "plan my day" / commas / and
+    rest = re.sub(
+        r"^(?:please\s+)?(?:plan|schedule)\s+(?:out\s+)?(?:my\s+|the\s+)?day\s*(?:for\s+)?(?:tomorrow|today)?\s*[,:]?\s*",
+        "",
+        message.strip(),
+        flags=re.IGNORECASE,
+    )
+    parts = re.split(r"\s*(?:,| and | & |\+)\s*", rest, flags=re.IGNORECASE)
+    tasks: list[dict[str, Any]] = []
+    for part in parts:
+        name = part.strip(" .,:-")
+        if not name or len(name) < 2:
+            continue
+        if re.match(r"^(?:tomorrow|today|please)$", name, flags=re.IGNORECASE):
+            continue
+        hours = _parse_duration_hours(name)
+        minutes = int(round((hours if hours is not None else 1.0) * 60))
+        clean = re.sub(
+            r"\b\d+\s*(?:hours?|hrs?|minutes?|mins?)\b",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip(" .,:-")
+        if not clean:
+            continue
+        tasks.append(
+            {
+                "title": clean[:60],
+                "duration_minutes": max(minutes, 30),
+                "flexibility": "flexible",
+                "priority": "normal",
+            }
+        )
+
+    return json.dumps(
+        {
+            "day": day_ms,
+            "tasks": tasks,
+            "include_breaks": True,
+            "apply": True,
+        }
+    )
+
+
+def _heuristic_capacity_input(message: str) -> str:
+    lower = message.lower()
+    now = datetime.now().astimezone()
+    day = now + timedelta(days=1) if "tomorrow" in lower else now
+    day_ms = int(day.replace(hour=12, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    return json.dumps({"day": day_ms})
+
+
 def _extract_idea_content(message: str) -> str:
     text = message.strip()
     lead_ins = [
@@ -616,6 +838,52 @@ def _heuristic_plan(message: str) -> PlanResponse:
             tool="coder.run",
             tool_input=json.dumps({"prompt": message, "focus": "focused"}),
             reasoning="User asked for code changes (heuristic fallback, MLX unavailable).",
+            response=None,
+        )
+    # Scheduling intelligence — before agenda queries so "free tomorrow" ≠ get_tomorrow.
+    if _matches_any(message, CALENDAR_FREE_TIME):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.find_free_time",
+            tool_input=_heuristic_free_time_input(message),
+            reasoning="User asked for free/available time.",
+            response=None,
+        )
+    if _matches_any(message, CALENDAR_PLAN_DAY):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.plan_day",
+            tool_input=_heuristic_plan_day_input(message),
+            reasoning="User asked to plan their day.",
+            response=None,
+        )
+    if _matches_any(message, CALENDAR_BLOCK_TIME):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.block_time",
+            tool_input=_heuristic_block_time_input(message),
+            reasoning="User asked to block focus time.",
+            response=None,
+        )
+    if _matches_any(message, CALENDAR_SCHEDULE_TASK):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.schedule_task",
+            tool_input=_heuristic_schedule_task_input(message),
+            reasoning="User asked to schedule a task into free time.",
+            response=None,
+        )
+    if _matches_any(message, CALENDAR_CAPACITY):
+        tool = (
+            "calendar.day_summary"
+            if re.search(r"\bsummar", message, flags=re.IGNORECASE)
+            else "calendar.get_capacity"
+        )
+        return PlanResponse(
+            intent="tool_use",
+            tool=tool,
+            tool_input=_heuristic_capacity_input(message),
+            reasoning="User asked about daily capacity or summary.",
             response=None,
         )
     if _matches_any(message, CALENDAR_QUERY_TODAY):

@@ -11,6 +11,8 @@ pub enum CalendarError {
     InvalidInput(String),
     #[error("database error: {0}")]
     Database(String),
+    #[error("scheduling conflict")]
+    Conflict(String),
 }
 
 impl From<DbError> for CalendarError {
@@ -29,6 +31,7 @@ impl CalendarError {
             Self::InvalidInput(_) => "invalid_input",
             Self::Database(_) => "database",
             Self::Message(_) => "error",
+            Self::Conflict(_) => "conflict",
         }
     }
 }

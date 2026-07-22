@@ -13,8 +13,13 @@ from context import MemoryContextPayload, build_messages, format_history
 from embeddings import embed_text, embedding_dimensions
 from mlx_client import MLXClient
 from parser import (
+    CALENDAR_BLOCK_TIME,
+    CALENDAR_CAPACITY,
     CALENDAR_CREATE,
     CALENDAR_DELETE,
+    CALENDAR_FREE_TIME,
+    CALENDAR_PLAN_DAY,
+    CALENDAR_SCHEDULE_TASK,
     DREAM_LOG,
     DREAM_SEARCH,
     WORK_SALES,
@@ -61,6 +66,23 @@ def _maybe_force_calendar_plan(plan, req: "PlanRequest"):
     titles/days/times stay accurate.
     """
     source = _schedule_source_text(req)
+    # Free-time / plan / capacity before create — "schedule my day" ≠ create_event.
+    scheduling_patterns = (
+        CALENDAR_FREE_TIME
+        + CALENDAR_PLAN_DAY
+        + CALENDAR_BLOCK_TIME
+        + CALENDAR_SCHEDULE_TASK
+        + CALENDAR_CAPACITY
+    )
+    if _matches_any(req.message, scheduling_patterns) or _matches_any(
+        source, scheduling_patterns
+    ):
+        text = (
+            source
+            if _matches_any(source, scheduling_patterns)
+            else req.message
+        )
+        return normalize_plan(_heuristic_plan(text))
     schedule_like = _matches_any(source, CALENDAR_CREATE) or _matches_any(
         req.message, CALENDAR_CREATE
     )

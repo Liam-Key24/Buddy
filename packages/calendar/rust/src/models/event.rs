@@ -30,6 +30,74 @@ fn default_reminder_method() -> String {
     "popup".to_string()
 }
 
+/// Scheduling flexibility for an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Flexibility {
+    #[default]
+    Fixed,
+    Flexible,
+    Optional,
+}
+
+impl Flexibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Flexible => "flexible",
+            Self::Optional => "optional",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "flexible" => Self::Flexible,
+            "optional" => Self::Optional,
+            _ => Self::Fixed,
+        }
+    }
+
+    pub fn is_movable(self) -> bool {
+        matches!(self, Self::Flexible | Self::Optional)
+    }
+}
+
+/// Event / task priority for scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EventPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl EventPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Self::Low,
+            "high" => Self::High,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn rank(self) -> i32 {
+        match self {
+            Self::High => 3,
+            Self::Normal => 2,
+            Self::Low => 1,
+        }
+    }
+}
+
 /// Canonical BUDDY calendar event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -60,6 +128,10 @@ pub struct Event {
     /// Set when this is an expanded occurrence of a recurring master.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence_of: Option<String>,
+    #[serde(default)]
+    pub flexibility: Flexibility,
+    #[serde(default)]
+    pub priority: EventPriority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +155,13 @@ pub struct CreateEventInput {
     pub recurrence: Option<RecurrenceRule>,
     #[serde(default)]
     pub reminders: Vec<Reminder>,
+    #[serde(default)]
+    pub flexibility: Option<Flexibility>,
+    #[serde(default)]
+    pub priority: Option<EventPriority>,
+    /// Skip conflict checks and write anyway.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +193,13 @@ pub struct UpdateEventInput {
     pub clear_recurrence: bool,
     #[serde(default)]
     pub reminders: Option<Vec<Reminder>>,
+    #[serde(default)]
+    pub flexibility: Option<Flexibility>,
+    #[serde(default)]
+    pub priority: Option<EventPriority>,
+    /// Skip conflict checks and write anyway.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

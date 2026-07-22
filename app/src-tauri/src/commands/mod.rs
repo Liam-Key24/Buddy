@@ -514,8 +514,10 @@ pub async fn calendar_get_event(
 pub async fn calendar_create_event(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
-    input: buddy_calendar::CreateEventInput,
+    mut input: buddy_calendar::CreateEventInput,
 ) -> Result<buddy_calendar::Event, String> {
+    // UI-driven creates are explicit user choices — allow writing after validation.
+    input.force = true;
     let event = state
         .calendar
         .create_event(input)
@@ -530,8 +532,9 @@ pub async fn calendar_update_event(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     id: String,
-    input: buddy_calendar::UpdateEventInput,
+    mut input: buddy_calendar::UpdateEventInput,
 ) -> Result<buddy_calendar::Event, String> {
+    input.force = true;
     let event = state
         .calendar
         .update_event(&id, input)
@@ -804,4 +807,20 @@ pub async fn lifestyle_last_sleep_date(
         .last_sleep_date()
         .await
         .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_get_capacity(
+    state: State<'_, Arc<AppState>>,
+    day: i64,
+) -> Result<buddy_calendar::DayCapacity, String> {
+    state.calendar.get_capacity(day).await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_day_summary(
+    state: State<'_, Arc<AppState>>,
+    day: i64,
+) -> Result<buddy_calendar::DaySummary, String> {
+    state.calendar.day_summary(day).await.map_err(calendar_err)
 }

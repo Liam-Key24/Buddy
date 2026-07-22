@@ -36,6 +36,9 @@ async fn create_list_and_get_event() {
                 minutes_before: 15,
                 method: "popup".into(),
             }],
+            flexibility: None,
+            priority: None,
+            force: true,
         })
         .await
         .unwrap();
@@ -78,6 +81,9 @@ async fn duplicate_and_delete() {
             timezone: None,
             recurrence: None,
             reminders: vec![],
+            flexibility: None,
+            priority: None,
+            force: true,
         })
         .await
         .unwrap();
@@ -116,6 +122,9 @@ async fn expand_daily_recurrence() {
                 by_day: vec![],
             }),
             reminders: vec![],
+            flexibility: None,
+            priority: None,
+            force: true,
         })
         .await
         .unwrap();
@@ -150,6 +159,9 @@ async fn search_by_title() {
         timezone: None,
         recurrence: None,
         reminders: vec![],
+        flexibility: None,
+        priority: None,
+        force: true,
     })
     .await
     .unwrap();

@@ -56,6 +56,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "014_memory_runtime_state",
         include_str!("../migrations/014_memory_runtime_state.sql"),
     ),
+    (
+        "015_calendar_scheduling",
+        include_str!("../migrations/015_calendar_scheduling.sql"),
+    ),
 ];
 
 pub const SPARK_STALE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -181,6 +185,10 @@ pub struct BuddyCalendarEventRow {
     pub sync_status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// fixed | flexible | optional
+    pub flexibility: String,
+    /// low | normal | high
+    pub priority: String,
 }
 
 /// Scheduled reminder delivery state for an event.
@@ -981,6 +989,12 @@ impl Database {
             sync_status: row.get(14)?,
             created_at: row.get(15)?,
             updated_at: row.get(16)?,
+            flexibility: row
+                .get::<_, Option<String>>(17)?
+                .unwrap_or_else(|| "fixed".into()),
+            priority: row
+                .get::<_, Option<String>>(18)?
+                .unwrap_or_else(|| "normal".into()),
         })
     }
 
@@ -999,7 +1013,8 @@ impl Database {
 
     const BUDDY_CALENDAR_SELECT: &'static str = "SELECT id, title, description, location, category,
             color, start_time, end_time, all_day, timezone, recurrence_json, reminders_json,
-            external_provider, external_event_id, sync_status, created_at, updated_at
+            external_provider, external_event_id, sync_status, created_at, updated_at,
+            flexibility, priority
          FROM buddy_calendar_events";
 
     const REMINDER_SELECT: &'static str = "SELECT id, event_id, reminder_minutes, fire_at, status,
@@ -1015,9 +1030,11 @@ impl Database {
             "INSERT INTO buddy_calendar_events (
                 id, title, description, location, category, color,
                 start_time, end_time, all_day, timezone, recurrence_json, reminders_json,
-                external_provider, external_event_id, sync_status, created_at, updated_at
+                external_provider, external_event_id, sync_status, created_at, updated_at,
+                flexibility, priority
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19
              )
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
@@ -1034,7 +1051,9 @@ impl Database {
                 external_provider = excluded.external_provider,
                 external_event_id = excluded.external_event_id,
                 sync_status = excluded.sync_status,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                flexibility = excluded.flexibility,
+                priority = excluded.priority",
             params![
                 event.id,
                 event.title,
@@ -1053,6 +1072,8 @@ impl Database {
                 event.sync_status,
                 event.created_at,
                 event.updated_at,
+                event.flexibility,
+                event.priority,
             ],
         )?;
         Ok(())
