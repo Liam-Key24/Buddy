@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use buddy_core::{Tool, ToolError, ToolResult};
+use buddy_core::{parse_tool_json, Tool, ToolError, ToolResult};
 use buddy_database::Database;
 use serde::Deserialize;
 use serde_json::json;
@@ -47,26 +47,17 @@ struct GitPushInput {
     repo_path: Option<String>,
 }
 
-fn setting_or(db: &Database, key: &str, default: &str) -> String {
-    db.get_setting(key)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| default.to_string())
-}
-
 impl Tool for SendEmailTool {
     fn name(&self) -> &str {
         "send_email"
     }
 
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: SendEmailInput = serde_json::from_str(input)
-            .map_err(|e| ToolError::ExecutionFailed(format!("send_email expects JSON: {e}")))?;
+        let parsed: SendEmailInput = parse_tool_json(input, "send_email")?;
 
-        let greeting = setting_or(&self.db, "email_greeting", "Hi,");
-        let signature = setting_or(&self.db, "email_signature", "");
-        let template = setting_or(
-            &self.db,
+        let greeting = self.db.get_setting_or("email_greeting", "Hi,");
+        let signature = self.db.get_setting_or("email_signature", "");
+        let template = self.db.get_setting_or(
             "email_body_template",
             "{greeting}\n\n{body}\n\n{signature}",
         );
@@ -106,8 +97,7 @@ impl Tool for GitPushTool {
     }
 
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: GitPushInput = serde_json::from_str(input)
-            .map_err(|e| ToolError::ExecutionFailed(format!("git_push expects JSON: {e}")))?;
+        let parsed: GitPushInput = parse_tool_json(input, "git_push")?;
         let remote = parsed.remote.unwrap_or_else(|| "origin".to_string());
         let branch = parsed.branch.unwrap_or_else(|| "current branch".to_string());
         let repo = parsed.repo_path.unwrap_or_else(|| "(workspace)".to_string());

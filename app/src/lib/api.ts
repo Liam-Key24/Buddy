@@ -4,6 +4,18 @@ import { listen } from "@tauri-apps/api/event";
 import { useChatStore } from "../stores/useChatStore";
 import { useCodeAgentStore } from "../stores/useCodeAgentStore";
 import { useConversationStore } from "../stores/useConversationStore";
+import type {
+  CalendarEvent,
+  CreateEventInput,
+  ReminderDelivery,
+  UpdateEventInput,
+  CreateDreamInput,
+  DreamEntry,
+  ScheduleBlock,
+  UpdateDreamInput,
+  WorkDayLog,
+  WorkStats,
+} from "@buddy/calendar/models";
 
 export interface ServiceStatusResponse {
   mlx: boolean;
@@ -131,17 +143,9 @@ export interface FullSettings {
   email_greeting: string;
   email_body_template: string;
   fs_excluded_paths: string[];
-  calendar_provider: string;
-  calcom_base_url: string;
-  calcom_api_version: string;
-  calcom_event_type_id: string;
-  calcom_username: string;
-  calcom_timezone: string;
-  calendar_default_duration_min: string;
-  calendar_auto_create_threshold: string;
-  calendar_working_windows: string;
-  calendar_min_focus_min: string;
-  calendar_move_horizon_hours: string;
+  calendar_notifications_enabled: boolean;
+  calendar_default_timezone: string;
+  calendar_default_reminders_json: string;
 }
 
 export async function loadSettings() {
@@ -359,3 +363,179 @@ export function subscribeSparkEvents(
   );
   return () => unsubs.forEach((u) => u());
 }
+
+export async function calendarListEvents(
+  start: number,
+  end: number,
+  query?: string,
+  categories?: string[],
+): Promise<CalendarEvent[]> {
+  return invoke<CalendarEvent[]>("calendar_list_events", {
+    start,
+    end,
+    query: query ?? null,
+    categories: categories ?? null,
+  });
+}
+
+export async function calendarGetEvent(id: string): Promise<CalendarEvent> {
+  return invoke<CalendarEvent>("calendar_get_event", { id });
+}
+
+export async function calendarCreateEvent(
+  input: CreateEventInput,
+): Promise<CalendarEvent> {
+  return invoke<CalendarEvent>("calendar_create_event", { input });
+}
+
+export async function calendarUpdateEvent(
+  id: string,
+  input: UpdateEventInput,
+): Promise<CalendarEvent> {
+  return invoke<CalendarEvent>("calendar_update_event", { id, input });
+}
+
+export async function calendarDeleteEvent(id: string): Promise<void> {
+  return invoke("calendar_delete_event", { id });
+}
+
+export async function calendarDuplicateEvent(
+  id: string,
+): Promise<CalendarEvent> {
+  return invoke<CalendarEvent>("calendar_duplicate_event", { id });
+}
+
+export async function calendarSearchEvents(
+  query: string,
+  start?: number,
+  end?: number,
+): Promise<CalendarEvent[]> {
+  return invoke<CalendarEvent[]>("calendar_search_events", {
+    query,
+    start: start ?? null,
+    end: end ?? null,
+  });
+}
+
+export async function calendarGetToday(): Promise<CalendarEvent[]> {
+  return invoke<CalendarEvent[]>("calendar_get_today");
+}
+
+export async function calendarGetTomorrow(): Promise<CalendarEvent[]> {
+  return invoke<CalendarEvent[]>("calendar_get_tomorrow");
+}
+
+export async function calendarGetThisWeek(): Promise<CalendarEvent[]> {
+  return invoke<CalendarEvent[]>("calendar_get_this_week");
+}
+
+export async function calendarListNotifications(): Promise<ReminderDelivery[]> {
+  return invoke<ReminderDelivery[]>("calendar_list_notifications");
+}
+
+export async function calendarSnoozeReminder(
+  id: string,
+  minutes: number,
+): Promise<void> {
+  return invoke("calendar_snooze_reminder", { id, minutes });
+}
+
+export async function calendarDismissReminder(id: string): Promise<void> {
+  return invoke("calendar_dismiss_reminder", { id });
+}
+
+export async function calendarNotificationCount(): Promise<number> {
+  return invoke<number>("calendar_notification_count");
+}
+
+export async function lifestyleListBlocks(
+  start: number,
+  end: number,
+): Promise<ScheduleBlock[]> {
+  return invoke<ScheduleBlock[]>("lifestyle_list_blocks", { start, end });
+}
+
+export async function lifestyleLastSleepDate(): Promise<string> {
+  return invoke<string>("lifestyle_last_sleep_date");
+}
+
+export async function dreamList(sleepDate: string): Promise<DreamEntry[]> {
+  return invoke<DreamEntry[]>("dream_list", { sleepDate });
+}
+
+export async function dreamLog(input: CreateDreamInput): Promise<DreamEntry> {
+  return invoke<DreamEntry>("dream_log", { input });
+}
+
+export async function dreamUpdate(
+  id: string,
+  input: UpdateDreamInput,
+): Promise<DreamEntry> {
+  return invoke<DreamEntry>("dream_update", { id, input });
+}
+
+export async function dreamDelete(id: string): Promise<void> {
+  return invoke("dream_delete", { id });
+}
+
+export async function dreamSearch(query: string): Promise<DreamEntry[]> {
+  return invoke<DreamEntry[]>("dream_search", { query });
+}
+
+export async function workGetStats(): Promise<WorkStats> {
+  return invoke<WorkStats>("work_get_stats");
+}
+
+export async function workLogSales(
+  amount: number,
+  workDate?: string | null,
+  currency?: string | null,
+): Promise<WorkDayLog> {
+  return invoke<WorkDayLog>("work_log_sales", {
+    amount,
+    workDate: workDate ?? null,
+    currency: currency ?? null,
+  });
+}
+
+export async function workSetHours(
+  workDate: string | null | undefined,
+  actualStartMs: number | null | undefined,
+  actualEndMs: number | null | undefined,
+): Promise<WorkDayLog> {
+  return invoke<WorkDayLog>("work_set_hours", {
+    workDate: workDate ?? null,
+    actualStartMs: actualStartMs ?? null,
+    actualEndMs: actualEndMs ?? null,
+  });
+}
+
+export async function workGetDayLog(workDate: string): Promise<WorkDayLog> {
+  return invoke<WorkDayLog>("work_get_day_log", { workDate });
+}
+
+export async function subscribeCalendarEvents(
+  onUpdated: () => void,
+): Promise<() => void> {
+  const unsub = await listen("calendar-updated", () => onUpdated());
+  return () => unsub();
+}
+
+export async function subscribeCalendarReminders(
+  onReminder: (delivery: ReminderDelivery) => void,
+  onCount: (count: number) => void,
+): Promise<() => void> {
+  const unsubs: Array<() => void> = [];
+  unsubs.push(
+    await listen<ReminderDelivery>("calendar-reminder", (e) =>
+      onReminder(e.payload),
+    ),
+  );
+  unsubs.push(
+    await listen<number>("calendar-notification-count", (e) =>
+      onCount(e.payload),
+    ),
+  );
+  return () => unsubs.forEach((u) => u());
+}
+

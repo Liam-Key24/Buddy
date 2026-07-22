@@ -18,13 +18,21 @@ import {
   setSecret,
 } from "../lib/api";
 
-type Tab = "general" | "keys" | "filesystem" | "email" | "actions" | "cache";
+type Tab =
+  | "general"
+  | "keys"
+  | "filesystem"
+  | "email"
+  | "calendar"
+  | "actions"
+  | "cache";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "general", label: "General" },
   { id: "keys", label: "API Keys" },
   { id: "filesystem", label: "Filesystem" },
   { id: "email", label: "Email" },
+  { id: "calendar", label: "Calendar" },
   { id: "actions", label: "External Actions" },
   { id: "cache", label: "Cache" },
 ];
@@ -61,6 +69,11 @@ export function Settings() {
         emailGreeting: s.email_greeting,
         emailBodyTemplate: s.email_body_template,
         fsExcludedPaths: s.fs_excluded_paths,
+        calendarNotificationsEnabled: s.calendar_notifications_enabled ?? true,
+        calendarDefaultTimezone: s.calendar_default_timezone ?? "UTC",
+        calendarDefaultRemindersJson:
+          s.calendar_default_reminders_json ??
+          JSON.stringify([{ minutes_before: 15, method: "popup" }]),
       });
     });
   }, []);
@@ -209,6 +222,9 @@ export function Settings() {
           {tab === "keys" && <ApiKeysSection />}
           {tab === "filesystem" && <FilesystemSection />}
           {tab === "email" && <EmailSection onSaved={flashSaved} saved={saved} />}
+          {tab === "calendar" && (
+            <CalendarSection onSaved={flashSaved} saved={saved} />
+          )}
           {tab === "actions" && <ExternalActionsSection />}
           {tab === "cache" && <CacheSection />}
         </div>
@@ -433,6 +449,76 @@ function EmailSection({
     </div>
   );
 }
+
+function CalendarSection({
+  onSaved,
+  saved,
+}: {
+  onSaved: () => void;
+  saved: boolean;
+}) {
+  const settings = useSettingsStore();
+
+  async function handleSave() {
+    await Promise.all([
+      saveSetting(
+        "calendar_notifications_enabled",
+        String(settings.calendarNotificationsEnabled),
+      ),
+      saveSetting(
+        "calendar_default_timezone",
+        settings.calendarDefaultTimezone || "UTC",
+      ),
+      saveSetting(
+        "calendar_default_reminders_json",
+        settings.calendarDefaultRemindersJson,
+      ),
+    ]);
+    onSaved();
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium text-zinc-200">BUDDY Calendar</h3>
+        <p className="text-xs text-zinc-500">
+          Native calendar is the source of truth. Reminder notifications can
+          appear on the desktop and in the calendar workspace.
+        </p>
+        <label className="flex items-center gap-3 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={settings.calendarNotificationsEnabled}
+            onChange={(e) =>
+              settings.setSettings({
+                calendarNotificationsEnabled: e.target.checked,
+              })
+            }
+            className="h-4 w-4 rounded border-zinc-600"
+          />
+          Enable desktop reminder notifications
+        </label>
+        <Field
+          label="Default timezone (IANA)"
+          value={settings.calendarDefaultTimezone}
+          onChange={(v) =>
+            settings.setSettings({ calendarDefaultTimezone: v })
+          }
+        />
+        <Field
+          label='Default reminders JSON (e.g. [{"minutes_before":15,"method":"popup"}])'
+          value={settings.calendarDefaultRemindersJson}
+          onChange={(v) =>
+            settings.setSettings({ calendarDefaultRemindersJson: v })
+          }
+        />
+        <SaveButton onClick={handleSave} saved={saved} />
+      </div>
+    </div>
+  );
+}
+
+
 
 function ExternalActionsSection() {
   const [actions, setActions] = useState<ExternalAction[]>([]);

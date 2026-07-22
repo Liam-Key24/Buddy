@@ -19,17 +19,9 @@ interface SettingsState {
   emailGreeting: string;
   emailBodyTemplate: string;
   fsExcludedPaths: string[];
-  calendarProvider: string;
-  calcomBaseUrl: string;
-  calcomApiVersion: string;
-  calcomEventTypeId: string;
-  calcomUsername: string;
-  calcomTimezone: string;
-  calendarDefaultDurationMin: string;
-  calendarAutoCreateThreshold: string;
-  calendarWorkingWindows: string;
-  calendarMinFocusMin: string;
-  calendarMoveHorizonHours: string;
+  calendarNotificationsEnabled: boolean;
+  calendarDefaultTimezone: string;
+  calendarDefaultRemindersJson: string;
   setSettings: (settings: Partial<Omit<SettingsState, "setSettings">>) => void;
 }
 
@@ -52,16 +44,11 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   emailGreeting: "Hi,",
   emailBodyTemplate: "{greeting}\n\n{body}\n\n{signature}",
   fsExcludedPaths: [],
-  calendarProvider: "calcom_self_hosted",
-  calcomBaseUrl: "",
-  calcomApiVersion: "2024-08-13",
-  calcomEventTypeId: "",
-  calcomUsername: "",
-  calcomTimezone: "",
-  calendarDefaultDurationMin: "30",
-  calendarAutoCreateThreshold: "0.85",
-  calendarWorkingWindows: "09:00-12:00,14:00-18:00",
-  calendarMinFocusMin: "90",
-  calendarMoveHorizonHours: "48",
+  calendarNotificationsEnabled: true,
+  calendarDefaultTimezone:
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  calendarDefaultRemindersJson: JSON.stringify([
+    { minutes_before: 15, method: "popup" },
+  ]),
   setSettings: (settings) => set(settings),
 }));

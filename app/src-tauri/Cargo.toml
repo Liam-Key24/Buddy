@@ -30,10 +30,9 @@ buddy-database = { path = "../../database" }
 buddy-memory = { path = "../../memory" }
 buddy-intelligence = { path = "../../intelligence" }
 buddy-plugins = { path = "../../plugins" }
+buddy-personality = { path = "../../personality" }
+buddy-clarification = { path = "../../clarification" }
+buddy-coder = { path = "../../packages/buddy-coder" }
+buddy-calendar = { path = "../../packages/calendar/rust" }
 dirs = "6"
 keyring = { version = "3", features = ["apple-native"] }
-regex = "1"
-portable-pty = "0.9"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["clock"] }
-chrono-tz = "0.10"

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use buddy_core::ToolResult;
+use buddy_core::{excluded_paths_from_setting, ToolResult};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
@@ -28,26 +28,13 @@ pub struct SettingsMap {
     pub email_greeting: String,
     pub email_body_template: String,
     pub fs_excluded_paths: Vec<String>,
-    pub calendar_provider: String,
-    pub calcom_base_url: String,
-    pub calcom_api_version: String,
-    pub calcom_event_type_id: String,
-    pub calcom_username: String,
-    pub calcom_timezone: String,
-    pub calendar_default_duration_min: String,
-    pub calendar_auto_create_threshold: String,
-    pub calendar_working_windows: String,
-    pub calendar_min_focus_min: String,
-    pub calendar_move_horizon_hours: String,
+    pub calendar_notifications_enabled: bool,
+    pub calendar_default_timezone: String,
+    pub calendar_default_reminders_json: String,
 }
 
 fn setting_or(state: &AppState, key: &str, default: &str) -> String {
-    state
-        .db
-        .get_setting(key)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| default.to_string())
+    state.db.get_setting_or(key, default)
 }
 
 #[tauri::command]
@@ -123,13 +110,8 @@ pub fn run_tool(
 pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, String> {
     const DEFAULT_MODEL: &str = "mlx-community/Llama-3.2-3B-Instruct-4bit";
     let model_name = setting_or(&state, "model_name", DEFAULT_MODEL);
-    let fs_excluded_paths = state
-        .db
-        .get_setting("fs_excluded_paths")
-        .ok()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
-        .unwrap_or_default();
+    let fs_excluded_paths =
+        excluded_paths_from_setting(state.db.get_setting("fs_excluded_paths").ok().flatten());
 
     Ok(SettingsMap {
         mlx_url: state.mlx_url(),
@@ -156,27 +138,19 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, Stri
             "email_body_template",
             "{greeting}\n\n{body}\n\n{signature}",
         ),
-        calendar_provider: setting_or(&state, "calendar_provider", "calcom_self_hosted"),
-        calcom_base_url: setting_or(&state, "calcom_base_url", ""),
-        calcom_api_version: setting_or(&state, "calcom_api_version", "2024-08-13"),
-        calcom_event_type_id: setting_or(&state, "calcom_event_type_id", ""),
-        calcom_username: setting_or(&state, "calcom_username", ""),
-        calcom_timezone: setting_or(&state, "calcom_timezone", ""),
-        calendar_default_duration_min: setting_or(&state, "calendar_default_duration_min", "30"),
-        calendar_auto_create_threshold: setting_or(
-            &state,
-            "calendar_auto_create_threshold",
-            "0.85",
-        ),
-        calendar_working_windows: setting_or(
-            &state,
-            "calendar_working_windows",
-            "09:00-12:00,14:00-18:00",
-        ),
-        calendar_min_focus_min: setting_or(&state, "calendar_min_focus_min", "90"),
-        calendar_move_horizon_hours: setting_or(&state, "calendar_move_horizon_hours", "48"),
         fs_excluded_paths,
         model_name,
+        calendar_notifications_enabled: setting_or(
+            &state,
+            "calendar_notifications_enabled",
+            "true",
+        ) == "true",
+        calendar_default_timezone: setting_or(&state, "calendar_default_timezone", "UTC"),
+        calendar_default_reminders_json: setting_or(
+            &state,
+            "calendar_default_reminders_json",
+            "[{\"minutes_before\":15,\"method\":\"popup\"}]",
+        ),
     })
 }
 
@@ -277,7 +251,7 @@ pub fn get_stale_sparks(state: State<'_, Arc<AppState>>) -> Result<Vec<buddy_dat
 
 #[tauri::command]
 pub fn set_secret(key: String, value: String) -> Result<(), String> {
-    if !crate::secrets::KNOWN_SECRETS.contains(&key.as_str()) {
+    if !crate::secrets::is_known_secret(&key) {
         return Err(format!("unknown secret key: {key}"));
     }
     crate::secrets::set_secret(&key, &value)
@@ -285,7 +259,7 @@ pub fn set_secret(key: String, value: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn delete_secret(key: String) -> Result<(), String> {
-    if !crate::secrets::KNOWN_SECRETS.contains(&key.as_str()) {
+    if !crate::secrets::is_known_secret(&key) {
         return Err(format!("unknown secret key: {key}"));
     }
     crate::secrets::delete_secret(&key)
@@ -293,7 +267,7 @@ pub fn delete_secret(key: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_secret_status() -> Result<std::collections::HashMap<String, bool>, String> {
-    Ok(crate::secrets::KNOWN_SECRETS
+    Ok(crate::secrets::known_secrets()
         .iter()
         .map(|key| (key.to_string(), crate::secrets::has_secret(key)))
         .collect())
@@ -321,18 +295,9 @@ pub async fn refresh_cache(
     state: State<'_, Arc<AppState>>,
 ) -> Result<RefreshCacheResult, String> {
     let start = std::time::Instant::now();
-    let ctx = buddy_memory::MemoryContext {
-        workspace_path: state.project_root.clone(),
-        conversation_id: None,
-        task_id: None,
-    };
 
-    let memories_reindexed = state
-        .intelligence
-        .reindex_workspace(&ctx)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = state.intelligence.run_maintenance(&ctx).await;
+    let memories_reindexed = state.memory.reindex_workspace().await?;
+    let _ = state.memory.run_global_maintenance().await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let _ = state.db.log_external_action(
@@ -397,21 +362,81 @@ pub async fn send_codex_message(
     focus: Option<String>,
     attachments: Option<Vec<String>>,
 ) -> Result<(), String> {
-    crate::codex_orchestrator::send_codex_message(
-        app,
-        &state,
-        conversation_id,
-        text,
-        focus,
-        attachments.unwrap_or_default(),
-    )
-    .await
+    use crate::coder_bridge::AppEmit;
+    use buddy_coder::CodeEmit;
+
+    let emit = AppEmit(app);
+    let conversation = state
+        .db
+        .get_conversation(&conversation_id)
+        .map_err(|e| e.to_string())?;
+    let resolved_focus = focus
+        .clone()
+        .or(conversation.focus_mode.clone())
+        .unwrap_or_else(|| "planning".to_string());
+    let attachments = attachments.unwrap_or_default();
+
+    let user_metadata = serde_json::json!({
+        "attachments": &attachments,
+        "focus": &resolved_focus,
+    })
+    .to_string();
+    state
+        .db
+        .add_message_with_metadata(&conversation_id, "user", &text, Some(&user_metadata))
+        .map_err(|e| e.to_string())?;
+
+    if state
+        .db
+        .get_messages(&conversation_id)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        == 1
+    {
+        let title: String = text.chars().take(40).collect();
+        let _ = state
+            .db
+            .update_conversation_title(&conversation_id, &title);
+    }
+
+    let input = serde_json::json!({
+        "conversation_id": &conversation_id,
+        "prompt": &text,
+        "focus": focus,
+        "attachments": &attachments,
+    })
+    .to_string();
+
+    // Same Core pipeline as chat: TaskRunner → coder.run plugin.
+    let result = tokio::task::block_in_place(|| state.task_runner.run("coder.run", &input))
+        .map_err(|e| e.to_string())?;
+
+    emit.chunk(&result.output);
+
+    let assistant_metadata = serde_json::json!({
+        "backend": "coder.run",
+        "focus": resolved_focus,
+        "attachments": attachments.len(),
+    })
+    .to_string();
+    state
+        .db
+        .add_message_with_metadata(
+            &conversation_id,
+            "assistant",
+            &result.output,
+            Some(&assistant_metadata),
+        )
+        .map_err(|e| e.to_string())?;
+
+    emit.done();
+    Ok(())
 }
 
 #[tauri::command]
 pub fn terminal_open(
     app: tauri::AppHandle,
-    manager: State<'_, Arc<crate::terminal::TerminalManager>>,
+    manager: State<'_, Arc<buddy_coder::TerminalManager>>,
     cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -426,7 +451,7 @@ pub fn terminal_open(
 
 #[tauri::command]
 pub fn terminal_write(
-    manager: State<'_, Arc<crate::terminal::TerminalManager>>,
+    manager: State<'_, Arc<buddy_coder::TerminalManager>>,
     id: String,
     data: String,
 ) -> Result<(), String> {
@@ -435,7 +460,7 @@ pub fn terminal_write(
 
 #[tauri::command]
 pub fn terminal_resize(
-    manager: State<'_, Arc<crate::terminal::TerminalManager>>,
+    manager: State<'_, Arc<buddy_coder::TerminalManager>>,
     id: String,
     cols: u16,
     rows: u16,
@@ -445,9 +470,338 @@ pub fn terminal_resize(
 
 #[tauri::command]
 pub fn terminal_close(
-    manager: State<'_, Arc<crate::terminal::TerminalManager>>,
+    manager: State<'_, Arc<buddy_coder::TerminalManager>>,
     id: String,
 ) -> Result<(), String> {
     manager.close(&id);
     Ok(())
+}
+
+fn calendar_err(e: buddy_calendar::CalendarError) -> String {
+    format!("{}: {}", e.code(), e)
+}
+
+#[tauri::command]
+pub async fn calendar_list_events(
+    state: State<'_, Arc<AppState>>,
+    start: i64,
+    end: i64,
+    query: Option<String>,
+    categories: Option<Vec<String>>,
+) -> Result<Vec<buddy_calendar::Event>, String> {
+    state
+        .calendar
+        .list_events(
+            buddy_calendar::DateRange { start, end },
+            buddy_calendar::EventFilters {
+                query,
+                categories: categories.unwrap_or_default(),
+            },
+        )
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_get_event(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<buddy_calendar::Event, String> {
+    state.calendar.get_event(&id).await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_create_event(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    input: buddy_calendar::CreateEventInput,
+) -> Result<buddy_calendar::Event, String> {
+    let event = state
+        .calendar
+        .create_event(input)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(event)
+}
+
+#[tauri::command]
+pub async fn calendar_update_event(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    input: buddy_calendar::UpdateEventInput,
+) -> Result<buddy_calendar::Event, String> {
+    let event = state
+        .calendar
+        .update_event(&id, input)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(event)
+}
+
+#[tauri::command]
+pub async fn calendar_delete_event(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .calendar
+        .delete_event(&id)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_duplicate_event(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<buddy_calendar::Event, String> {
+    let event = state
+        .calendar
+        .duplicate_event(&id)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(event)
+}
+
+#[tauri::command]
+pub async fn calendar_search_events(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Vec<buddy_calendar::Event>, String> {
+    let range = match (start, end) {
+        (Some(start), Some(end)) => Some(buddy_calendar::DateRange { start, end }),
+        _ => None,
+    };
+    state
+        .calendar
+        .search_events(&query, range)
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_get_today(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<buddy_calendar::Event>, String> {
+    state.calendar.get_today().await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_get_tomorrow(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<buddy_calendar::Event>, String> {
+    state.calendar.get_tomorrow().await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_get_this_week(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<buddy_calendar::Event>, String> {
+    state.calendar.get_this_week().await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_list_notifications(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<buddy_calendar::ReminderDelivery>, String> {
+    state
+        .calendar
+        .list_notifications()
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn calendar_snooze_reminder(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    minutes: u32,
+) -> Result<(), String> {
+    state
+        .calendar
+        .snooze_reminder(&id, minutes)
+        .await
+        .map_err(calendar_err)?;
+    if let Ok(count) = state.calendar.notification_count().await {
+        let _ = app.emit("calendar-notification-count", count);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_dismiss_reminder(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .calendar
+        .dismiss_reminder(&id)
+        .await
+        .map_err(calendar_err)?;
+    if let Ok(count) = state.calendar.notification_count().await {
+        let _ = app.emit("calendar-notification-count", count);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_notification_count(
+    state: State<'_, Arc<AppState>>,
+) -> Result<i64, String> {
+    state
+        .calendar
+        .notification_count()
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn lifestyle_list_blocks(
+    state: State<'_, Arc<AppState>>,
+    start: i64,
+    end: i64,
+) -> Result<Vec<buddy_calendar::ScheduleBlock>, String> {
+    state
+        .calendar
+        .list_schedule_blocks(start, end)
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn dream_list(
+    state: State<'_, Arc<AppState>>,
+    sleep_date: String,
+) -> Result<Vec<buddy_calendar::DreamEntry>, String> {
+    state
+        .calendar
+        .list_dreams(&sleep_date)
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn dream_log(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    input: buddy_calendar::CreateDreamInput,
+) -> Result<buddy_calendar::DreamEntry, String> {
+    let dream = state.calendar.log_dream(input).await.map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(dream)
+}
+
+#[tauri::command]
+pub async fn dream_update(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    input: buddy_calendar::UpdateDreamInput,
+) -> Result<buddy_calendar::DreamEntry, String> {
+    let dream = state
+        .calendar
+        .update_dream(&id, input)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(dream)
+}
+
+#[tauri::command]
+pub async fn dream_delete(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    state.calendar.delete_dream(&id).await.map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dream_search(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> Result<Vec<buddy_calendar::DreamEntry>, String> {
+    state
+        .calendar
+        .search_dreams(&query)
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn work_get_stats(
+    state: State<'_, Arc<AppState>>,
+) -> Result<buddy_calendar::WorkStats, String> {
+    state.calendar.get_work_stats().await.map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn work_log_sales(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    amount: f64,
+    work_date: Option<String>,
+    currency: Option<String>,
+) -> Result<buddy_calendar::WorkDayLog, String> {
+    let log = state
+        .calendar
+        .log_work_sales(work_date, amount, currency)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(log)
+}
+
+#[tauri::command]
+pub async fn work_set_hours(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    work_date: Option<String>,
+    actual_start_ms: Option<i64>,
+    actual_end_ms: Option<i64>,
+) -> Result<buddy_calendar::WorkDayLog, String> {
+    let log = state
+        .calendar
+        .set_work_hours(work_date, actual_start_ms, actual_end_ms)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(log)
+}
+
+#[tauri::command]
+pub async fn work_get_day_log(
+    state: State<'_, Arc<AppState>>,
+    work_date: String,
+) -> Result<buddy_calendar::WorkDayLog, String> {
+    state
+        .calendar
+        .get_work_day_log(&work_date)
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn lifestyle_last_sleep_date(
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    state
+        .calendar
+        .last_sleep_date()
+        .await
+        .map_err(calendar_err)
 }

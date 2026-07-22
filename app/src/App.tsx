@@ -9,16 +9,22 @@ import { Settings } from "./pages/Settings";
 import { Dashboard } from "./pages/Dashboard";
 import { Spark } from "./pages/Spark";
 import { CodeAgent } from "./pages/CodeAgent";
+import { Calendar } from "./pages/Calendar";
 import { useAppStore } from "./stores/useAppStore";
 import { useChatStore } from "./stores/useChatStore";
 import { useCodeAgentStore } from "./stores/useCodeAgentStore";
 import { useSparkStore } from "./stores/useSparkStore";
+import { useCalendarStore } from "./stores/useCalendarStore";
+import { useCalendarNotificationStore } from "./stores/useCalendarNotificationStore";
+import { useLifestyleStore } from "./stores/useLifestyleStore";
 import {
   fetchServiceStatus,
   loadCodexMessages,
   loadConversations,
   loadMessages,
   startBrain,
+  subscribeCalendarEvents,
+  subscribeCalendarReminders,
   subscribeCodexEvents,
   subscribeSparkEvents,
 } from "./lib/api";
@@ -61,6 +67,26 @@ function App() {
       (url) => useCodeAgentStore.getState().setPreviewUrl(url),
     );
 
+    let unsubCalendar = () => {};
+    let unsubReminders = () => {};
+    subscribeCalendarEvents(() => {
+      useCalendarStore.getState().loadRange().catch(console.error);
+      useLifestyleStore.getState().loadBlocks().catch(console.error);
+    }).then((unsub) => {
+      unsubCalendar = unsub;
+    });
+    subscribeCalendarReminders(
+      (delivery) => {
+        useCalendarNotificationStore.getState().pushReminder(delivery);
+      },
+      (count) => {
+        useCalendarNotificationStore.getState().setCount(count);
+      },
+    ).then((unsub) => {
+      unsubReminders = unsub;
+    });
+    useCalendarNotificationStore.getState().refresh().catch(console.error);
+
     async function pollStatus() {
       try {
         const status = await fetchServiceStatus();
@@ -80,6 +106,8 @@ function App() {
       clearInterval(staleInterval);
       unsub();
       unsubCodex();
+      unsubCalendar();
+      unsubReminders();
     };
   }, [setMlxStatus, setBrainStatus, refresh, refreshStale, setCurrentPage]);
 
@@ -105,6 +133,8 @@ function App() {
               <Spark />
             ) : page === "code" ? (
               <CodeAgent />
+            ) : page === "calendar" ? (
+              <Calendar />
             ) : (
               <>
                 <ChatWindow />

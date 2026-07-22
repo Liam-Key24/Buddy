@@ -81,18 +81,9 @@ export function CodeAgentInput() {
     beginSend(trimmed);
 
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7853/ingest/712ccc2a-29d1-4885-8261-d223e160088e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4e7020'},body:JSON.stringify({sessionId:'4e7020',location:'CodeAgentInput.tsx:handleSend',message:'Sending message to backend',data:{convId},timestamp:Date.now(),runId:'run1',hypothesisId:'Backend Error Early Exit'})}).catch(()=>{});
-      // #endregion
       await sendCodexMessage(convId, trimmed, focus, sentAttachments);
-      // #region agent log
-      fetch('http://127.0.0.1:7853/ingest/712ccc2a-29d1-4885-8261-d223e160088e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4e7020'},body:JSON.stringify({sessionId:'4e7020',location:'CodeAgentInput.tsx:handleSend',message:'Message sent successfully',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'Backend Error Early Exit'})}).catch(()=>{});
-      // #endregion
     } catch (err) {
       console.error("codex send failed:", err);
-      // #region agent log
-      fetch('http://127.0.0.1:7853/ingest/712ccc2a-29d1-4885-8261-d223e160088e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4e7020'},body:JSON.stringify({sessionId:'4e7020',location:'CodeAgentInput.tsx:handleSend',message:'Error caught in frontend',data:{error:String(err)},timestamp:Date.now(),runId:'run1',hypothesisId:'Backend Error Early Exit'})}).catch(()=>{});
-      // #endregion
     }
   }
 

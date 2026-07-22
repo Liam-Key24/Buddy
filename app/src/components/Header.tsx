@@ -8,6 +8,7 @@ export function Header() {
     chat: "Chat",
     spark: "Spark",
     code: "Code Agent",
+    calendar: "Calendar",
     settings: "Settings",
   };
 

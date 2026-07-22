@@ -6,14 +6,25 @@ edition.workspace = true
 [dependencies]
 buddy-core = { path = "../core" }
 buddy-database = { path = "../database" }
+buddy-memory = { path = "../memory" }
+buddy-calendar = { path = "../packages/calendar/rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
 buddy-core = { path = "../core" }
 buddy-database = { path = "../database" }
+buddy-memory = { path = "../memory" }
 uuid = { version = "1", features = ["v4"] }
 
 [[test]]
 name = "echo_tool"
 path = "tests/echo_tool.rs"
+
+[[test]]
+name = "calendar_tools"
+path = "tests/calendar_tools.rs"
+
+[[test]]
+name = "plugin_manager"
+path = "tests/plugin_manager.rs"

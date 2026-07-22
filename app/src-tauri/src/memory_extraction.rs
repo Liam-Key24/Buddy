@@ -93,8 +93,7 @@ pub async fn run_memory_extraction(
     };
 
     let workspace_summary = state
-        .intelligence
-        .memory()
+        .memory
         .workspace_summary(ctx)
         .map_err(|e| e.to_string())?;
 
@@ -305,10 +304,7 @@ pub async fn run_memory_extraction(
 
     index_saved_sync(state, ctx, &result.saved).await;
 
-    let _ = state
-        .intelligence
-        .on_extraction_saved(ctx, &extraction_data)
-        .await;
+    state.memory.on_extraction_saved(ctx, &extraction_data).await;
 
     info!(kind = %kind, "memory extraction saved");
     Ok(())

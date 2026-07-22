@@ -2,17 +2,23 @@ import { create } from "zustand";
 
 export type ServiceStatus = "online" | "offline" | "checking";
 
+export type AppPage =
+  | "dashboard"
+  | "chat"
+  | "spark"
+  | "settings"
+  | "code"
+  | "calendar";
+
 interface AppState {
   mlxStatus: ServiceStatus;
   brainStatus: ServiceStatus;
-  currentPage: "dashboard" | "chat" | "spark" | "settings" | "code";
+  currentPage: AppPage;
   sidebarCollapsed: boolean;
   pendingChatMessage: string | null;
   setMlxStatus: (status: ServiceStatus) => void;
   setBrainStatus: (status: ServiceStatus) => void;
-  setCurrentPage: (
-    page: "dashboard" | "chat" | "spark" | "settings" | "code",
-  ) => void;
+  setCurrentPage: (page: AppPage) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
   setPendingChatMessage: (message: string | null) => void;

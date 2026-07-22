@@ -1,0 +1,21 @@
+[package]
+name = "buddy-calendar"
+version.workspace = true
+edition.workspace = true
+description = "Native BUDDY Calendar: local source-of-truth events, reminders, and AI tools"
+
+[dependencies]
+buddy-core = { path = "../../../core" }
+buddy-database = { path = "../../../database" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::error::ToolError;
+
 #[derive(Debug, Error)]
 pub enum GuardError {
     #[error("could not resolve home directory")]
@@ -12,6 +14,25 @@ pub enum GuardError {
     Excluded(String),
     #[error("invalid path: {0}")]
     Invalid(String),
+}
+
+impl From<GuardError> for ToolError {
+    fn from(err: GuardError) -> Self {
+        ToolError::ExecutionFailed(err.to_string())
+    }
+}
+
+/// Default excluded subpaths used when the `fs_excluded_paths` setting is
+/// missing or unparseable. Shared by any tool/feature that resolves paths
+/// against the user's home directory.
+pub const DEFAULT_EXCLUSIONS: &[&str] =
+    &["Library", ".Trash", ".ssh", ".gnupg", ".cache", "Pictures"];
+
+/// Parses the `fs_excluded_paths` setting (a JSON array of strings), falling
+/// back to [`DEFAULT_EXCLUSIONS`] when absent or invalid.
+pub fn excluded_paths_from_setting(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .unwrap_or_else(|| DEFAULT_EXCLUSIONS.iter().map(|s| s.to_string()).collect())
 }
 
 /// Restricts filesystem access to the user's home directory, minus a

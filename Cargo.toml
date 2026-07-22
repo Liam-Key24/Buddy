@@ -5,6 +5,10 @@ members = [
     "memory",
     "intelligence",
     "plugins",
+    "personality",
+    "clarification",
+    "packages/buddy-coder",
+    "packages/calendar/rust",
     "app/src-tauri",
 ]
 resolver = "2"

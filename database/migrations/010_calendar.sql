@@ -1,11 +1,12 @@
--- Calendar scheduling: local mirror of proposed/scheduled events plus the
+-- Calendar scheduling: local mirror of synced provider events plus the
 -- policy metadata Buddy needs to prioritise and reschedule around conflicts.
--- The provider (self-hosted cal.com) owns the real bookings; this table keeps
--- Buddy's source of truth for intelligence and conflict resolution.
+-- The provider (Cal.com / linked Google Calendar) owns the real bookings;
+-- this table keeps Buddy's cache for the dashboard, AI tools, and intelligence.
 CREATE TABLE IF NOT EXISTS calendar_events (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT,
+    location TEXT,
     source_type TEXT NOT NULL DEFAULT 'manual',
     source_id TEXT,
     start_at INTEGER NOT NULL,
@@ -15,9 +16,13 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     movable INTEGER NOT NULL DEFAULT 1,
     confidence REAL NOT NULL DEFAULT 1.0,
     kind TEXT NOT NULL DEFAULT 'focus',
-    status TEXT NOT NULL DEFAULT 'proposed',
+    status TEXT NOT NULL DEFAULT 'confirmed',
     provider TEXT,
     provider_event_id TEXT,
+    attendees_json TEXT NOT NULL DEFAULT '[]',
+    recurrence_json TEXT,
+    reminders_json TEXT NOT NULL DEFAULT '[]',
+    color TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -26,3 +31,5 @@ CREATE INDEX IF NOT EXISTS idx_calendar_events_start_at ON calendar_events(start
 CREATE INDEX IF NOT EXISTS idx_calendar_events_status ON calendar_events(status);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_event_id
   ON calendar_events(provider_event_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_provider
+  ON calendar_events(provider);

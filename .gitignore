@@ -8,3 +8,5 @@ brain/venv/
 *.db-journal
 .vscode/
 .idea/
+__pycache__/
+*.pyc

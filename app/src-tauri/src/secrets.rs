@@ -8,14 +8,20 @@ use keyring::Entry;
 
 const SERVICE: &str = "com.liamgk.buddy";
 
-/// Keys that the Settings UI is allowed to manage.
-pub const KNOWN_SECRETS: &[&str] = &[
-    "openai_api_key",
-    "cursor_api_key",
-    "smtp_password",
-    "calcom_api_key",
-    "calcom_webhook_secret",
-];
+/// Secret keys owned by the app shell (code agent backends) rather than any
+/// single plugin.
+const SHELL_SECRETS: &[&str] = &["openai_api_key", "cursor_api_key"];
+
+/// Keys that the Settings UI is allowed to manage: shell-owned keys plus
+/// whatever each `BuddyPlugin::secret_keys()` declares, so a new plugin's
+/// secrets don't need a second edit here.
+pub fn known_secrets() -> Vec<&'static str> {
+    let mut keys: Vec<&'static str> = SHELL_SECRETS.to_vec();
+    for plugin in buddy_plugins::all_builtin_plugins() {
+        keys.extend(plugin.secret_keys());
+    }
+    keys
+}
 
 fn entry(key: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, key).map_err(|e| e.to_string())
@@ -43,4 +49,8 @@ pub fn delete_secret(key: &str) -> Result<(), String> {
 
 pub fn has_secret(key: &str) -> bool {
     matches!(get_secret(key), Ok(Some(_)))
+}
+
+pub fn is_known_secret(key: &str) -> bool {
+    known_secrets().contains(&key)
 }

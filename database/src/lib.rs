@@ -36,7 +36,26 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "009_agents_and_audit",
         include_str!("../migrations/009_agents_and_audit.sql"),
     ),
-    ("010_calendar", include_str!("../migrations/010_calendar.sql")),
+    (
+        "010_calendar",
+        include_str!("../migrations/010_calendar.sql"),
+    ),
+    (
+        "011_calendar_columns",
+        include_str!("../migrations/011_calendar_columns.sql"),
+    ),
+    (
+        "012_buddy_calendar",
+        include_str!("../migrations/012_buddy_calendar.sql"),
+    ),
+    (
+        "013_lifestyle_schedule",
+        include_str!("../migrations/013_lifestyle_schedule.sql"),
+    ),
+    (
+        "014_memory_runtime_state",
+        include_str!("../migrations/014_memory_runtime_state.sql"),
+    ),
 ];
 
 pub const SPARK_STALE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -142,48 +161,71 @@ pub struct Spark {
     pub source_conversation_id: Option<String>,
 }
 
+/// Native BUDDY Calendar event (source of truth).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CalendarEvent {
+pub struct BuddyCalendarEventRow {
     pub id: String,
     pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub source_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<String>,
-    pub start_at: i64,
-    pub end_at: i64,
+    pub location: Option<String>,
+    pub category: String,
+    pub color: Option<String>,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub all_day: bool,
     pub timezone: String,
-    pub priority: String,
-    pub movable: bool,
-    pub confidence: f64,
-    pub kind: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_event_id: Option<String>,
+    pub recurrence_json: Option<String>,
+    pub reminders_json: String,
+    pub external_provider: Option<String>,
+    pub external_event_id: Option<String>,
+    pub sync_status: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-/// Fields required to create a new calendar event in the local mirror.
-#[derive(Debug, Clone, Default)]
-pub struct NewCalendarEvent {
-    pub title: String,
-    pub description: Option<String>,
-    pub source_type: String,
-    pub source_id: Option<String>,
-    pub start_at: i64,
-    pub end_at: i64,
-    pub timezone: String,
-    pub priority: String,
-    pub movable: bool,
-    pub confidence: f64,
-    pub kind: String,
+/// Scheduled reminder delivery state for an event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderStateRow {
+    pub id: String,
+    pub event_id: String,
+    pub reminder_minutes: i64,
+    pub fire_at: i64,
     pub status: String,
-    pub provider: Option<String>,
-    pub provider_event_id: Option<String>,
+    pub snoozed_until: Option<i64>,
+    pub delivered_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Work or sleep schedule rule (segments expanded at read time).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifestyleScheduleRuleRow {
+    pub kind: String,
+    pub segments_json: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamEntryRow {
+    pub id: String,
+    pub sleep_date: String,
+    pub title: Option<String>,
+    pub body: String,
+    pub tags_json: String,
+    pub mood: Option<i64>,
+    pub sleep_quality: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkDayLogRow {
+    pub work_date: String,
+    pub actual_start_ms: Option<i64>,
+    pub actual_end_ms: Option<i64>,
+    pub sales_amount: f64,
+    pub sales_currency: String,
+    pub notes: Option<String>,
+    pub updated_at: i64,
 }
 
 pub struct Database {
@@ -582,6 +624,45 @@ impl Database {
         Ok(())
     }
 
+    /// Convenience wrapper for the common "read a setting, fall back to a
+    /// default" pattern used throughout plugins and command handlers.
+    pub fn get_setting_or(&self, key: &str, default: &str) -> String {
+        self.get_setting(key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// Memory-owned temporary working state (pending clarification, etc.).
+    pub fn get_runtime_state(&self, key: &str) -> Result<Option<String>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT value FROM memory_runtime_state WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_runtime_state(&self, key: &str, value: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono_now();
+        conn.execute(
+            "INSERT INTO memory_runtime_state (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_runtime_state(&self, key: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM memory_runtime_state WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn get_all_settings(&self) -> Result<Vec<(String, String)>, DbError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
@@ -867,226 +948,6 @@ impl Database {
         Ok(())
     }
 
-    fn row_to_calendar_event(row: &rusqlite::Row<'_>) -> Result<CalendarEvent, rusqlite::Error> {
-        let movable: i64 = row.get(9)?;
-        Ok(CalendarEvent {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            description: row.get(2)?,
-            source_type: row.get(3)?,
-            source_id: row.get(4)?,
-            start_at: row.get(5)?,
-            end_at: row.get(6)?,
-            timezone: row.get(7)?,
-            priority: row.get(8)?,
-            movable: movable != 0,
-            confidence: row.get(10)?,
-            kind: row.get(11)?,
-            status: row.get(12)?,
-            provider: row.get(13)?,
-            provider_event_id: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
-        })
-    }
-
-    const CALENDAR_COLUMNS: &'static str = "id, title, description, source_type, source_id, \
-         start_at, end_at, timezone, priority, movable, confidence, kind, status, \
-         provider, provider_event_id, created_at, updated_at";
-
-    pub fn create_calendar_event(
-        &self,
-        input: NewCalendarEvent,
-    ) -> Result<CalendarEvent, DbError> {
-        let now = chrono_now();
-        let event = CalendarEvent {
-            id: Uuid::new_v4().to_string(),
-            title: input.title,
-            description: input.description,
-            source_type: if input.source_type.is_empty() {
-                "manual".to_string()
-            } else {
-                input.source_type
-            },
-            source_id: input.source_id,
-            start_at: input.start_at,
-            end_at: input.end_at,
-            timezone: if input.timezone.is_empty() {
-                "UTC".to_string()
-            } else {
-                input.timezone
-            },
-            priority: if input.priority.is_empty() {
-                "normal".to_string()
-            } else {
-                input.priority
-            },
-            movable: input.movable,
-            confidence: input.confidence,
-            kind: if input.kind.is_empty() {
-                "focus".to_string()
-            } else {
-                input.kind
-            },
-            status: if input.status.is_empty() {
-                "proposed".to_string()
-            } else {
-                input.status
-            },
-            provider: input.provider,
-            provider_event_id: input.provider_event_id,
-            created_at: now,
-            updated_at: now,
-        };
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO calendar_events (id, title, description, source_type, source_id, \
-             start_at, end_at, timezone, priority, movable, confidence, kind, status, \
-             provider, provider_event_id, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                event.id,
-                event.title,
-                event.description,
-                event.source_type,
-                event.source_id,
-                event.start_at,
-                event.end_at,
-                event.timezone,
-                event.priority,
-                event.movable as i64,
-                event.confidence,
-                event.kind,
-                event.status,
-                event.provider,
-                event.provider_event_id,
-                event.created_at,
-                event.updated_at,
-            ],
-        )?;
-        Ok(event)
-    }
-
-    pub fn get_calendar_event(&self, id: &str) -> Result<CalendarEvent, DbError> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            &format!(
-                "SELECT {} FROM calendar_events WHERE id = ?1",
-                Self::CALENDAR_COLUMNS
-            ),
-            params![id],
-            Self::row_to_calendar_event,
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
-            other => DbError::from(other),
-        })
-    }
-
-    /// Lists events whose start falls at or after `from_ms`, ordered soonest
-    /// first. Cancelled events are excluded so the scheduler ignores freed slots.
-    pub fn list_upcoming_calendar_events(
-        &self,
-        from_ms: i64,
-        limit: usize,
-    ) -> Result<Vec<CalendarEvent>, DbError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM calendar_events \
-             WHERE end_at >= ?1 AND status != 'cancelled' \
-             ORDER BY start_at ASC LIMIT ?2",
-            Self::CALENDAR_COLUMNS
-        ))?;
-        let rows = stmt.query_map(params![from_ms, limit as i64], Self::row_to_calendar_event)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
-    }
-
-    /// Returns active (non-cancelled) events that overlap the given window,
-    /// optionally excluding a specific event id (e.g. the one being moved).
-    pub fn calendar_events_overlapping(
-        &self,
-        start_at: i64,
-        end_at: i64,
-        exclude_id: Option<&str>,
-    ) -> Result<Vec<CalendarEvent>, DbError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM calendar_events \
-             WHERE status != 'cancelled' AND start_at < ?2 AND end_at > ?1 \
-             AND (?3 IS NULL OR id != ?3) \
-             ORDER BY start_at ASC",
-            Self::CALENDAR_COLUMNS
-        ))?;
-        let rows = stmt.query_map(
-            params![start_at, end_at, exclude_id],
-            Self::row_to_calendar_event,
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
-    }
-
-    pub fn update_calendar_event_time(
-        &self,
-        id: &str,
-        start_at: i64,
-        end_at: i64,
-        status: &str,
-    ) -> Result<CalendarEvent, DbError> {
-        {
-            let conn = self.conn.lock().unwrap();
-            let affected = conn.execute(
-                "UPDATE calendar_events SET start_at = ?1, end_at = ?2, status = ?3, updated_at = ?4 \
-                 WHERE id = ?5",
-                params![start_at, end_at, status, chrono_now(), id],
-            )?;
-            if affected == 0 {
-                return Err(DbError::NotFound(id.to_string()));
-            }
-        }
-        self.get_calendar_event(id)
-    }
-
-    pub fn update_calendar_event_provider(
-        &self,
-        id: &str,
-        provider: Option<&str>,
-        provider_event_id: Option<&str>,
-        status: &str,
-    ) -> Result<CalendarEvent, DbError> {
-        {
-            let conn = self.conn.lock().unwrap();
-            let affected = conn.execute(
-                "UPDATE calendar_events SET provider = ?1, provider_event_id = ?2, status = ?3, \
-                 updated_at = ?4 WHERE id = ?5",
-                params![provider, provider_event_id, status, chrono_now(), id],
-            )?;
-            if affected == 0 {
-                return Err(DbError::NotFound(id.to_string()));
-            }
-        }
-        self.get_calendar_event(id)
-    }
-
-    pub fn set_calendar_event_status(&self, id: &str, status: &str) -> Result<(), DbError> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute(
-            "UPDATE calendar_events SET status = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status, chrono_now(), id],
-        )?;
-        if affected == 0 {
-            return Err(DbError::NotFound(id.to_string()));
-        }
-        Ok(())
-    }
-
-    pub fn delete_calendar_event(&self, id: &str) -> Result<(), DbError> {
-        let conn = self.conn.lock().unwrap();
-        let affected = conn.execute("DELETE FROM calendar_events WHERE id = ?1", params![id])?;
-        if affected == 0 {
-            return Err(DbError::NotFound(id.to_string()));
-        }
-        Ok(())
-    }
-
     pub fn format_stale_sparks_context(sparks: &[Spark]) -> String {
         sparks
             .iter()
@@ -1096,6 +957,498 @@ impl Database {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn row_to_buddy_calendar_event(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<BuddyCalendarEventRow> {
+        let all_day: i64 = row.get(8)?;
+        Ok(BuddyCalendarEventRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            description: row.get(2)?,
+            location: row.get(3)?,
+            category: row.get(4)?,
+            color: row.get(5)?,
+            start_time: row.get(6)?,
+            end_time: row.get(7)?,
+            all_day: all_day != 0,
+            timezone: row.get(9)?,
+            recurrence_json: row.get(10)?,
+            reminders_json: row.get(11)?,
+            external_provider: row.get(12)?,
+            external_event_id: row.get(13)?,
+            sync_status: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    }
+
+    fn row_to_reminder_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReminderStateRow> {
+        Ok(ReminderStateRow {
+            id: row.get(0)?,
+            event_id: row.get(1)?,
+            reminder_minutes: row.get(2)?,
+            fire_at: row.get(3)?,
+            status: row.get(4)?,
+            snoozed_until: row.get(5)?,
+            delivered_at: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+
+    const BUDDY_CALENDAR_SELECT: &'static str = "SELECT id, title, description, location, category,
+            color, start_time, end_time, all_day, timezone, recurrence_json, reminders_json,
+            external_provider, external_event_id, sync_status, created_at, updated_at
+         FROM buddy_calendar_events";
+
+    const REMINDER_SELECT: &'static str = "SELECT id, event_id, reminder_minutes, fire_at, status,
+            snoozed_until, delivered_at, created_at
+         FROM calendar_reminder_states";
+
+    pub fn upsert_buddy_calendar_event(
+        &self,
+        event: &BuddyCalendarEventRow,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO buddy_calendar_events (
+                id, title, description, location, category, color,
+                start_time, end_time, all_day, timezone, recurrence_json, reminders_json,
+                external_provider, external_event_id, sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                description = excluded.description,
+                location = excluded.location,
+                category = excluded.category,
+                color = excluded.color,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time,
+                all_day = excluded.all_day,
+                timezone = excluded.timezone,
+                recurrence_json = excluded.recurrence_json,
+                reminders_json = excluded.reminders_json,
+                external_provider = excluded.external_provider,
+                external_event_id = excluded.external_event_id,
+                sync_status = excluded.sync_status,
+                updated_at = excluded.updated_at",
+            params![
+                event.id,
+                event.title,
+                event.description,
+                event.location,
+                event.category,
+                event.color,
+                event.start_time,
+                event.end_time,
+                event.all_day as i64,
+                event.timezone,
+                event.recurrence_json,
+                event.reminders_json,
+                event.external_provider,
+                event.external_event_id,
+                event.sync_status,
+                event.created_at,
+                event.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_buddy_calendar_event(&self, id: &str) -> Result<BuddyCalendarEventRow, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("{} WHERE id = ?1", Self::BUDDY_CALENDAR_SELECT);
+        conn.query_row(&sql, params![id], Self::row_to_buddy_calendar_event)
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+                other => DbError::from(other),
+            })
+    }
+
+    pub fn list_buddy_calendar_events(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<BuddyCalendarEventRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        // Include recurring masters that may expand into the range (start before end).
+        let sql = format!(
+            "{} WHERE (start_time < ?2 AND end_time > ?1)
+                OR (recurrence_json IS NOT NULL AND start_time < ?2)
+             ORDER BY start_time ASC",
+            Self::BUDDY_CALENDAR_SELECT
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![start_ms, end_ms], Self::row_to_buddy_calendar_event)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn search_buddy_calendar_events(
+        &self,
+        query: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) -> Result<Vec<BuddyCalendarEventRow>, DbError> {
+        let pattern = format!("%{}%", query.trim());
+        let conn = self.conn.lock().unwrap();
+        match (start_ms, end_ms) {
+            (Some(start), Some(end)) => {
+                let sql = format!(
+                    "{} WHERE (title LIKE ?1 OR IFNULL(description, '') LIKE ?1 OR IFNULL(location, '') LIKE ?1)
+                     AND start_time < ?3 AND end_time > ?2
+                     ORDER BY start_time ASC",
+                    Self::BUDDY_CALENDAR_SELECT
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![pattern, start, end],
+                    Self::row_to_buddy_calendar_event,
+                )?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+            }
+            _ => {
+                let sql = format!(
+                    "{} WHERE title LIKE ?1 OR IFNULL(description, '') LIKE ?1 OR IFNULL(location, '') LIKE ?1
+                     ORDER BY start_time ASC",
+                    Self::BUDDY_CALENDAR_SELECT
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows =
+                    stmt.query_map(params![pattern], Self::row_to_buddy_calendar_event)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+            }
+        }
+    }
+
+    pub fn delete_buddy_calendar_event(&self, id: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected =
+            conn.execute("DELETE FROM buddy_calendar_events WHERE id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        let _ = conn.execute(
+            "DELETE FROM calendar_reminder_states WHERE event_id = ?1",
+            params![id],
+        );
+        Ok(())
+    }
+
+    pub fn delete_all_buddy_calendar_events(&self) -> Result<usize, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM calendar_reminder_states", [])?;
+        let affected = conn.execute("DELETE FROM buddy_calendar_events", [])?;
+        Ok(affected)
+    }
+
+    // --- Lifestyle schedule / dreams / work logs ---
+
+    pub fn list_lifestyle_schedule_rules(&self) -> Result<Vec<LifestyleScheduleRuleRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, segments_json, updated_at FROM lifestyle_schedule_rules ORDER BY kind",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LifestyleScheduleRuleRow {
+                kind: row.get(0)?,
+                segments_json: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn get_lifestyle_schedule_rule(
+        &self,
+        kind: &str,
+    ) -> Result<LifestyleScheduleRuleRow, DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT kind, segments_json, updated_at FROM lifestyle_schedule_rules WHERE kind = ?1",
+            params![kind],
+            |row| {
+                Ok(LifestyleScheduleRuleRow {
+                    kind: row.get(0)?,
+                    segments_json: row.get(1)?,
+                    updated_at: row.get(2)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(kind.to_string()),
+            other => DbError::from(other),
+        })
+    }
+
+    pub fn upsert_dream_entry(&self, row: &DreamEntryRow) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dream_entries (
+                id, sleep_date, title, body, tags_json, mood, sleep_quality, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                sleep_date = excluded.sleep_date,
+                title = excluded.title,
+                body = excluded.body,
+                tags_json = excluded.tags_json,
+                mood = excluded.mood,
+                sleep_quality = excluded.sleep_quality,
+                updated_at = excluded.updated_at",
+            params![
+                row.id,
+                row.sleep_date,
+                row.title,
+                row.body,
+                row.tags_json,
+                row.mood,
+                row.sleep_quality,
+                row.created_at,
+                row.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_dream_entry(&self, id: &str) -> Result<DreamEntryRow, DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, sleep_date, title, body, tags_json, mood, sleep_quality, created_at, updated_at
+             FROM dream_entries WHERE id = ?1",
+            params![id],
+            Self::row_to_dream_entry,
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+            other => DbError::from(other),
+        })
+    }
+
+    pub fn list_dreams_for_date(&self, sleep_date: &str) -> Result<Vec<DreamEntryRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, sleep_date, title, body, tags_json, mood, sleep_quality, created_at, updated_at
+             FROM dream_entries WHERE sleep_date = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![sleep_date], Self::row_to_dream_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn search_dream_entries(&self, query: &str) -> Result<Vec<DreamEntryRow>, DbError> {
+        let pattern = format!("%{}%", query.trim());
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, sleep_date, title, body, tags_json, mood, sleep_quality, created_at, updated_at
+             FROM dream_entries
+             WHERE body LIKE ?1 OR IFNULL(title, '') LIKE ?1 OR tags_json LIKE ?1
+             ORDER BY sleep_date DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![pattern], Self::row_to_dream_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn delete_dream_entry(&self, id: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM dream_entries WHERE id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn get_work_day_log(&self, work_date: &str) -> Result<Option<WorkDayLogRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT work_date, actual_start_ms, actual_end_ms, sales_amount, sales_currency, notes, updated_at
+             FROM work_day_logs WHERE work_date = ?1",
+            params![work_date],
+            Self::row_to_work_day_log,
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DbError::from(e)),
+        }
+    }
+
+    pub fn list_work_day_logs(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<WorkDayLogRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT work_date, actual_start_ms, actual_end_ms, sales_amount, sales_currency, notes, updated_at
+             FROM work_day_logs
+             WHERE work_date >= ?1 AND work_date <= ?2
+             ORDER BY work_date ASC",
+        )?;
+        let rows = stmt.query_map(params![start_date, end_date], Self::row_to_work_day_log)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn upsert_work_day_log(&self, row: &WorkDayLogRow) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO work_day_logs (
+                work_date, actual_start_ms, actual_end_ms, sales_amount, sales_currency, notes, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(work_date) DO UPDATE SET
+                actual_start_ms = excluded.actual_start_ms,
+                actual_end_ms = excluded.actual_end_ms,
+                sales_amount = excluded.sales_amount,
+                sales_currency = excluded.sales_currency,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at",
+            params![
+                row.work_date,
+                row.actual_start_ms,
+                row.actual_end_ms,
+                row.sales_amount,
+                row.sales_currency,
+                row.notes,
+                row.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_dream_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamEntryRow> {
+        Ok(DreamEntryRow {
+            id: row.get(0)?,
+            sleep_date: row.get(1)?,
+            title: row.get(2)?,
+            body: row.get(3)?,
+            tags_json: row.get(4)?,
+            mood: row.get(5)?,
+            sleep_quality: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    }
+
+    fn row_to_work_day_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkDayLogRow> {
+        Ok(WorkDayLogRow {
+            work_date: row.get(0)?,
+            actual_start_ms: row.get(1)?,
+            actual_end_ms: row.get(2)?,
+            sales_amount: row.get(3)?,
+            sales_currency: row.get(4)?,
+            notes: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    }
+
+    pub fn upsert_reminder_state(&self, row: &ReminderStateRow) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO calendar_reminder_states (
+                id, event_id, reminder_minutes, fire_at, status,
+                snoozed_until, delivered_at, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                reminder_minutes = excluded.reminder_minutes,
+                fire_at = excluded.fire_at,
+                status = excluded.status,
+                snoozed_until = excluded.snoozed_until,
+                delivered_at = excluded.delivered_at",
+            params![
+                row.id,
+                row.event_id,
+                row.reminder_minutes,
+                row.fire_at,
+                row.status,
+                row.snoozed_until,
+                row.delivered_at,
+                row.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_reminder_states_for_event(&self, event_id: &str) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM calendar_reminder_states WHERE event_id = ?1",
+            params![event_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_due_reminders(&self, now_ms: i64) -> Result<Vec<ReminderStateRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE (status = 'pending' AND fire_at <= ?1)
+                OR (status = 'snoozed' AND IFNULL(snoozed_until, 0) <= ?1)
+             ORDER BY fire_at ASC",
+            Self::REMINDER_SELECT
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![now_ms], Self::row_to_reminder_state)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn get_reminder_state(&self, id: &str) -> Result<ReminderStateRow, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("{} WHERE id = ?1", Self::REMINDER_SELECT);
+        conn.query_row(&sql, params![id], Self::row_to_reminder_state)
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DbError::NotFound(id.to_string()),
+                other => DbError::from(other),
+            })
+    }
+
+    pub fn update_reminder_status(
+        &self,
+        id: &str,
+        status: &str,
+        snoozed_until: Option<i64>,
+        delivered_at: Option<i64>,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE calendar_reminder_states
+             SET status = ?2, snoozed_until = ?3, delivered_at = ?4
+             WHERE id = ?1",
+            params![id, status, snoozed_until, delivered_at],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn snooze_reminder(&self, id: &str, snoozed_until: i64) -> Result<(), DbError> {
+        self.update_reminder_status(id, "snoozed", Some(snoozed_until), None)
+    }
+
+    pub fn dismiss_reminder(&self, id: &str) -> Result<(), DbError> {
+        self.update_reminder_status(id, "dismissed", None, Some(chrono_now()))
+    }
+
+    pub fn list_active_notifications(&self) -> Result<Vec<ReminderStateRow>, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE status IN ('sent', 'snoozed')
+             ORDER BY COALESCE(delivered_at, fire_at) DESC
+             LIMIT 50",
+            Self::REMINDER_SELECT
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_reminder_state)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn count_pending_reminders(&self) -> Result<i64, DbError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM calendar_reminder_states
+             WHERE status IN ('sent', 'snoozed')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 }
 
@@ -1150,68 +1503,6 @@ mod tests {
             })
             .unwrap();
         assert!(versions.contains(&"003_storage".to_string()));
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn calendar_events_crud_and_overlap() {
-        let dir = std::env::temp_dir().join(format!("buddy-db-cal-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("buddy.db");
-
-        let db = Database::open(&path).unwrap();
-        let base = 1_000_000_000_000i64;
-        let event = db
-            .create_calendar_event(NewCalendarEvent {
-                title: "Deep code block".to_string(),
-                start_at: base,
-                end_at: base + 90 * 60 * 1000,
-                movable: true,
-                confidence: 1.0,
-                priority: "normal".to_string(),
-                kind: "focus".to_string(),
-                status: "scheduled".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(event.source_type, "manual");
-        assert_eq!(event.timezone, "UTC");
-
-        let upcoming = db.list_upcoming_calendar_events(base - 1000, 10).unwrap();
-        assert_eq!(upcoming.len(), 1);
-
-        // Overlapping window should find the event.
-        let overlap = db
-            .calendar_events_overlapping(base + 60 * 60 * 1000, base + 120 * 60 * 1000, None)
-            .unwrap();
-        assert_eq!(overlap.len(), 1);
-
-        // Excluding the event id should return nothing.
-        let overlap_excluded = db
-            .calendar_events_overlapping(base, base + 90 * 60 * 1000, Some(&event.id))
-            .unwrap();
-        assert!(overlap_excluded.is_empty());
-
-        // Move the event two hours later; old slot should now be free.
-        let moved = db
-            .update_calendar_event_time(
-                &event.id,
-                base + 2 * 60 * 60 * 1000,
-                base + 2 * 60 * 60 * 1000 + 90 * 60 * 1000,
-                "moved",
-            )
-            .unwrap();
-        assert_eq!(moved.status, "moved");
-        let old_slot = db
-            .calendar_events_overlapping(base, base + 90 * 60 * 1000, None)
-            .unwrap();
-        assert!(old_slot.is_empty());
-
-        // Cancelled events are excluded from overlap and upcoming queries.
-        db.set_calendar_event_status(&event.id, "cancelled").unwrap();
-        let after_cancel = db.list_upcoming_calendar_events(base - 1000, 10).unwrap();
-        assert!(after_cancel.is_empty());
 
         let _ = fs::remove_dir_all(dir);
     }

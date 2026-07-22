@@ -1,19 +1,26 @@
+//! Buddy turn router: Memory → Brain → Clarification → Core → Memory → UI.
+//!
+//! Routing only. No planning, no tool-name branches, no temporary state ownership.
+
 use std::time::Instant;
 
+use buddy_clarification::{
+    clarify, ClarifyResult, ClarificationConfig, PendingClarification, PreferenceLookup,
+};
+use buddy_core::{merge_session_into_input, SessionContext};
 use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent, TaskState};
+use buddy_personality::{
+    phrase_clarification, phrase_tool_result, style_response, ClarificationAsk,
+    PersonalityProfile,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 
 use buddy_database::{DbError, SPARK_NUDGE_COOLDOWN_MS, SPARK_STALE_AGE_MS};
 
-use crate::intelligence_hooks::spawn_index_saved;
-use crate::memory_extraction::{
-    archive_conversation_to_memory, archive_spark_to_memory, maybe_handover_on_context_limit,
-    memory_context_for, process_memory_followups, save_fallback_conversation_archive,
-    save_fallback_spark_archive, spark_memory_context, BrainMemoryContext,
-};
-use crate::services::ProcessManager;
+use crate::memory_api::{self, apply_plan_memory_side_effects};
+use crate::memory_extraction::BrainMemoryContext;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +36,11 @@ pub struct Plan {
     pub preference_detected: Option<PreferenceDetected>,
     #[serde(default)]
     pub decision_detected: Option<DecisionDetected>,
+    #[serde(default)]
+    pub mode_hint: Option<String>,
+    /// Brain-owned: `"passthrough"` skips `/chat/respond`; `"llm"` (default) narrates.
+    #[serde(default)]
+    pub respond_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +62,7 @@ struct PlanRequest {
     message: String,
     history: Vec<HistoryMessage>,
     memory: BrainMemoryContext,
+    available_tools: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,101 +74,6 @@ struct RespondRequest {
     tool_result: Option<String>,
 }
 
-fn emit_task_events(state: &AppState, ctx: &MemoryContext, plan: &Plan) -> Result<(), String> {
-    let mut all_saved = Vec::new();
-
-    if let Some(task_state) = &plan.task_state {
-        match task_state {
-            TaskState::Started => {
-                let result = state.memory_manager.handle_event(
-                    ctx,
-                    MemoryEvent::TaskStarted {
-                        objective: plan.reasoning.clone(),
-                        plan: Some(plan.reasoning.clone()),
-                        files: vec![],
-                    },
-                ).map_err(|e| e.to_string())?;
-                all_saved.extend(result.saved);
-            }
-            TaskState::Updated => {
-                let result = state.memory_manager.handle_event(
-                    ctx,
-                    MemoryEvent::TaskUpdated {
-                        objective: None,
-                        plan: Some(plan.reasoning.clone()),
-                        files: None,
-                        notes: None,
-                    },
-                ).map_err(|e| e.to_string())?;
-                all_saved.extend(result.saved);
-            }
-            TaskState::Completed => {}
-        }
-    }
-
-    if let Some(pref) = &plan.preference_detected {
-        let result = state.memory_manager.handle_event(
-            ctx,
-            MemoryEvent::PreferenceDetected {
-                key: pref.key.clone(),
-                value: pref.value.clone(),
-                confidence: pref.confidence,
-                source: pref.source.clone(),
-            },
-        );
-        if let Ok(r) = result {
-            all_saved.extend(r.saved);
-        }
-    }
-
-    if let Some(dec) = &plan.decision_detected {
-        let result = state
-            .memory_manager
-            .handle_event(
-                ctx,
-                MemoryEvent::DecisionRecorded {
-                    decision: dec.decision.clone(),
-                    reason: dec.reason.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        all_saved.extend(result.saved);
-    }
-
-    spawn_index_saved(state, ctx, &all_saved);
-    Ok(())
-}
-
-async fn handle_handover_command(
-    app: &AppHandle,
-    state: &AppState,
-    conversation_id: &str,
-    ctx: &MemoryContext,
-    recent_messages: &[HistoryMessage],
-) -> Result<(), String> {
-    let event = MemoryEvent::HandoverRequested;
-    crate::memory_extraction::run_memory_extraction(state, ctx, &event, recent_messages).await?;
-
-    let merged = state
-        .intelligence
-        .build_context(ctx, "")
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let handover_text = merged
-        .handover
-        .unwrap_or_else(|| "Handover generated and saved.".to_string());
-
-    state
-        .db
-        .add_message(conversation_id, "assistant", &handover_text)
-        .map_err(|e| e.to_string())?;
-
-    let _ = app.emit("chat-chunk", &handover_text);
-    let _ = app.emit("chat-done", ());
-    Ok(())
-}
-
 #[instrument(skip(state, app), fields(conversation_id = %conversation_id))]
 pub async fn send_message(
     app: AppHandle,
@@ -165,62 +83,19 @@ pub async fn send_message(
 ) -> Result<(), String> {
     info!(text = %text, "user request");
 
-    let ctx = memory_context_for(&conversation_id, state);
-
-    let merged = state
-        .intelligence
-        .build_context(&ctx, &text)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let trimmed_history = merged.conversation_messages.clone();
-
-    maybe_handover_on_context_limit(state, &ctx, &merged, &trimmed_history).await;
-
-    if text.trim().starts_with("/maintain") {
-        state
-            .db
-            .add_message(&conversation_id, "user", &text)
-            .map_err(|e| e.to_string())?;
-        let report = state
-            .intelligence
-            .run_maintenance(&ctx)
-            .await
-            .map_err(|e| e.to_string())?;
-        let msg = format!(
-            "Maintenance complete: merged {}, archived {}, conflicts {}.",
-            report.merged_duplicates, report.archived, report.conflicts_detected
-        );
-        state
-            .db
-            .add_message(&conversation_id, "assistant", &msg)
-            .map_err(|e| e.to_string())?;
-        let _ = app.emit("chat-chunk", &msg);
-        let _ = app.emit("chat-done", ());
-        return Ok(());
-    }
-
-    if text.trim().starts_with("/handover") {
-        state
-            .db
-            .add_message(&conversation_id, "user", &text)
-            .map_err(|e| e.to_string())?;
-        let _ = state.memory_manager.handle_event(
-            &ctx,
-            MemoryEvent::MessageAdded {
-                role: "user".into(),
-                content: text.clone(),
-            },
-        );
-        return handle_handover_command(&app, state, &conversation_id, &ctx, &trimmed_history).await;
-    }
+    let ctx = state.memory.ctx(&conversation_id);
+    let merged = state.memory.get_context(&conversation_id, &text).await;
+    let history = merged.conversation_messages.clone();
+    state
+        .memory
+        .maybe_auto_handover(state, &conversation_id, &merged, &history)
+        .await;
 
     state
         .db
         .add_message(&conversation_id, "user", &text)
         .map_err(|e| e.to_string())?;
-
-    let _ = state.memory_manager.handle_event(
+    let _ = state.memory.store_event(
         &ctx,
         MemoryEvent::MessageAdded {
             role: "user".into(),
@@ -228,23 +103,31 @@ pub async fn send_message(
         },
     );
 
-    let messages = state.db.get_messages(&conversation_id).map_err(|e| e.to_string())?;
-    if messages.len() == 1 {
+    if state
+        .db
+        .get_messages(&conversation_id)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        == 1
+    {
         let title: String = text.chars().take(40).collect();
         let _ = state.db.update_conversation_title(&conversation_id, &title);
     }
 
-    let mut memory = BrainMemoryContext::from(&merged);
-    memory.stale_sparks = build_stale_sparks_context(state);
+    let mut memory = state.memory.brain_payload(&merged);
+    state
+        .memory
+        .enrich_with_pending(&mut memory, &conversation_id);
+    let personality = load_personality(state);
 
     let client = reqwest::Client::new();
-
     let plan: Plan = client
         .post(format!("{}/chat/plan", state.brain_url()))
         .json(&PlanRequest {
             message: text.clone(),
-            history: trimmed_history.clone(),
+            history: history.clone(),
             memory: memory.clone(),
+            available_tools: state.tool_catalog_text().to_string(),
         })
         .send()
         .await
@@ -253,151 +136,63 @@ pub async fn send_message(
         .await
         .map_err(|e| format!("brain plan parse failed: {e}"))?;
 
-    info!(
-        intent = %plan.intent,
-        tool = ?plan.tool,
-        "brain plan received"
+    info!(intent = %plan.intent, tool = ?plan.tool, "brain plan received");
+
+    apply_plan_memory_side_effects(
+        &state.memory,
+        &ctx,
+        &plan.reasoning,
+        plan.task_state.as_ref(),
+        plan.preference_detected.as_ref().map(|p| {
+            (
+                p.key.clone(),
+                p.value.clone(),
+                p.confidence,
+                p.source.clone(),
+            )
+        }),
+        plan.decision_detected
+            .as_ref()
+            .map(|d| (d.decision.clone(), d.reason.clone())),
     );
 
-    // #region agent log
-    {
-        let branch = if plan.intent == "tool_use" {
-            "tool_use"
+    let assistant_content = if plan.intent == "tool_use" {
+        if let Some(tool_name) = &plan.tool {
+            dispatch_tool(
+                &app,
+                state,
+                &client,
+                &ctx,
+                &conversation_id,
+                &text,
+                &history,
+                &memory,
+                &personality,
+                tool_name,
+                plan.tool_input.as_deref().unwrap_or("{}"),
+                plan.respond_mode.as_deref(),
+            )
+            .await?
         } else {
-            "chat_direct"
-        };
-        let entry = serde_json::json!({
-            "sessionId": "500eec",
-            "location": "orchestrator.rs:send_message",
-            "message": "plan branch selected",
-            "data": {
-                "intent": plan.intent,
-                "tool": plan.tool,
-                "branch": branch,
-                "messagePreview": text.chars().take(120).collect::<String>(),
-                "reasoningPreview": plan.reasoning.chars().take(120).collect::<String>(),
-            },
-            "timestamp": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
-            "hypothesisId": "H3",
-        });
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-500eec.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{entry}");
-        }
-    }
-    // #endregion
-
-    emit_task_events(state, &ctx, &plan)?;
-
-    let mut assistant_content = String::new();
-
-    if plan.intent == "tool_use" {
-        if let (Some(tool_name), Some(tool_input)) = (&plan.tool, &plan.tool_input) {
-            let start = Instant::now();
-            let enriched_input =
-                enrich_spark_tool_input(tool_name, tool_input, &conversation_id);
-
-            let tool_result = if tool_name == "update_spark" {
-                if let Some(spark_id) = parse_spark_delete_id(&enriched_input) {
-                    match delete_spark_with_archive(state, &app, &spark_id).await {
-                        Ok(()) => {
-                            let output =
-                                format!("Spark {spark_id} deleted and archived to memory");
-                            let duration_ms = start.elapsed().as_millis() as u64;
-                            let _ = state.memory_manager.handle_event(
-                                &ctx,
-                                MemoryEvent::ToolExecuted {
-                                    tool: tool_name.clone(),
-                                    params: enriched_input.clone(),
-                                    result: output.clone(),
-                                    duration_ms,
-                                    success: true,
-                                },
-                            );
-                            emit_spark_updates(&app, state);
-                            Ok(output)
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    run_tool_with_tracking(
-                        state,
-                        &app,
-                        &ctx,
-                        tool_name,
-                        &enriched_input,
-                        start,
-                    )
-                }
-            } else {
-                run_tool_with_tracking(
-                    state,
-                    &app,
-                    &ctx,
-                    tool_name,
-                    &enriched_input,
-                    start,
-                )
-            };
-
-            match tool_result {
-                Ok(output) => {
-                    info!(tool = %tool_name, output = %output, "tool executed");
-
-                    let mut stream = client
-                        .post(format!("{}/chat/respond", state.brain_url()))
-                        .json(&RespondRequest {
-                            message: text.clone(),
-                            history: trimmed_history.clone(),
-                            memory: memory.clone(),
-                            tool_name: Some(tool_name.clone()),
-                            tool_result: Some(output.clone()),
-                        })
-                        .send()
-                        .await
-                        .map_err(|e| format!("brain respond request failed: {e}"))?
-                        .bytes_stream();
-
-                    use futures_util::StreamExt;
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                let piece = String::from_utf8_lossy(&bytes).to_string();
-                                assistant_content.push_str(&piece);
-                                let _ = app.emit("chat-chunk", &piece);
-                            }
-                            Err(e) => {
-                                error!(error = %e, "stream error");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(err_msg) => {
-                    assistant_content = format!("Tool execution failed: {err_msg}");
-                    let _ = app.emit("chat-chunk", &assistant_content);
-                }
-            }
-        } else {
-            assistant_content = plan
-                .response
-                .unwrap_or_else(|| "I couldn't determine the tool to use.".to_string());
-            let _ = app.emit("chat-chunk", &assistant_content);
+            let content = style_response(
+                &personality,
+                &plan
+                    .response
+                    .unwrap_or_else(|| "I couldn't determine the tool to use.".to_string()),
+            );
+            let _ = app.emit("chat-chunk", &content);
+            content
         }
     } else {
-        assistant_content = plan.response.unwrap_or_default();
-        if assistant_content.is_empty() {
-            assistant_content = "I'm here to help.".to_string();
+        state.memory.clear_pending_clarification(&conversation_id);
+        let mut content = plan.response.unwrap_or_default();
+        if content.is_empty() {
+            content = "I'm here to help.".to_string();
         }
-        let _ = app.emit("chat-chunk", &assistant_content);
-    }
+        content = style_response(&personality, &content);
+        let _ = app.emit("chat-chunk", &content);
+        content
+    };
 
     let assistant_metadata = serde_json::json!({
         "intent": plan.intent,
@@ -405,6 +200,8 @@ pub async fn send_message(
         "tool_input": plan.tool_input,
         "reasoning": plan.reasoning,
         "task_state": plan.task_state,
+        "mode_hint": plan.mode_hint,
+        "respond_mode": plan.respond_mode,
     })
     .to_string();
 
@@ -418,7 +215,7 @@ pub async fn send_message(
         )
         .map_err(|e| e.to_string())?;
 
-    let _ = state.memory_manager.handle_event(
+    let _ = state.memory.store_event(
         &ctx,
         MemoryEvent::MessageAdded {
             role: "assistant".into(),
@@ -427,78 +224,154 @@ pub async fn send_message(
     );
 
     if plan.task_state == Some(TaskState::Completed) {
-        let event_result = state
-            .memory_manager
-            .handle_event(
-                &ctx,
-                MemoryEvent::TaskCompleted {
-                    outcome: assistant_content.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-
-        let _ = state
-            .intelligence
-            .on_task_complete(&ctx, &assistant_content)
-            .await;
-
-        let mut all_messages = trimmed_history.clone();
-        all_messages.push(HistoryMessage {
+        let event_result = state.memory.store_event(
+            &ctx,
+            MemoryEvent::TaskCompleted {
+                outcome: assistant_content.clone(),
+            },
+        )?;
+        let mut all = history.clone();
+        all.push(HistoryMessage {
             role: "user".into(),
             content: text.clone(),
         });
-        all_messages.push(HistoryMessage {
+        all.push(HistoryMessage {
             role: "assistant".into(),
             content: assistant_content.clone(),
         });
-
-        process_memory_followups(state, &ctx, event_result.followups, &all_messages).await;
-
-        state.intelligence.spawn_maintenance(ctx.clone()).await;
+        state
+            .memory
+            .finish_task(
+                state,
+                &conversation_id,
+                &assistant_content,
+                all,
+                event_result.followups,
+            )
+            .await;
     }
 
     let _ = app.emit("chat-done", ());
     Ok(())
 }
 
-async fn archive_before_delete(
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool(
+    app: &AppHandle,
     state: &AppState,
+    client: &reqwest::Client,
     ctx: &MemoryContext,
-    title: &str,
     conversation_id: &str,
+    text: &str,
     history: &[HistoryMessage],
-) {
-    if history.is_empty() {
-        return;
+    memory: &BrainMemoryContext,
+    personality: &PersonalityProfile,
+    tool_name: &str,
+    raw_input: &str,
+    respond_mode: Option<&str>,
+) -> Result<String, String> {
+    let session = SessionContext {
+        conversation_id: conversation_id.to_string(),
+        workspace_path: Some(state.project_root.display().to_string()),
+        user_message: Some(text.to_string()),
+    };
+    let mut tool_input = merge_session_into_input(raw_input, &session);
+    if let Some(pending) = state.memory.get_pending_clarification(conversation_id) {
+        if pending.tool == tool_name {
+            tool_input = merge_tool_input(&pending.tool_input, &tool_input);
+        }
     }
 
-    let brain_ok = ProcessManager::check_brain_ready(state).await;
-    if brain_ok {
-        if let Err(e) = archive_conversation_to_memory(state, ctx, title, conversation_id, history)
-            .await
-        {
-            warn!(error = %e, "conversation archive failed, using fallback");
-            if let Err(e) =
-                save_fallback_conversation_archive(state, ctx, title, conversation_id, history).await
-            {
-                warn!(error = %e, "fallback archive failed");
-            }
+    let prefs = DbPreferenceLookup { db: &state.db };
+    let clarify_cfg = load_clarification_config(state);
+    let schema = state.tool_schema(tool_name);
+
+    match clarify(tool_name, &tool_input, schema, &prefs, &clarify_cfg) {
+        ClarifyResult::NeedsInput {
+            tool_input: partial,
+            missing_labels,
+            context_hint,
+        } => {
+            state.memory.set_pending_clarification(
+                conversation_id,
+                PendingClarification {
+                    tool: tool_name.to_string(),
+                    tool_input: partial,
+                    missing_labels: missing_labels.clone(),
+                    conversation_id: conversation_id.to_string(),
+                },
+            );
+            let question = phrase_clarification(
+                personality,
+                &ClarificationAsk {
+                    field_labels: missing_labels,
+                    context_hint,
+                },
+            );
+            let content = style_response(personality, &question);
+            let _ = app.emit("chat-chunk", &content);
+            Ok(content)
         }
-    } else {
-        info!("brain offline, using fallback archive for delete");
-        if let Err(e) =
-            save_fallback_conversation_archive(state, ctx, title, conversation_id, history).await
-        {
-            warn!(error = %e, "fallback archive failed");
+        ClarifyResult::Ready {
+            tool_input: ready_input,
+        } => {
+            state.memory.clear_pending_clarification(conversation_id);
+            let start = Instant::now();
+            match run_tool_with_tracking(state, app, ctx, tool_name, &ready_input, start) {
+                Ok(output) => {
+                    info!(tool = %tool_name, respond_mode = ?respond_mode, "tool executed");
+                    // Brain-owned: passthrough skips second MLX call. Buddy only routes.
+                    // Personality turns JSON tool payloads into chat-ready phrasing.
+                    if respond_mode == Some("passthrough") {
+                        let phrased = phrase_tool_result(tool_name, &output);
+                        let content = style_response(personality, &phrased);
+                        let _ = app.emit("chat-chunk", &content);
+                        return Ok(content);
+                    }
+                    let mut assistant_content = String::new();
+                    let mut stream = client
+                        .post(format!("{}/chat/respond", state.brain_url()))
+                        .json(&RespondRequest {
+                            message: text.to_string(),
+                            history: history.to_vec(),
+                            memory: memory.clone(),
+                            tool_name: Some(tool_name.to_string()),
+                            tool_result: Some(output),
+                        })
+                        .send()
+                        .await
+                        .map_err(|e| format!("brain respond request failed: {e}"))?
+                        .bytes_stream();
+
+                    use futures_util::StreamExt;
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                assistant_content.push_str(&String::from_utf8_lossy(&bytes));
+                            }
+                            Err(e) => {
+                                error!(error = %e, "stream error");
+                                break;
+                            }
+                        }
+                    }
+                    assistant_content = style_response(personality, &assistant_content);
+                    let _ = app.emit("chat-chunk", &assistant_content);
+                    Ok(assistant_content)
+                }
+                Err(err_msg) => {
+                    let content =
+                        style_response(personality, &format!("Tool execution failed: {err_msg}"));
+                    let _ = app.emit("chat-chunk", &content);
+                    Ok(content)
+                }
+            }
         }
     }
 }
 
 #[instrument(skip(state), fields(conversation_id = %conversation_id))]
-pub async fn delete_conversation(
-    state: &AppState,
-    conversation_id: &str,
-) -> Result<(), String> {
+pub async fn delete_conversation(state: &AppState, conversation_id: &str) -> Result<(), String> {
     let conversation = match state.db.get_conversation(conversation_id) {
         Ok(conv) => conv,
         Err(DbError::NotFound(_)) => return Ok(()),
@@ -509,10 +382,6 @@ pub async fn delete_conversation(
         .db
         .get_messages(conversation_id)
         .map_err(|e| e.to_string())?;
-
-    let title = conversation.title;
-    let conv_id = conversation_id.to_string();
-    let ctx = memory_context_for(&conv_id, state);
     let history: Vec<HistoryMessage> = messages
         .iter()
         .map(|m| HistoryMessage {
@@ -521,73 +390,31 @@ pub async fn delete_conversation(
         })
         .collect();
 
-    // Summarize and persist to memory before removing from DB.
-    archive_before_delete(state, &ctx, &title, &conv_id, &history).await;
+    memory_api::archive_conversation(state, conversation_id, &conversation.title, &history).await;
+    state.memory.clear_pending_clarification(conversation_id);
 
     match state.db.delete_conversation(conversation_id) {
         Ok(()) => {}
         Err(DbError::NotFound(_)) => return Ok(()),
         Err(e) => return Err(e.to_string()),
     }
-
     info!(conversation_id = %conversation_id, "conversation deleted");
     Ok(())
 }
 
-async fn archive_spark_before_delete(
-    state: &AppState,
-    ctx: &MemoryContext,
-    spark: &buddy_database::Spark,
-) {
-    let brain_ok = ProcessManager::check_brain_ready(state).await;
-    if brain_ok {
-        if let Err(e) = archive_spark_to_memory(state, ctx, spark).await {
-            warn!(error = %e, "spark archive failed, using fallback");
-            if let Err(e) = save_fallback_spark_archive(state, ctx, spark).await {
-                warn!(error = %e, "fallback spark archive failed");
-            }
-        }
-    } else {
-        info!("brain offline, using fallback archive for spark delete");
-        if let Err(e) = save_fallback_spark_archive(state, ctx, spark).await {
-            warn!(error = %e, "fallback spark archive failed");
-        }
-    }
-}
-
+/// Spark delete from UI — Core tool path archives; this is a direct DB delete
+/// with Memory archive for Settings UI deletes.
 #[instrument(skip(state, app), fields(spark_id = %spark_id))]
 pub async fn delete_spark_with_archive(
     state: &AppState,
     app: &AppHandle,
     spark_id: &str,
 ) -> Result<(), String> {
-    let spark = match state.db.get_spark(spark_id) {
-        Ok(spark) => spark,
-        Err(DbError::NotFound(_)) => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    };
-
-    let ctx = spark_memory_context(&spark, state);
-    archive_spark_before_delete(state, &ctx, &spark).await;
-
-    match state.db.delete_spark(spark_id) {
-        Ok(()) => {}
-        Err(DbError::NotFound(_)) => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    }
-
-    emit_spark_updates(app, state);
-    info!(spark_id = %spark_id, "spark deleted");
+    let input = serde_json::json!({"id": spark_id, "action": "delete"}).to_string();
+    let start = Instant::now();
+    let ctx = state.memory.ctx("spark-ui");
+    run_tool_with_tracking(state, app, &ctx, "update_spark", &input, start)?;
     Ok(())
-}
-
-fn parse_spark_delete_id(input: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(input).ok()?;
-    let action = value.get("action")?.as_str()?;
-    if action != "delete" {
-        return None;
-    }
-    value.get("id")?.as_str().map(String::from)
 }
 
 fn run_tool_with_tracking(
@@ -602,7 +429,7 @@ fn run_tool_with_tracking(
         Ok(run_result) => {
             let output = run_result.output.clone();
             let duration_ms = start.elapsed().as_millis() as u64;
-            let event_result = state.memory_manager.handle_event(
+            if let Ok(r) = state.memory.store_event(
                 ctx,
                 MemoryEvent::ToolExecuted {
                     tool: tool_name.to_string(),
@@ -611,19 +438,22 @@ fn run_tool_with_tracking(
                     duration_ms,
                     success: true,
                 },
-            );
-            if let Ok(r) = event_result {
-                spawn_index_saved(state, ctx, &r.saved);
+            ) {
+                state.memory.spawn_index_saved(ctx, &r.saved);
             }
-            if tool_name == "save_spark" || tool_name == "update_spark" {
-                emit_spark_updates(app, state);
+            match buddy_plugins::after_execute_hint(tool_name) {
+                buddy_core::AfterExecute::EmitSparksUpdated => emit_spark_updates(app, state),
+                buddy_core::AfterExecute::EmitCalendarUpdated => {
+                    let _ = app.emit("calendar-updated", ());
+                }
+                buddy_core::AfterExecute::None => {}
             }
             Ok(output)
         }
         Err(e) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
             let err_msg = e.to_string();
-            let exec_result = state.memory_manager.handle_event(
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let _ = state.memory.store_event(
                 ctx,
                 MemoryEvent::ToolExecuted {
                     tool: tool_name.to_string(),
@@ -633,10 +463,7 @@ fn run_tool_with_tracking(
                     success: false,
                 },
             );
-            if let Ok(r) = exec_result {
-                spawn_index_saved(state, ctx, &r.saved);
-            }
-            let fail_result = state.memory_manager.handle_event(
+            let _ = state.memory.store_event(
                 ctx,
                 MemoryEvent::ToolFailed {
                     error: err_msg.clone(),
@@ -644,39 +471,9 @@ fn run_tool_with_tracking(
                     resolution: None,
                 },
             );
-            if let Ok(r) = fail_result {
-                spawn_index_saved(state, ctx, &r.saved);
-            }
             Err(err_msg)
         }
     }
-}
-
-fn build_stale_sparks_context(state: &AppState) -> Option<String> {
-    let sparks = state
-        .db
-        .get_stale_sparks(SPARK_STALE_AGE_MS, SPARK_NUDGE_COOLDOWN_MS)
-        .ok()?;
-    if sparks.is_empty() {
-        return None;
-    }
-    Some(buddy_database::Database::format_stale_sparks_context(
-        &sparks,
-    ))
-}
-
-fn enrich_spark_tool_input(tool_name: &str, tool_input: &str, conversation_id: &str) -> String {
-    if tool_name != "save_spark" {
-        return tool_input.to_string();
-    }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(tool_input) else {
-        return tool_input.to_string();
-    };
-    if let Some(obj) = value.as_object_mut() {
-        obj.entry("source_conversation_id")
-            .or_insert_with(|| serde_json::Value::String(conversation_id.to_string()));
-    }
-    value.to_string()
 }
 
 fn emit_spark_updates(app: &AppHandle, state: &AppState) {
@@ -686,4 +483,65 @@ fn emit_spark_updates(app: &AppHandle, state: &AppState) {
         .unwrap_or(0);
     let _ = app.emit("sparks-stale", count);
     let _ = app.emit("sparks-updated", ());
+}
+
+fn load_personality(state: &AppState) -> PersonalityProfile {
+    let raw = state
+        .db
+        .get_setting("personality_profile_json")
+        .ok()
+        .flatten();
+    PersonalityProfile::from_settings_json(raw.as_deref())
+}
+
+fn load_clarification_config(state: &AppState) -> ClarificationConfig {
+    let threshold = state
+        .db
+        .get_setting("clarification_confidence_threshold")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.75);
+    ClarificationConfig {
+        confidence_threshold: threshold.clamp(0.0, 1.0),
+    }
+}
+
+fn merge_tool_input(previous: &str, next: &str) -> String {
+    let prev: serde_json::Value =
+        serde_json::from_str(previous).unwrap_or_else(|_| serde_json::json!({}));
+    let newv: serde_json::Value =
+        serde_json::from_str(next).unwrap_or_else(|_| serde_json::json!({}));
+    match (prev.as_object(), newv.as_object()) {
+        (Some(p), Some(n)) => {
+            let mut merged = p.clone();
+            for (k, v) in n {
+                let empty = match v {
+                    serde_json::Value::Null => true,
+                    serde_json::Value::String(s) => s.trim().is_empty(),
+                    _ => false,
+                };
+                if !empty {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            serde_json::Value::Object(merged).to_string()
+        }
+        _ => next.to_string(),
+    }
+}
+
+struct DbPreferenceLookup<'a> {
+    db: &'a buddy_database::Database,
+}
+
+impl PreferenceLookup for DbPreferenceLookup<'_> {
+    fn get(&self, key: &str) -> Option<(String, f64)> {
+        self.db
+            .get_setting(key)
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| (v, 0.9))
+    }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "buddy-coder"
+version.workspace = true
+edition.workspace = true
+description = "Code Agent capability: Codex/Cursor CLI orchestration and PTY terminals"
+
+[dependencies]
+buddy-core = { path = "../../core" }
+buddy-database = { path = "../../database" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+dirs = "6"
+regex = "1"
+portable-pty = "0.9"
+uuid = { version = "1", features = ["v4"] }

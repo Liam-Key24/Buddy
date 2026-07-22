@@ -2,6 +2,7 @@ import {
   Brain,
   CaretDoubleLeft,
   CaretDoubleRight,
+  CalendarBlank,
   ChatsCircle,
   CircleNotch,
   Code,
@@ -255,6 +256,16 @@ export function Sidebar() {
             <Code
               size={20}
               weight={currentPage === "code" ? "fill" : "regular"}
+            />
+          </RailButton>
+          <RailButton
+            active={currentPage === "calendar"}
+            onClick={() => setCurrentPage("calendar")}
+            title="Calendar"
+          >
+            <CalendarBlank
+              size={20}
+              weight={currentPage === "calendar" ? "fill" : "regular"}
             />
           </RailButton>
           <RailButton

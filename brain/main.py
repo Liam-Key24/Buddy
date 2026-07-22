@@ -12,9 +12,79 @@ from pydantic import BaseModel
 from context import MemoryContextPayload, build_messages, format_history
 from embeddings import embed_text, embedding_dimensions
 from mlx_client import MLXClient
-from parser import parse_extraction, parse_plan
-from prompts import PLAN_SYSTEM_PROMPT, RESPOND_SYSTEM_PROMPT
+from parser import (
+    CALENDAR_CREATE,
+    CALENDAR_DELETE,
+    DREAM_LOG,
+    DREAM_SEARCH,
+    WORK_SALES,
+    WORK_SET_HOURS,
+    WORK_STATS,
+    _heuristic_plan,
+    _matches_any,
+    apply_respond_mode,
+    normalize_plan,
+    parse_extraction,
+    parse_plan,
+    try_fast_heuristic_plan,
+)
+from prompts import RESPOND_SYSTEM_PROMPT, build_plan_system_prompt
 from prompts.memory import EXTRACTION_PROMPTS
+
+
+def _schedule_source_text(req: "PlanRequest") -> str:
+    """Prefer prior user content when the message is 'add this to my calendar'."""
+    msg = req.message.strip()
+    lower = msg.lower()
+    if re_search_add_this(lower):
+        for item in reversed(req.history or []):
+            if getattr(item, "role", "") == "user" and item.content.strip():
+                return item.content.strip()
+    return msg
+
+
+def re_search_add_this(lower: str) -> bool:
+    import re
+
+    return bool(
+        re.search(
+            r"\badd (?:this|that|it) to (?:my )?(?:calend(?:a|e)r)\b",
+            lower,
+        )
+    )
+
+
+def _maybe_force_calendar_plan(plan, req: "PlanRequest"):
+    """If planner ignored an obvious calendar/lifestyle request, force tools.
+
+    For schedule phrases, prefer the deterministic parser over the model so
+    titles/days/times stay accurate.
+    """
+    source = _schedule_source_text(req)
+    schedule_like = _matches_any(source, CALENDAR_CREATE) or _matches_any(
+        req.message, CALENDAR_CREATE
+    )
+    if schedule_like:
+        return normalize_plan(_heuristic_plan(source))
+    delete_like = _matches_any(source, CALENDAR_DELETE) or _matches_any(
+        req.message, CALENDAR_DELETE
+    )
+    if delete_like:
+        return normalize_plan(
+            _heuristic_plan(
+                source if _matches_any(source, CALENDAR_DELETE) else req.message
+            )
+        )
+    lifestyle_patterns = (
+        DREAM_LOG
+        + DREAM_SEARCH
+        + WORK_SALES
+        + WORK_SET_HOURS
+        + WORK_STATS
+    )
+    if _matches_any(req.message, lifestyle_patterns):
+        return normalize_plan(_heuristic_plan(req.message))
+    return normalize_plan(plan)
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "Buddy"
 _handlers: list[logging.Handler] = [logging.StreamHandler()]
@@ -49,6 +119,7 @@ class PlanRequest(BaseModel):
     message: str
     history: list[HistoryMessage] = []
     memory: MemoryContextPayload = MemoryContextPayload()
+    available_tools: str = ""
 
 
 class PlanResponse(BaseModel):
@@ -58,6 +129,8 @@ class PlanResponse(BaseModel):
     reasoning: str
     response: Optional[str] = None
     task_state: Optional[str] = None
+    mode_hint: Optional[str] = None
+    respond_mode: Optional[str] = None
     preference_detected: Optional[dict] = None
     decision_detected: Optional[dict] = None
 
@@ -124,67 +197,8 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/chat/plan", response_model=PlanResponse)
-def chat_plan(req: PlanRequest):
-    logger.info("plan request: %s", req.message[:80])
-    start = time.time()
-
-    messages = build_messages(req.memory, req.history, req.message)
-
-    raw = ""
-    try:
-        raw = mlx.complete(
-            system=PLAN_SYSTEM_PROMPT,
-            messages=messages,
-            max_tokens=512,
-            temperature=0.1,
-        )
-        plan = parse_plan(raw, req.message)
-    except Exception as e:
-        logger.warning("mlx unavailable, using heuristic plan: %s", e)
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-
-            with open(
-                "/Users/liamgk/Desktop/BUDDY/.cursor/debug-500eec.log", "a"
-            ) as _f:
-                _f.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "500eec",
-                            "location": "main.py:chat_plan",
-                            "message": "mlx complete/parse exception, heuristic fallback",
-                            "data": {
-                                "error": type(e).__name__,
-                                "errorMsg": str(e)[:200],
-                                "messagePreview": req.message[:120],
-                                "rawPreview": raw[:200],
-                            },
-                            "timestamp": int(_time.time() * 1000),
-                            "hypothesisId": "H2",
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # #endregion
-        plan = parse_plan("", req.message)
-        if plan.intent == "chat":
-            base_response = plan.response or "I'm here to help."
-            plan.response = (
-                f"{_planner_error_notice(e)} {base_response} "
-                "Please check that MLX is running and reachable."
-            )
-
-    logger.info(
-        "plan parsed intent=%s tool=%s latency_ms=%d",
-        plan.intent,
-        plan.tool,
-        int((time.time() - start) * 1000),
-    )
+def _plan_to_http(plan) -> PlanResponse:
+    plan = apply_respond_mode(plan)
     return PlanResponse(
         intent=plan.intent,
         tool=plan.tool,
@@ -192,6 +206,8 @@ def chat_plan(req: PlanRequest):
         reasoning=plan.reasoning,
         response=plan.response,
         task_state=plan.task_state,
+        mode_hint=plan.mode_hint,
+        respond_mode=plan.respond_mode,
         preference_detected=plan.preference_detected.model_dump()
         if plan.preference_detected
         else None,
@@ -199,6 +215,67 @@ def chat_plan(req: PlanRequest):
         if plan.decision_detected
         else None,
     )
+
+
+def _pending_clarification_active(memory: MemoryContextPayload) -> bool:
+    working = (memory.working or "").strip()
+    return "Pending clarification" in working
+
+
+@app.post("/chat/plan", response_model=PlanResponse)
+def chat_plan(req: PlanRequest):
+    logger.info("plan request: %s", req.message[:80])
+    start = time.time()
+
+    # Fast path: confident heuristics skip MLX (Brain-owned; Buddy unchanged).
+    if not _pending_clarification_active(req.memory):
+        source = _schedule_source_text(req)
+        fast = try_fast_heuristic_plan(source)
+        if fast is None and source != req.message.strip():
+            fast = try_fast_heuristic_plan(req.message)
+        if fast is not None:
+            fast = _maybe_force_calendar_plan(fast, req)
+            logger.info(
+                "plan heuristic-fast intent=%s tool=%s respond_mode=%s latency_ms=%d",
+                fast.intent,
+                fast.tool,
+                fast.respond_mode,
+                int((time.time() - start) * 1000),
+            )
+            return _plan_to_http(fast)
+
+    messages = build_messages(req.memory, req.history, req.message)
+
+    raw = ""
+    try:
+        raw = mlx.complete(
+            system=build_plan_system_prompt(req.available_tools),
+            messages=messages,
+            max_tokens=512,
+            temperature=0.1,
+        )
+        plan = parse_plan(raw, req.message)
+        plan = _maybe_force_calendar_plan(plan, req)
+    except Exception as e:
+        logger.warning("mlx unavailable, using heuristic plan: %s", e)
+        plan = parse_plan("", req.message)
+        plan = _maybe_force_calendar_plan(plan, req)
+        if plan.intent == "chat":
+            base_response = plan.response or "I'm here to help."
+            plan.response = (
+                f"{_planner_error_notice(e)} {base_response} "
+                "Please check that MLX is running and reachable."
+            )
+
+    plan = apply_respond_mode(plan)
+    logger.info(
+        "plan parsed intent=%s tool=%s respond_mode=%s latency_ms=%d",
+        plan.intent,
+        plan.tool,
+        plan.respond_mode,
+        int((time.time() - start) * 1000),
+    )
+    return _plan_to_http(plan)
 
 
 @app.post("/chat/respond")

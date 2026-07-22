@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use buddy_core::{Tool, ToolError, ToolResult};
+use buddy_core::{parse_tool_json, Tool, ToolError, ToolResult};
 use buddy_database::Database;
+use buddy_memory::{MemoryContext, MemoryEvent, MemoryManager};
 use serde::Deserialize;
 
 pub struct SaveSparkTool {
@@ -10,6 +11,8 @@ pub struct SaveSparkTool {
 
 pub struct UpdateSparkTool {
     db: Arc<Database>,
+    memory: Arc<MemoryManager>,
+    project_root: String,
 }
 
 impl SaveSparkTool {
@@ -19,8 +22,12 @@ impl SaveSparkTool {
 }
 
 impl UpdateSparkTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, memory: Arc<MemoryManager>, project_root: String) -> Self {
+        Self {
+            db,
+            memory,
+            project_root,
+        }
     }
 }
 
@@ -48,9 +55,7 @@ impl Tool for SaveSparkTool {
     }
 
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: SaveSparkInput = serde_json::from_str(input).map_err(|e| {
-            ToolError::ExecutionFailed(format!("save_spark expects JSON: {e}"))
-        })?;
+        let parsed: SaveSparkInput = parse_tool_json(input, "save_spark")?;
 
         if parsed.content.trim().is_empty() {
             return Err(ToolError::ExecutionFailed(
@@ -85,9 +90,38 @@ impl Tool for UpdateSparkTool {
     }
 
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: UpdateSparkInput = serde_json::from_str(input).map_err(|e| {
-            ToolError::ExecutionFailed(format!("update_spark expects JSON: {e}"))
-        })?;
+        let parsed: UpdateSparkInput = parse_tool_json(input, "update_spark")?;
+
+        if parsed.action == "delete" {
+            let spark = self
+                .db
+                .get_spark(&parsed.id)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+            // Memory owns archive-on-delete policy (sync fallback; no Brain).
+            let tags = spark.tags.join(", ");
+            let summary = if spark.content.len() > 500 {
+                format!("{}...", &spark.content[..500])
+            } else {
+                spark.content.clone()
+            };
+            let ctx = MemoryContext {
+                workspace_path: std::path::PathBuf::from(&self.project_root),
+                conversation_id: spark.source_conversation_id.clone(),
+                task_id: None,
+            };
+            let _ = self.memory.handle_event(
+                &ctx,
+                MemoryEvent::SparkArchivedSaved {
+                    spark_id: spark.id.clone(),
+                    content: spark.content.clone(),
+                    tags: spark.tags.clone(),
+                    summary: format!("Deleted spark [{tags}]: {summary}"),
+                    topics: vec![],
+                    key_facts: vec![],
+                },
+            );
+        }
 
         let spark = self
             .db
@@ -99,14 +133,18 @@ impl Tool for UpdateSparkTool {
             )
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(ToolResult {
-            output: format!(
+        let msg = if parsed.action == "delete" {
+            format!("Spark {} deleted and archived to memory", spark.id)
+        } else {
+            format!(
                 "Spark {} {} — tags [{}]: {}",
                 spark.id,
                 parsed.action,
                 spark.tags.join(", "),
                 spark.content
-            ),
-        })
+            )
+        };
+
+        Ok(ToolResult { output: msg })
     }
 }

@@ -1,30 +1,18 @@
 use std::sync::Arc;
 
-use buddy_core::{PathGuard, Tool, ToolError, ToolResult};
+use buddy_core::{excluded_paths_from_setting, parse_tool_json, PathGuard, Tool, ToolError, ToolResult};
 use buddy_database::Database;
 use serde::Deserialize;
 
 const MAX_READ_BYTES: u64 = 512 * 1024;
-const DEFAULT_EXCLUSIONS: &[&str] = &[
-    "Library", ".Trash", ".ssh", ".gnupg", ".cache", "Pictures",
-];
-
-fn excluded_paths(db: &Database) -> Vec<String> {
-    db.get_setting("fs_excluded_paths")
-        .ok()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
-        .unwrap_or_else(|| DEFAULT_EXCLUSIONS.iter().map(|s| s.to_string()).collect())
-}
 
 fn build_guard(db: &Database) -> Result<PathGuard, ToolError> {
-    PathGuard::home(excluded_paths(db))
-        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    let excluded = excluded_paths_from_setting(db.get_setting("fs_excluded_paths").ok().flatten());
+    Ok(PathGuard::home(excluded)?)
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(input: &str, tool: &str) -> Result<T, ToolError> {
-    serde_json::from_str(input)
-        .map_err(|e| ToolError::ExecutionFailed(format!("{tool} expects JSON: {e}")))
+    parse_tool_json(input, tool)
 }
 
 pub struct ReadFileTool {
@@ -111,8 +99,7 @@ impl Tool for ReadFileTool {
         let parsed: PathInput = parse(input, "read_file")?;
         let guard = build_guard(&self.db)?;
         let path = guard
-            .check(&parsed.path)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .check(&parsed.path)?;
 
         let metadata = std::fs::metadata(&path)
             .map_err(|e| ToolError::ExecutionFailed(format!("cannot stat {}: {e}", path.display())))?;
@@ -139,8 +126,7 @@ impl Tool for WriteFileTool {
         let parsed: WriteInput = parse(input, "write_file")?;
         let guard = build_guard(&self.db)?;
         let path = guard
-            .check(&parsed.path)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .check(&parsed.path)?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -169,8 +155,7 @@ impl Tool for EditFileTool {
         let parsed: EditInput = parse(input, "edit_file")?;
         let guard = build_guard(&self.db)?;
         let path = guard
-            .check(&parsed.path)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .check(&parsed.path)?;
 
         let (new_content, summary) = if let Some(full) = parsed.content {
             (full, "replaced file contents".to_string())
@@ -214,8 +199,7 @@ impl Tool for DeleteFileTool {
         let parsed: PathInput = parse(input, "delete_file")?;
         let guard = build_guard(&self.db)?;
         let path = guard
-            .check(&parsed.path)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .check(&parsed.path)?;
 
         if !path.exists() {
             return Err(ToolError::ExecutionFailed(format!(
@@ -249,8 +233,7 @@ impl Tool for ListDirTool {
         let parsed: ListInput = parse(input, "list_dir")?;
         let guard = build_guard(&self.db)?;
         let root = guard
-            .check(&parsed.path)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .check(&parsed.path)?;
         let depth = parsed.depth.unwrap_or(1).min(4);
 
         let mut lines = Vec::new();

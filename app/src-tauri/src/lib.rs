@@ -1,27 +1,29 @@
-mod codex_orchestrator;
-mod codex_runner;
+mod calendar_bridge;
+mod calendar_reminder_checker;
+mod coder_bridge;
+mod coder_tool;
 mod commands;
-mod cursor_runner;
 mod intelligence_hooks;
 mod logging;
+mod memory_api;
 mod memory_extraction;
+mod memory_tools;
 mod orchestrator;
 mod secrets;
 mod services;
 mod spark_checker;
 mod state;
-mod terminal;
 
 use std::sync::Arc;
 
+use buddy_coder::TerminalManager;
 use buddy_database::Database;
 use buddy_memory::MemoryContext;
 use memory_extraction::session_end_handover;
 use services::ProcessManager;
 use state::{db_path, find_project_root, logs_dir, AppState};
-use terminal::TerminalManager;
 use tauri::{Manager, RunEvent};
-use tracing::info;
+use tracing::{error, info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,8 +38,18 @@ pub fn run() {
         .setup(move |app| {
             let path = db_path(app.handle());
             info!(path = %path.display(), "opening database");
-            let db = Database::open(&path).expect("failed to open database");
-            let state = Arc::new(AppState::new(db, project_root.clone()));
+            let db = match Database::open(&path) {
+                Ok(db) => db,
+                Err(e) => {
+                    error!(error = %e, path = %path.display(), "database open failed");
+                    return Err(format!(
+                        "Could not open Buddy database at {}: {e}. Try quitting other Buddy instances or repairing buddy.db.",
+                        path.display()
+                    )
+                    .into());
+                }
+            };
+            let state = AppState::new(db, project_root.clone());
             let process_manager = Arc::new(ProcessManager::new());
 
             app.manage(state.clone());
@@ -45,6 +57,10 @@ pub fn run() {
             app.manage(Arc::new(TerminalManager::new()));
 
             spark_checker::spawn_spark_checker(app.handle().clone(), state.clone());
+            calendar_reminder_checker::spawn_calendar_reminder_checker(
+                app.handle().clone(),
+                state.clone(),
+            );
 
             let pm = process_manager.clone();
             let st = state.clone();
@@ -56,12 +72,7 @@ pub fn run() {
                     let _ = pm.ensure_brain(&st).await;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
-                let ctx = MemoryContext {
-                    workspace_path: st.project_root.clone(),
-                    conversation_id: None,
-                    task_id: None,
-                };
-                st.intelligence.spawn_reindex(ctx).await;
+                st.memory.spawn_reindex().await;
             });
 
             Ok(())
@@ -96,6 +107,31 @@ pub fn run() {
             commands::terminal_write,
             commands::terminal_resize,
             commands::terminal_close,
+            commands::calendar_list_events,
+            commands::calendar_get_event,
+            commands::calendar_create_event,
+            commands::calendar_update_event,
+            commands::calendar_delete_event,
+            commands::calendar_duplicate_event,
+            commands::calendar_search_events,
+            commands::calendar_get_today,
+            commands::calendar_get_tomorrow,
+            commands::calendar_get_this_week,
+            commands::calendar_list_notifications,
+            commands::calendar_snooze_reminder,
+            commands::calendar_dismiss_reminder,
+            commands::calendar_notification_count,
+            commands::lifestyle_list_blocks,
+            commands::lifestyle_last_sleep_date,
+            commands::dream_list,
+            commands::dream_log,
+            commands::dream_update,
+            commands::dream_delete,
+            commands::dream_search,
+            commands::work_get_stats,
+            commands::work_log_sales,
+            commands::work_set_hours,
+            commands::work_get_day_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -116,6 +152,8 @@ fn handle_exit(state: Arc<AppState>) {
     };
     tauri::async_runtime::block_on(async {
         session_end_handover(&state, &ctx).await;
-        let _ = state.intelligence.run_maintenance(&ctx).await;
+        if let Err(e) = state.memory.run_global_maintenance().await {
+            warn!(error = %e, "exit maintenance failed");
+        }
     });
 }
