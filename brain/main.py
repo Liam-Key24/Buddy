@@ -262,35 +262,6 @@ def chat_plan(req: PlanRequest):
             fast = try_fast_heuristic_plan(req.message)
         if fast is not None:
             fast = _maybe_force_calendar_plan(fast, req)
-            # #region agent log
-            try:
-                import json as _json
-                from pathlib import Path as _Path
-
-                _Path("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log").open(
-                    "a", encoding="utf-8"
-                ).write(
-                    _json.dumps(
-                        {
-                            "sessionId": "ed1062",
-                            "hypothesisId": "H1",
-                            "location": "main.py:chat_plan",
-                            "message": "heuristic-fast path used",
-                            "data": {
-                                "message": req.message[:160],
-                                "tool": fast.tool,
-                                "respond_mode": fast.respond_mode,
-                                "tool_input_preview": (fast.tool_input or "")[:240],
-                            },
-                            "timestamp": int(time.time() * 1000),
-                            "runId": "lunch-debug",
-                        }
-                    )
-                    + "\n"
-                )
-            except Exception:
-                pass
-            # #endregion
             logger.info(
                 "plan heuristic-fast intent=%s tool=%s respond_mode=%s latency_ms=%d",
                 fast.intent,
@@ -324,37 +295,6 @@ def chat_plan(req: PlanRequest):
             )
 
     plan = apply_respond_mode(plan)
-    # #region agent log
-    try:
-        import json as _json
-        from pathlib import Path as _Path
-
-        _Path("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log").open(
-            "a", encoding="utf-8"
-        ).write(
-            _json.dumps(
-                {
-                    "sessionId": "ed1062",
-                    "hypothesisId": "H1",
-                    "location": "main.py:chat_plan",
-                    "message": "mlx/fallback plan result",
-                    "data": {
-                        "message": req.message[:160],
-                        "intent": plan.intent,
-                        "tool": plan.tool,
-                        "respond_mode": plan.respond_mode,
-                        "tool_input_preview": (plan.tool_input or "")[:240],
-                        "response_preview": (plan.response or "")[:160],
-                    },
-                    "timestamp": int(time.time() * 1000),
-                    "runId": "lunch-debug",
-                }
-            )
-            + "\n"
-        )
-    except Exception:
-        pass
-    # #endregion
     logger.info(
         "plan parsed intent=%s tool=%s respond_mode=%s latency_ms=%d",
         plan.intent,

@@ -12,28 +12,6 @@ use crate::models::{
 use crate::scheduling::{ConflictKind, PlanDayRequest, ScheduleItem, WriteEventOutcome};
 use crate::CalendarService;
 
-// #region agent log
-fn agent_dbg(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    use std::io::Write;
-    let payload = serde_json::json!({
-        "sessionId": "ed1062",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": chrono::Utc::now().timestamp_millis(),
-        "runId": "lunch-debug",
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
-    {
-        let _ = writeln!(f, "{payload}");
-    }
-}
-// #endregion
-
 fn conflict_only_with_batch(
     report: &crate::scheduling::ConflictReport,
     batch_ids: &[String],
@@ -455,7 +433,7 @@ impl Tool for CreateEventTool {
 
         let parsed: CreateInput = parse_tool_json(input, "calendar.create_event")?;
         let outcome = block_on(self.service.create_event_checked(CreateEventInput {
-            title: parsed.title.clone(),
+            title: parsed.title,
             description: parsed.description,
             location: parsed.location,
             category: parsed.category,
@@ -470,22 +448,6 @@ impl Tool for CreateEventTool {
             priority: parsed.priority,
             force: parsed.force,
         }))?;
-        // #region agent log
-        agent_dbg(
-            "H3",
-            "tools/mod.rs:CreateEventTool",
-            "create_event outcome",
-            json!({
-                "title": parsed.title,
-                "start_time": parsed.start_time,
-                "end_time": parsed.end_time,
-                "status": match &outcome {
-                    WriteEventOutcome::Ok { event } => format!("ok:{}", event.id),
-                    WriteEventOutcome::Conflict { .. } => "conflict".into(),
-                },
-            }),
-        );
-        // #endregion
         json_result(&outcome)
     }
 }
@@ -496,10 +458,6 @@ impl Tool for UpdateEventTool {
     }
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
         let parsed: UpdateInput = parse_tool_json(input, "calendar.update_event")?;
-        let id = parsed.id.clone();
-        let title = parsed.title.clone();
-        let start_time = parsed.start_time;
-        let end_time = parsed.end_time;
         let outcome = block_on(self.service.update_event_checked(
             &parsed.id,
             UpdateEventInput {
@@ -520,23 +478,6 @@ impl Tool for UpdateEventTool {
                 force: parsed.force,
             },
         ))?;
-        // #region agent log
-        agent_dbg(
-            "H2",
-            "tools/mod.rs:UpdateEventTool",
-            "update_event outcome",
-            json!({
-                "id": id,
-                "title": title,
-                "start_time": start_time,
-                "end_time": end_time,
-                "status": match &outcome {
-                    WriteEventOutcome::Ok { event } => format!("ok:{}", event.title),
-                    WriteEventOutcome::Conflict { .. } => "conflict".into(),
-                },
-            }),
-        );
-        // #endregion
         json_result(&outcome)
     }
 }

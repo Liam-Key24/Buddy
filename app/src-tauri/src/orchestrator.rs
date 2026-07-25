@@ -199,36 +199,6 @@ pub async fn send_message(
 
     let assistant_content = if plan.intent == "tool_use" {
         if let Some(tool_name) = &plan.tool {
-            // #region agent log
-            {
-                use std::io::Write;
-                let payload = serde_json::json!({
-                    "sessionId": "ed1062",
-                    "hypothesisId": "H1",
-                    "location": "orchestrator.rs:handle_chat",
-                    "message": "dispatching tool",
-                    "data": {
-                        "user_text": text.chars().take(160).collect::<String>(),
-                        "intent": plan.intent,
-                        "tool": tool_name,
-                        "respond_mode": plan.respond_mode,
-                        "tool_input_preview": plan.tool_input.as_deref().unwrap_or("").chars().take(280).collect::<String>(),
-                    },
-                    "timestamp": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                    "runId": "lunch-debug",
-                });
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
-                {
-                    let _ = writeln!(f, "{payload}");
-                }
-            }
-            // #endregion
             dispatch_tool(
                 &app,
                 state,
@@ -255,34 +225,6 @@ pub async fn send_message(
             content
         }
     } else {
-        // #region agent log
-        {
-            use std::io::Write;
-            let payload = serde_json::json!({
-                "sessionId": "ed1062",
-                "hypothesisId": "H1",
-                "location": "orchestrator.rs:handle_chat",
-                "message": "chat intent no tool",
-                "data": {
-                    "user_text": text.chars().take(160).collect::<String>(),
-                    "intent": plan.intent,
-                    "response_preview": plan.response.as_deref().unwrap_or("").chars().take(200).collect::<String>(),
-                },
-                "timestamp": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0),
-                "runId": "lunch-debug",
-            });
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
-            {
-                let _ = writeln!(f, "{payload}");
-            }
-        }
-        // #endregion
         state.memory.clear_pending_clarification(&conversation_id);
         let mut content = plan.response.unwrap_or_default();
         if content.is_empty() {
@@ -560,33 +502,6 @@ fn run_tool_with_tracking(
                         .and_then(|v| v.get("status")?.as_str().map(|s| s == "conflict"))
                         .unwrap_or(false);
                     if !is_conflict {
-                        // #region agent log
-                        {
-                            use std::io::Write;
-                            let payload = serde_json::json!({
-                                "sessionId": "ed1062",
-                                "hypothesisId": "H5",
-                                "location": "orchestrator.rs:run_tool_with_tracking",
-                                "message": "emit calendar-updated",
-                                "data": {
-                                    "tool": tool_name,
-                                    "output_preview": output.chars().take(240).collect::<String>(),
-                                },
-                                "timestamp": std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis() as u64)
-                                    .unwrap_or(0),
-                                "runId": "lunch-debug",
-                            });
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
-                            {
-                                let _ = writeln!(f, "{payload}");
-                            }
-                        }
-                        // #endregion
                         let _ = app.emit("calendar-updated", ());
                     }
                 }
@@ -747,34 +662,6 @@ async fn try_force_confirm_pending(
     if !is_force_confirm(text) {
         return Ok(None);
     }
-
-    // #region agent log
-    {
-        use std::io::Write;
-        let payload = serde_json::json!({
-            "sessionId": "ed1062",
-            "hypothesisId": "H-force",
-            "location": "orchestrator.rs:try_force_confirm_pending",
-            "message": "forcing calendar write after allow",
-            "data": {
-                "tool": pending.tool,
-                "tool_input_preview": pending.tool_input.chars().take(240).collect::<String>(),
-            },
-            "timestamp": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            "runId": "lunch-debug",
-        });
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
-        {
-            let _ = writeln!(f, "{payload}");
-        }
-    }
-    // #endregion
 
     let forced_input = merge_tool_input(&pending.tool_input, r#"{"force":true}"#);
     let tool_name = pending.tool.clone();

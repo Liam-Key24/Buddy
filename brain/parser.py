@@ -530,33 +530,6 @@ def _next_weekday(now: datetime, by_day: list[str]) -> datetime:
 
 def _infer_title_category(segment: str) -> tuple[str, str]:
     lower = segment.lower()
-    # #region agent log
-    def _dbg(hyp: str, msg: str, data: dict) -> None:
-        try:
-            import time as _t
-            with open(
-                "/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log",
-                "a",
-                encoding="utf-8",
-            ) as _f:
-                _f.write(
-                    json.dumps(
-                        {
-                            "sessionId": "ed1062",
-                            "hypothesisId": hyp,
-                            "location": "parser.py:_infer_title_category",
-                            "message": msg,
-                            "data": data,
-                            "timestamp": int(_t.time() * 1000),
-                            "runId": "post-fix",
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-
-    # #endregion
 
     category = "general"
     cat_m = re.search(
@@ -585,13 +558,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     }
 
     if re.search(r"\blunch\b", lower):
-        # #region agent log
-        _dbg(
-            "H1",
-            "lunch title branch",
-            {"segment": segment[:160], "result_title": "Lunch", "result_category": category if category != "general" else "personal"},
-        )
-        # #endregion
         return "Lunch", "personal" if category == "general" else category
     if re.search(r"\bbreak\b", lower) and not re.search(
         r"\b(?:block|research)\b", lower
@@ -614,18 +580,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
         )
         if category == "general" and raw in activity_map:
             category = "personal"
-        # #region agent log
-        _dbg(
-            "A",
-            "purpose clause title",
-            {
-                "segment": segment[:160],
-                "purpose_raw": raw,
-                "result_title": title,
-                "result_category": category,
-            },
-        )
-        # #endregion
         return title[:60], category
 
     if re.search(r"\bclimb", lower):
@@ -637,9 +591,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     if re.search(r"\bcod(?:e|ing)\b", lower):
         return "Coding", "personal" if category == "general" else category
     if category == "work" and re.search(r"\bwork\b", lower):
-        # #region agent log
-        _dbg("B", "work category title", {"segment": segment[:120]})
-        # #endregion
         return "Work", "work"
 
     called = re.search(
@@ -650,9 +601,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     if called:
         title = called.group(1).strip(" .,:-")
         if title:
-            # #region agent log
-            _dbg("A", "called/named branch", {"title": title, "segment": segment[:120]})
-            # #endregion
             return title[:60], category
 
     noun_m = re.search(
@@ -664,7 +612,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
         segment.strip(),
         flags=re.IGNORECASE,
     )
-    after_verb = title
     title = re.sub(r"^(?:an?\s+)", "", title, flags=re.IGNORECASE)
     title = re.sub(
         r"^(?:personal|work|birthdays|holidays|general)\s+",
@@ -679,7 +626,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
         title,
         flags=re.IGNORECASE,
     )
-    after_article = title
     title = re.sub(
         r"\b(?:every|from|at|on|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|tonight|for\s+\d).*$",
         "",
@@ -687,7 +633,6 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
         flags=re.IGNORECASE,
     ).strip(" .,:-")
     title = re.sub(r"\s+for$", "", title, flags=re.IGNORECASE).strip(" .,:-")
-    after_day_cut = title
     title = re.sub(r"\s+block$", "", title, flags=re.IGNORECASE).strip()
     if re.fullmatch(
         r"(?:personal|work|birthdays|holidays|general|event|meeting|appointment|call|reminder|for|to|a|an|the|\s)+",
@@ -698,23 +643,9 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     if not title and noun_m:
         title = noun_m.group(1).capitalize()
     result_title = title[:60] if title else "New event"
-    # #region agent log
-    _dbg(
-        "A",
-        "default title strip path",
-        {
-            "segment": segment[:160],
-            "after_verb": after_verb[:120],
-            "after_article": after_article[:120],
-            "after_day_cut": after_day_cut[:120],
-            "result_title": result_title,
-            "result_category": category,
-            "has_personal_word": bool(re.search(r"\bpersonal\b", lower)),
-            "has_to_code": bool(re.search(r"\bto\s+code\b|\bcode\b", lower)),
-        },
-    )
-    # #endregion
     return result_title, category
+
+
 def _split_schedule_segments(message: str) -> list[str]:
     parts = re.split(
         r"\balong\s*side\b|\balongside\b|\bas well as\b|\bfollowed by\b|\band then\b|;|\n",
