@@ -17,8 +17,8 @@ pub use conflict::{detect_conflicts, ConflictDetail, ConflictKind, ConflictRepor
 pub use free_time::{find_free_slots, find_free_slots_for};
 pub use occupancy::{build_occupancy, build_occupancy_excluding, BusyInterval, BusySource};
 pub use planner::{
-    block_focus_time, plan_day, reschedule_flexible, schedule_items, PlanDayRequest, PlanDayResult,
-    ProposedBlock, ScheduleItem, ScheduleItemsResult,
+    block_focus_time, expand_schedule_items, plan_day, reschedule_flexible, schedule_items,
+    PlanDayRequest, PlanDayResult, ProposedBlock, ScheduleItem, ScheduleItemsResult,
 };
 pub use score::{activity_hour_adjustment, score_slot, score_slot_for_activity};
 pub use summary::{compose_day_summary, DaySummary, SummaryItem};

@@ -9,8 +9,56 @@ use crate::models::{
     CreateEventInput, DateRange, EventFilters, EventPriority, Flexibility, RecurrenceRule,
     Reminder, UpdateEventInput,
 };
-use crate::scheduling::{PlanDayRequest, ScheduleItem};
+use crate::scheduling::{ConflictKind, PlanDayRequest, ScheduleItem, WriteEventOutcome};
 use crate::CalendarService;
+
+// #region agent log
+fn agent_dbg(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let payload = serde_json::json!({
+        "sessionId": "ed1062",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "runId": "lunch-debug",
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
+    {
+        let _ = writeln!(f, "{payload}");
+    }
+}
+// #endregion
+
+fn conflict_only_with_batch(
+    report: &crate::scheduling::ConflictReport,
+    batch_ids: &[String],
+) -> bool {
+    if report.conflicts.is_empty() || batch_ids.is_empty() {
+        return false;
+    }
+    report.conflicts.iter().all(|c| {
+        let soft = matches!(
+            c.kind,
+            ConflictKind::BufferViolation | ConflictKind::Overlap
+        );
+        if !soft {
+            return false;
+        }
+        match &c.conflicting_id {
+            Some(id) => batch_ids.iter().any(|b| {
+                id == b || id.starts_with(&format!("{b}::")) || b.starts_with(&format!("{id}::"))
+            }),
+            // Buffer rows sometimes omit ids after merge; still treat as soft when we
+            // only just wrote sibling events in this batch.
+            None => matches!(c.kind, ConflictKind::BufferViolation),
+        }
+    })
+}
 
 /// Accept unix ms (number/string) or common ISO-8601 datetime strings.
 fn parse_millis_value(value: &serde_json::Value) -> Option<i64> {
@@ -352,25 +400,53 @@ impl Tool for CreateEventTool {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
             if let Some(arr) = value.get("events").and_then(|e| e.as_array()) {
                 let mut outcomes = Vec::new();
+                let mut batch_ids: Vec<String> = Vec::new();
                 for item in arr {
                     let parsed: CreateInput = serde_json::from_value(item.clone())
                         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-                    let outcome = block_on(self.service.create_event_checked(CreateEventInput {
-                        title: parsed.title,
-                        description: parsed.description,
-                        location: parsed.location,
-                        category: parsed.category,
-                        color: parsed.color,
-                        start_time: parsed.start_time,
-                        end_time: parsed.end_time,
-                        all_day: parsed.all_day,
-                        timezone: parsed.timezone,
-                        recurrence: parsed.recurrence,
-                        reminders: parsed.reminders,
-                        flexibility: parsed.flexibility,
-                        priority: parsed.priority,
-                        force: parsed.force,
-                    }))?;
+                    let mut outcome =
+                        block_on(self.service.create_event_checked(CreateEventInput {
+                            title: parsed.title.clone(),
+                            description: parsed.description.clone(),
+                            location: parsed.location.clone(),
+                            category: parsed.category.clone(),
+                            color: parsed.color.clone(),
+                            start_time: parsed.start_time,
+                            end_time: parsed.end_time,
+                            all_day: parsed.all_day,
+                            timezone: parsed.timezone.clone(),
+                            recurrence: parsed.recurrence.clone(),
+                            reminders: parsed.reminders.clone(),
+                            flexibility: parsed.flexibility,
+                            priority: parsed.priority,
+                            force: parsed.force,
+                        }))?;
+                    if let WriteEventOutcome::Conflict { report } = &outcome {
+                        // "Followed by" chains sit back-to-back; the default buffer
+                        // after the prior sibling must not block the next event.
+                        if conflict_only_with_batch(report, &batch_ids) {
+                            outcome =
+                                block_on(self.service.create_event_checked(CreateEventInput {
+                                    title: parsed.title,
+                                    description: parsed.description,
+                                    location: parsed.location,
+                                    category: parsed.category,
+                                    color: parsed.color,
+                                    start_time: parsed.start_time,
+                                    end_time: parsed.end_time,
+                                    all_day: parsed.all_day,
+                                    timezone: parsed.timezone,
+                                    recurrence: parsed.recurrence,
+                                    reminders: parsed.reminders,
+                                    flexibility: parsed.flexibility,
+                                    priority: parsed.priority,
+                                    force: true,
+                                }))?;
+                        }
+                    }
+                    if let WriteEventOutcome::Ok { event } = &outcome {
+                        batch_ids.push(event.id.clone());
+                    }
                     outcomes.push(outcome);
                 }
                 return json_result(&outcomes);
@@ -379,7 +455,7 @@ impl Tool for CreateEventTool {
 
         let parsed: CreateInput = parse_tool_json(input, "calendar.create_event")?;
         let outcome = block_on(self.service.create_event_checked(CreateEventInput {
-            title: parsed.title,
+            title: parsed.title.clone(),
             description: parsed.description,
             location: parsed.location,
             category: parsed.category,
@@ -394,6 +470,22 @@ impl Tool for CreateEventTool {
             priority: parsed.priority,
             force: parsed.force,
         }))?;
+        // #region agent log
+        agent_dbg(
+            "H3",
+            "tools/mod.rs:CreateEventTool",
+            "create_event outcome",
+            json!({
+                "title": parsed.title,
+                "start_time": parsed.start_time,
+                "end_time": parsed.end_time,
+                "status": match &outcome {
+                    WriteEventOutcome::Ok { event } => format!("ok:{}", event.id),
+                    WriteEventOutcome::Conflict { .. } => "conflict".into(),
+                },
+            }),
+        );
+        // #endregion
         json_result(&outcome)
     }
 }
@@ -404,6 +496,10 @@ impl Tool for UpdateEventTool {
     }
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
         let parsed: UpdateInput = parse_tool_json(input, "calendar.update_event")?;
+        let id = parsed.id.clone();
+        let title = parsed.title.clone();
+        let start_time = parsed.start_time;
+        let end_time = parsed.end_time;
         let outcome = block_on(self.service.update_event_checked(
             &parsed.id,
             UpdateEventInput {
@@ -424,6 +520,23 @@ impl Tool for UpdateEventTool {
                 force: parsed.force,
             },
         ))?;
+        // #region agent log
+        agent_dbg(
+            "H2",
+            "tools/mod.rs:UpdateEventTool",
+            "update_event outcome",
+            json!({
+                "id": id,
+                "title": title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "status": match &outcome {
+                    WriteEventOutcome::Ok { event } => format!("ok:{}", event.title),
+                    WriteEventOutcome::Conflict { .. } => "conflict".into(),
+                },
+            }),
+        );
+        // #endregion
         json_result(&outcome)
     }
 }
@@ -856,6 +969,12 @@ struct ScheduleTaskInput {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    count: Option<u32>,
+    #[serde(default)]
+    prefer_spread: Option<bool>,
+    #[serde(default)]
+    spark_id: Option<String>,
+    #[serde(default)]
     tasks: Option<Vec<ScheduleItem>>,
     #[serde(default, alias = "start_time", deserialize_with = "deserialize_opt_millis")]
     start: Option<i64>,
@@ -971,6 +1090,9 @@ impl Tool for ScheduleTaskTool {
                 flexibility: parsed.flexibility,
                 category: parsed.category,
                 description: parsed.description,
+                count: parsed.count,
+                prefer_spread: parsed.prefer_spread,
+                spark_id: parsed.spark_id,
             });
         }
         if items.is_empty() {
@@ -978,6 +1100,12 @@ impl Tool for ScheduleTaskTool {
                 "provide title+duration_minutes or tasks[]".into(),
             ));
         }
+        // Multi-occurrence / multi-task plans default to propose-only.
+        let total_blocks: u32 = items
+            .iter()
+            .map(|i| i.count.unwrap_or(1).clamp(1, 14))
+            .sum();
+        let apply = parsed.apply.unwrap_or(total_blocks <= 1);
         let now = chrono::Utc::now().timestamp_millis();
         let mut range = DateRange {
             start: parsed.start.unwrap_or(now),
@@ -989,7 +1117,7 @@ impl Tool for ScheduleTaskTool {
         // Defence: "this week" must not collapse to ~now — ensure room for the longest task.
         let min_span = items
             .iter()
-            .map(|i| i.duration_minutes as i64 * 60_000)
+            .map(|i| i.duration_minutes as i64 * 60_000 * i.count.unwrap_or(1).clamp(1, 14) as i64)
             .max()
             .unwrap_or(60_000)
             + 60 * 60_000;
@@ -999,7 +1127,6 @@ impl Tool for ScheduleTaskTool {
         if range.end <= range.start {
             range.end = range.start + 7 * 86_400_000;
         }
-        let apply = parsed.apply.unwrap_or(true);
         let result = block_on(self.service.schedule_task_items(items, range, apply))?;
         json_result(&result)
     }

@@ -18,6 +18,7 @@ class MemoryContextPayload(BaseModel):
     workspace: str | None = None
     learned_patterns: str | None = None
     stale_sparks: str | None = None
+    active_sparks: str | None = None
 
 
 def format_history(history: list) -> list[dict]:
@@ -54,6 +55,13 @@ def build_memory_block(memory: MemoryContextPayload | None) -> str:
         sections.append(f"## Recent Tools\n{memory.tools}")
     if memory.reflections:
         sections.append(f"## Reflections\n{memory.reflections}")
+    if memory.active_sparks:
+        sections.append(
+            f"## Active Sparks (available to schedule)\n{memory.active_sparks}\n"
+            "When the user wants to work on sparks, pick from these by id/title for "
+            "calendar.plan_day / calendar.schedule_task (set spark_id). "
+            "If they say \"two sparks\" and more than two are listed, ask which ones."
+        )
     if memory.stale_sparks:
         sections.append(
             f"## Stale Sparks (need attention)\n{memory.stale_sparks}\n"

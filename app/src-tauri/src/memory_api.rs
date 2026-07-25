@@ -114,6 +114,7 @@ impl MemoryApi {
     pub fn brain_payload(&self, merged: &MergedContext) -> BrainMemoryContext {
         let mut memory = BrainMemoryContext::from(merged);
         memory.stale_sparks = self.stale_sparks_context();
+        memory.active_sparks = self.active_sparks_context();
         memory
     }
 
@@ -191,6 +192,15 @@ impl MemoryApi {
             return None;
         }
         Some(Database::format_stale_sparks_context(&sparks))
+    }
+
+    fn active_sparks_context(&self) -> Option<String> {
+        let sparks = self.db.list_sparks(Some("active")).ok()?;
+        if sparks.is_empty() {
+            return None;
+        }
+        let limited: Vec<_> = sparks.into_iter().take(15).collect();
+        Some(Database::format_active_sparks_context(&limited))
     }
 
     pub async fn finish_task(

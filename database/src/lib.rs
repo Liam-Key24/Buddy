@@ -967,6 +967,24 @@ impl Database {
             .join("\n")
     }
 
+    /// Compact active-spark list for Brain planning (schedule sparks onto the calendar).
+    pub fn format_active_sparks_context(sparks: &[Spark]) -> String {
+        sparks
+            .iter()
+            .map(|s| {
+                let tags = s.tags.join(", ");
+                let preview = if s.content.chars().count() > 100 {
+                    let truncated: String = s.content.chars().take(97).collect();
+                    format!("{truncated}...")
+                } else {
+                    s.content.clone()
+                };
+                format!("- [{}] (id: {}) {}", tags, s.id, preview)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn row_to_buddy_calendar_event(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<BuddyCalendarEventRow> {

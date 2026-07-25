@@ -114,6 +114,10 @@ fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
         if tool.contains("find_free_time") {
             return Some(phrase_free_slots(arr));
         }
+        // Batch create returns [{status, event}, ...] — not a search/list result.
+        if tool.contains("create") || tool.contains("duplicate") {
+            return Some(phrase_created_batch(arr));
+        }
         return Some(phrase_list(tool, arr));
     }
 
@@ -125,9 +129,7 @@ fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
             }
             if status == "ok" {
                 if let Some(event) = obj.get("event") {
-                    if let Some(title) = event.get("title").and_then(|v| v.as_str()) {
-                        return Some(format!("Created “{title}”."));
-                    }
+                    return Some(phrase_created_one(event));
                 }
             }
         }
@@ -171,6 +173,72 @@ fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
     }
 
     None
+}
+
+fn phrase_created_one(event: &Value) -> String {
+    let title = event
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("event");
+    let loc = event
+        .get("location")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" at {s}"))
+        .unwrap_or_default();
+    let when = phrase_time_range(
+        event.get("start").or_else(|| event.get("start_time")),
+        event.get("end").or_else(|| event.get("end_time")),
+    );
+    format!("Created “{title}”{loc}{when}.")
+}
+
+fn phrase_created_batch(items: &[Value]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut conflicts = 0usize;
+    for item in items {
+        if let Some(obj) = item.as_object() {
+            if obj.get("status").and_then(|v| v.as_str()) == Some("conflict") {
+                conflicts += 1;
+                continue;
+            }
+            let event = obj.get("event").unwrap_or(item);
+            if let Some(title) = event.get("title").and_then(|v| v.as_str()) {
+                let when = phrase_time_range(
+                    event.get("start").or_else(|| event.get("start_time")),
+                    event.get("end").or_else(|| event.get("end_time")),
+                );
+                lines.push(format!("“{title}”{when}"));
+                continue;
+            }
+        }
+        if let Some(title) = item.get("title").and_then(|v| v.as_str()) {
+            let when = phrase_time_range(
+                item.get("start").or_else(|| item.get("start_time")),
+                item.get("end").or_else(|| item.get("end_time")),
+            );
+            lines.push(format!("“{title}”{when}"));
+        }
+    }
+
+    if lines.is_empty() {
+        return if conflicts > 0 {
+            format!("Couldn’t add {conflicts} events — time conflicts.")
+        } else {
+            "Created the events.".into()
+        };
+    }
+
+    let listed = join_natural(&lines);
+    let mut msg = if lines.len() == 1 {
+        format!("Created {listed}.")
+    } else {
+        format!("Created {listed}.")
+    };
+    if conflicts > 0 {
+        msg.push_str(&format!(" ({conflicts} hit conflicts.)"));
+    }
+    msg
 }
 
 fn phrase_scheduling(tool: &str, value: &Value) -> Option<String> {
@@ -254,19 +322,28 @@ fn phrase_schedule_result(obj: &serde_json::Map<String, Value>) -> String {
 
     let mut parts = Vec::new();
     if !scheduled.is_empty() {
-        let titles = scheduled
+        let lines: Vec<String> = scheduled
             .iter()
-            .filter_map(|s| s.get("title").and_then(|t| t.as_str()))
-            .map(|t| format!("“{t}”"))
-            .collect::<Vec<_>>();
+            .filter_map(|s| {
+                let title = s.get("title")?.as_str()?;
+                let when = phrase_time_range(s.get("start"), s.get("end"));
+                Some(format!("“{title}”{when}"))
+            })
+            .take(6)
+            .collect();
+        let more = if scheduled.len() > 6 {
+            format!(" (+{} more)", scheduled.len() - 6)
+        } else {
+            String::new()
+        };
         parts.push(format!(
-            "Scheduled {}: {}.",
-            if titles.len() == 1 {
+            "Proposed {}: {}{more}.",
+            if scheduled.len() == 1 {
                 "1 block".into()
             } else {
-                format!("{} blocks", titles.len())
+                format!("{} blocks", scheduled.len())
             },
-            join_natural(&titles)
+            join_natural(&lines)
         ));
     }
     if !unscheduled.is_empty() {
@@ -291,6 +368,9 @@ fn phrase_schedule_result(obj: &serde_json::Map<String, Value>) -> String {
     if parts.is_empty() {
         "No tasks were scheduled.".into()
     } else {
+        if scheduled.len() > 1 {
+            parts.push("Say the word if you want these on the calendar.".into());
+        }
         parts.join(" ")
     }
 }
@@ -372,10 +452,11 @@ fn phrase_conflict(obj: &serde_json::Map<String, Value>) -> String {
         .flatten()
         .find(|s| s.get("action").and_then(|a| a.as_str()) == Some("use_slot"))
         .and_then(|s| s.get("message").and_then(|m| m.as_str()));
-    match alt {
+    let base = match alt {
         Some(a) => format!("{msg} {a}"),
         None => msg.to_string(),
-    }
+    };
+    format!("{base} Say allow to book it anyway.")
 }
 
 fn phrase_time_range(start: Option<&Value>, end: Option<&Value>) -> String {
@@ -635,6 +716,21 @@ mod tests {
         );
         assert!(msg.contains("Standup"));
         assert!(msg.contains("Created"));
+    }
+
+    #[test]
+    fn phrases_batch_created_events_not_found() {
+        let msg = phrase_tool_result(
+            "calendar.create_event",
+            r#"[
+              {"status":"ok","event":{"title":"study","start_time":1785052800000,"end_time":1785063600000}},
+              {"status":"ok","event":{"title":"research","start_time":1785063600000,"end_time":1785070800000}}
+            ]"#,
+        );
+        assert!(msg.contains("Created"));
+        assert!(msg.contains("study"));
+        assert!(msg.contains("research"));
+        assert!(!msg.contains("Found"));
     }
 
     #[test]

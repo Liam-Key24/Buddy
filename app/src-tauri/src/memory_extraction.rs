@@ -20,6 +20,7 @@ pub struct BrainMemoryContext {
     pub workspace: Option<String>,
     pub learned_patterns: Option<String>,
     pub stale_sparks: Option<String>,
+    pub active_sparks: Option<String>,
 }
 
 impl From<&MergedContext> for BrainMemoryContext {
@@ -37,6 +38,7 @@ impl From<&MergedContext> for BrainMemoryContext {
             workspace: payload.workspace,
             learned_patterns: payload.learned_patterns,
             stale_sparks: None,
+            active_sparks: None,
         }
     }
 }

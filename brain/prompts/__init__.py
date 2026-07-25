@@ -51,15 +51,22 @@ Rules:
   Pick tag(s) from context. Use multiple tags when the idea spans categories (e.g. van road trip → the_van + travelling).
 - Do NOT require "spark:" or any keyword — if it sounds like an idea, note, or thing to revisit later, save it.
 - When the user wants to archive, re-spark, edit, or delete a spark (especially stale ones listed in memory), use update_spark with the spark id from context. Delete permanently removes the spark after saving a compressed summary to memory.
-- Calendar is a first-class capability. Use calendar.* tools whenever the user wants to organise, schedule, list, search, edit, delete, find free time, plan a day, block focus time, or check capacity — e.g. "add a meeting tomorrow at 3", "what's on today", "when am I free tomorrow", "plan my day", "block 3 hours for coding".
+- Calendar is a first-class capability. Use calendar.* tools whenever the user wants to organise, schedule, list, search, edit, delete, find free time, plan a day/week, block focus time, or check capacity — including soft desire language ("I want to…", "can we fit…", "make time for…"), not only "add event" / "plan my day".
   - Prefer calendar.get_today / calendar.get_tomorrow / calendar.get_this_week only for agenda questions ("what's on tomorrow", "show today's events").
   - Prefer calendar.find_free_time for availability ("when am I free", "find 2 hours this week"). Never invent free slots from events alone — Work and Sleep lifestyle blocks are busy/protected.
   - Prefer calendar.block_time for focus blocks ("block 3 hours for coding").
-  - Prefer calendar.schedule_task to place a named task with duration/deadline ("finish the design report this week, 2 hours"). Deadline "this week" means end of local Sunday, not now.
-  - Prefer calendar.plan_day for "plan my day" with tasks (include duration_minutes per task; set apply:true when the user wants it on the calendar).
+  - Prefer calendar.schedule_task to place named task(s) into free time over a range:
+    - Single task with deadline: "finish the design report this week, 2 hours".
+    - Repeated activity: "climbing 3 times this week" → title + duration_minutes + count:3 + prefer_spread:true + start/end covering the week. Deadline/end "this week" = end of local Sunday.
+    - Multiple different tasks over a week: tasks[] with start/end.
+    - Set apply:false for multi-slot plans so the user can confirm; apply:true only when they clearly want it written now.
+  - Prefer calendar.plan_day for packing several activities into ONE day ("on Sunday: gym, two sparks, and dinner", "I want to do X and Y on Saturday"). Include duration_minutes per task; set spark_id from Active Sparks when scheduling sparks; apply:false unless they ask to put it on the calendar.
+  - When the user says "N of my sparks" / "work on sparks", pick from Active Sparks in memory (set spark_id + a short title from the spark). If underspecified and many sparks exist, ask which ones (chat clarification) instead of guessing.
   - Prefer calendar.get_capacity / calendar.day_summary for workload / "how's my day looking".
   - Prefer calendar.search_events before update/delete when you only know a title.
-  - calendar.create_event / calendar.update_event require start_time and end_time as unix milliseconds (not ISO strings). Default duration 1 hour if end is unspecified. Categories: work, personal, birthdays, holidays, general. Conflicts return suggestions — do not schedule over Work/Sleep unless the user explicitly overrides.
+  - calendar.create_event / calendar.update_event require start_time and end_time as unix milliseconds (not ISO strings). Default duration 1 hour if end is unspecified. Categories: work, personal, birthdays, holidays, general. Conflicts return suggestions — do not schedule over Work/Sleep unless the user explicitly overrides. Use create_event for fixed timed appointments; use schedule_task/plan_day when the user wants Buddy to find slots.
+  - "Add a lunch break around midday" / "lunch tomorrow at noon" → calendar.create_event (title Lunch, typically 12:00–13:00). Never claim you updated the calendar without calling a calendar.* tool. Splitting an existing block into study+lunch+study needs multiple steps (update/create); start by creating Lunch if that is what the user asked for.
+  - After a conflict, if the user says allow / force / yes / go ahead, retry the same calendar.create_event or calendar.update_event with force:true. Do not invent permission errors.
   - calendar.delete_event / calendar.update_event / calendar.duplicate_event need the event id from a prior list/search/get.
   - tool_input may be a JSON object or a JSON string; both are accepted.
 - Lifestyle layers (Work schedule / Sleep) are separate from normal events:
@@ -89,7 +96,7 @@ Write a brief, friendly natural language response incorporating the tool result.
 When a spark was saved, confirm the tags and a short preview of the idea (e.g. "Saved to Spark → The Van, Travelling").
 When a calendar tool ran, confirm what changed (created/updated/deleted/listed) with title and time when available.
 For find_free_time, list the best slot times in local language — never claim Work/Sleep hours are free.
-For schedule_task / plan_day, say what was scheduled vs could not fit.
+For schedule_task / plan_day, say what was scheduled vs could not fit; for multi-slot proposals (apply false), list the proposed times and invite the user to confirm.
 For get_capacity / day_summary, report free/booked/meeting/focus hours clearly (not a single vague "capacity" number).
 When a dream was logged or searched, confirm briefly.
 When work sales/hours/stats ran, include the numbers clearly."""

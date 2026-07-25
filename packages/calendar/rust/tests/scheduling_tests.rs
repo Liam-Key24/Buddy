@@ -262,6 +262,9 @@ fn plan_day_creates_non_overlapping_schedule() {
                     flexibility: Some(Flexibility::Flexible),
                     category: Some("personal".into()),
                     description: None,
+                    count: None,
+                    prefer_spread: None,
+                    spark_id: None,
                 },
                 ScheduleItem {
                     title: "Email".into(),
@@ -271,6 +274,9 @@ fn plan_day_creates_non_overlapping_schedule() {
                     flexibility: Some(Flexibility::Flexible),
                     category: None,
                     description: None,
+                    count: None,
+                    prefer_spread: None,
+                    spark_id: None,
                 },
             ],
             include_breaks: true,
@@ -310,6 +316,9 @@ fn auto_schedule_never_overlaps() {
                 flexibility: None,
                 category: None,
                 description: None,
+                count: None,
+                prefer_spread: None,
+                spark_id: None,
             },
             ScheduleItem {
                 title: "B".into(),
@@ -319,6 +328,9 @@ fn auto_schedule_never_overlaps() {
                 flexibility: None,
                 category: None,
                 description: None,
+                count: None,
+                prefer_spread: None,
+                spark_id: None,
             },
         ],
     );
@@ -406,6 +418,9 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 flexibility: Some(Flexibility::Flexible),
                 category: None,
                 description: None,
+                count: None,
+                prefer_spread: None,
+                spark_id: None,
             },
             ScheduleItem {
                 title: "bath".into(),
@@ -415,6 +430,9 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 flexibility: Some(Flexibility::Flexible),
                 category: None,
                 description: None,
+                count: None,
+                prefer_spread: None,
+                spark_id: None,
             },
             ScheduleItem {
                 title: "cooking dinner".into(),
@@ -424,6 +442,9 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 flexibility: Some(Flexibility::Flexible),
                 category: None,
                 description: None,
+                count: None,
+                prefer_spread: None,
+                spark_id: None,
             },
         ],
     );
@@ -444,6 +465,39 @@ fn cooking_dinner_prefers_evening_not_morning() {
     assert!(
         (16..=21).contains(&hour),
         "cooking dinner should be evening, got hour {hour} ({dinner:?})"
+    );
+}
+
+#[test]
+fn count_expands_and_prefer_spread_uses_different_days() {
+    let day = monday_noon();
+    let mut ctx = ctx_with(vec![], day);
+    ctx.range.end = ctx.range.start + Duration::days(7).num_milliseconds();
+    let result = schedule_items(
+        &ctx,
+        &[ScheduleItem {
+            title: "Climbing".into(),
+            duration_minutes: 90,
+            prefer_spread: Some(true),
+            count: Some(3),
+            flexibility: Some(Flexibility::Flexible),
+            ..Default::default()
+        }],
+    );
+    assert_eq!(result.scheduled.len(), 3, "expected 3 climbing blocks: {result:?}");
+    let mut days: Vec<i64> = result
+        .scheduled
+        .iter()
+        .map(|b| {
+            buddy_calendar::scheduling::local_day_bounds_ms(b.start).0
+        })
+        .collect();
+    days.sort();
+    days.dedup();
+    assert!(
+        days.len() >= 2,
+        "prefer_spread should use more than one day, got {:?}",
+        result.scheduled
     );
 }
 

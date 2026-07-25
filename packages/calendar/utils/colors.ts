@@ -1,6 +1,31 @@
 import type { CalendarEvent } from "../models/event";
 import { CATEGORIES } from "../models/event";
 
+const ACTIVITY_COLORS = {
+  meal: "#22C55E",
+  studying: "#EAB308",
+  coding: "#1E3A5F",
+} as const;
+
+/** Resolve a display color from known activity title keywords. */
+export function colorForActivityTitle(title: string): string | null {
+  const t = title.toLowerCase();
+  if (
+    t.includes("breakfast") ||
+    t.includes("lunch") ||
+    t.includes("dinner")
+  ) {
+    return ACTIVITY_COLORS.meal;
+  }
+  if (t.includes("studying") || t.includes("study")) {
+    return ACTIVITY_COLORS.studying;
+  }
+  if (t.includes("coding") || /\bcode\b/.test(t)) {
+    return ACTIVITY_COLORS.coding;
+  }
+  return null;
+}
+
 export function colorForCategory(category: string): string {
   return (
     CATEGORIES.find((c) => c.id === category)?.color ??
@@ -9,6 +34,8 @@ export function colorForCategory(category: string): string {
 }
 
 export function colorForEvent(event: CalendarEvent): string {
+  const fromTitle = colorForActivityTitle(event.title);
+  if (fromTitle) return fromTitle;
   if (event.color) return event.color;
   return colorForCategory(event.category);
 }

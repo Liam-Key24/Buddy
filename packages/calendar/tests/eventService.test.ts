@@ -58,4 +58,32 @@ describe("colors", () => {
       colorForEvent(ev({ id: "1", title: "X", color: "#fff" })),
     ).toBe("#fff");
   });
+
+  it("maps activity titles before stored color", () => {
+    expect(
+      colorForEvent(
+        ev({ id: "1", title: "study", category: "personal", color: "#8B5CF6" }),
+      ),
+    ).toBe("#EAB308");
+    expect(
+      colorForEvent(
+        ev({ id: "2", title: "Studying math", color: "#8B5CF6" }),
+      ),
+    ).toBe("#EAB308");
+    expect(colorForEvent(ev({ id: "3", title: "Lunch", color: "#8B5CF6" }))).toBe(
+      "#22C55E",
+    );
+    expect(
+      colorForEvent(ev({ id: "4", title: "breakfast", color: "#8B5CF6" })),
+    ).toBe("#22C55E");
+    expect(
+      colorForEvent(ev({ id: "5", title: "Dinner with friends", color: "#8B5CF6" })),
+    ).toBe("#22C55E");
+    expect(
+      colorForEvent(ev({ id: "6", title: "coding", color: "#8B5CF6" })),
+    ).toBe("#1E3A5F");
+    expect(
+      colorForEvent(ev({ id: "7", title: "Write code", color: "#8B5CF6" })),
+    ).toBe("#1E3A5F");
+  });
 });

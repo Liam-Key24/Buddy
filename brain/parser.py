@@ -83,11 +83,23 @@ def try_fast_heuristic_plan(message: str) -> Optional[PlanResponse]:
 
 IDEA_TRIGGERS = [
     r"\bi have an idea\b",
+    r"\bi got an idea\b",
+    r"\bhere'?s an idea\b",
     r"\bidea for\b",
+    r"\bidea:\s*",
     r"\bwhat if we\b",
     r"\bwhat if i\b",
+    r"\bwhat if\b",
     r"\bthought about\b",
     r"\bthinking about\b",
+    r"\bi was thinking\b",
+    r"\bjust thought of\b",
+    r"\brandom thought\b",
+    r"\bbrain dump\b",
+    r"\bjot this down\b",
+    r"\bsave this (?:idea|thought|note)\b",
+    r"\bkeep in mind\b",
+    r"\bworth trying\b",
     r"\bnote to self\b",
     r"\bremember to\b",
     r"\bdon'?t forget\b",
@@ -104,9 +116,14 @@ IDEA_TRIGGERS = [
 # decides "code" intent from full context, not just these phrases.
 CODE_TRIGGERS = [
     r"\bcan you code\b",
+    r"\bwrite code\b",
+    r"\bhelp me code\b",
     r"\bwrite (?:a|me a|some) (?:script|function|program|app)\b",
+    r"\bcreate (?:a|an) (?:script|function)\b",
+    r"\badd (?:a|an) (?:function|feature)\b",
     r"\bimplement\b",
     r"\bfix (?:this|the) bug\b",
+    r"\bfix (?:a|this|the) (?:error|issue)\b",
     r"\bdebug (?:this|my)\b",
     r"\brefactor\b",
     r"\bbuild (?:a|me a) (?:script|app|tool)\b",
@@ -114,62 +131,138 @@ CODE_TRIGGERS = [
 
 CALENDAR_QUERY_TODAY = [
     r"\bwhat(?:'s| is) on (?:my )?(?:calendar )?today\b",
+    r"\bwhat(?:'s| is) happening today\b",
     r"\btoday'?s (?:schedule|agenda|events|calendar)\b",
-    r"\bshow (?:me )?today\b",
+    r"\bagenda for today\b",
+    r"\bmy (?:day|schedule) today\b",
+    r"\blist (?:my )?events today\b",
+    r"\b(?:anything|got anything) (?:on (?:my )?calendar )?today\b",
+    r"\bshow (?:me )?(?:my )?(?:calendar |schedule |agenda )?today\b",
     r"\bdo i have anything today\b",
 ]
 
 CALENDAR_QUERY_TOMORROW = [
     r"\bwhat(?:'s| is) on (?:my )?(?:calendar )?tomorrow\b",
+    r"\bwhat(?:'s| is) happening tomorrow\b",
     r"\btomorrow'?s (?:schedule|agenda|events|calendar)\b",
+    r"\bagenda for tomorrow\b",
+    r"\bmy (?:day|schedule) tomorrow\b",
+    r"\blist (?:my )?events tomorrow\b",
+    r"\b(?:anything|got anything) (?:on (?:my )?calendar )?tomorrow\b",
+    r"\bshow (?:me )?(?:my )?(?:calendar |schedule |agenda )?tomorrow\b",
+    r"\bdo i have anything tomorrow\b",
 ]
 
 CALENDAR_QUERY_WEEK = [
     r"\bwhat(?:'s| is) (?:on )?(?:my )?(?:calendar )?this week\b",
+    r"\bwhat(?:'s| is) happening this week\b",
     r"\bthis week'?s (?:schedule|agenda|events|calendar)\b",
+    r"\bagenda for (?:this )?week\b",
+    r"\bmy (?:schedule|calendar) this week\b",
+    r"\blist (?:my )?events this week\b",
+    r"\b(?:anything|got anything) (?:on (?:my )?calendar )?this week\b",
+    r"\bshow (?:me )?(?:my )?(?:calendar |schedule |agenda )?this week\b",
+    r"\bdo i have anything this week\b",
 ]
 
 CALENDAR_FREE_TIME = [
     r"\bwhen am i free\b",
-    r"\bfind (?:me )?(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)|free time|a (?:free )?slot)\b",
-    r"\b(?:am i|do i have) (?:any )?free\b",
+    r"\bwhen (?:do i|can i) have free\b",
+    r"\bam i free\b",
+    r"\bfind (?:me )?(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)|free time|a (?:free )?slot|an? opening)\b",
+    r"\b(?:am i|do i have|got) (?:any )?free\b",
+    r"\bgot any free time\b",
     r"\bwhat(?:'s| is) (?:my )?availability\b",
+    r"\bopen slots?\b",
+    r"\bfree windows?\b",
+    r"\bgaps? in (?:my )?schedule\b",
+    r"\bavailable (?:tomorrow|today|this week)\b",
     r"\bfree (?:tomorrow|today|this week)\b",
 ]
 
+# Imperative "block …" / focus phrasing only — not noun phrases like "research block for 2h".
 CALENDAR_BLOCK_TIME = [
-    r"\bblock\b.+\b(?:hours?|hrs?|time|for)\b",
+    r"^(?:please\s+)?block\s+(?:off|out|time)\b",
+    r"^(?:please\s+)?block\s+\d+\s*(?:hours?|hrs?|minutes?|mins?)\b",
+    r"^(?:please\s+)?block\s+for\b",
+    r"\b(?:can you|could you|please)\s+block\s+(?:off|out|time|\d+|for)\b",
+    r"^(?:please\s+)?(?:hold|reserve|set aside)\s+(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)|time)\b",
     r"\b(?:focus|deep work)\b.+\b(?:hours?|block)\b",
-    r"\bblock\b.+\b(?:coding|writing|focus)\b",
+    r"\bfocus\s+block\b",
 ]
 
 CALENDAR_SCHEDULE_TASK = [
     r"\bfinish\b.+\b(?:this week|today|tomorrow)\b",
+    r"\bneed to finish\b.+\b(?:by|this week|today|tomorrow)\b",
+    r"\bget\b.+\bdone\b.+\b(?:this week|today|tomorrow)\b",
+    r"\bfit\b.+\binto (?:my )?week\b",
+    r"\bfind time for\b",
     r"\bschedule (?:the |a |my )?(?:task|report|project)\b",
     r"\bauto[- ]?schedule\b",
+    r"\b\d+\s+times?\s+(?:(?:a|per)\s+week|(?:this|next)\s+week|(?:this|next)\s+month)\b",
+    r"\b(?:once|twice|thrice)\s+(?:(?:a|per)|(?:this|next))\s+week\b",
+    r"\bi want to (?:go|do|get to)\b.+\b\d+\s+times?\b",
+    r"\bi want to (?:go|do|get to|make time for)\b.+\b(?:this|next)\s+week\b",
+    r"\bmake time for\b",
+    r"\bfit in\b.+\b(?:this week|today|tomorrow|\d+\s+times?)\b",
+    r"\bschedule\b.+\b\d+\s+times?\b",
 ]
 
 CALENDAR_PLAN_DAY = [
     r"\bplan my day\b",
     r"\bplan (?:out )?(?:my |the )?day\b",
     r"\bschedule my day\b",
+    r"\borgani[sz]e (?:my )?(?:day|tomorrow)\b",
+    r"\bmap out (?:my )?day\b",
+    r"\bfill (?:my )?day\b",
+    r"\bplan (?:out )?(?:my )?tomorrow(?:'?s)?\s+day\b",
+    r"\bplan (?:out )?(?:my )?tomorrow\s*$",
+    r"\bi want to\b.+\bon (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b",
+    r"\bon (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b.+\b(?:and|,|gym|spark|climb|tennis|bath|cook|yoga|run)\b",
+    r"\b(?:this|next)\s+(?:sunday|saturday|monday|tuesday|wednesday|thursday|friday)\b.+\b(?:and|,|gym|spark)\b",
+    r"\bdo\b.+\bsparks?\b.+\bon (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b",
 ]
 
 CALENDAR_CAPACITY = [
     r"\b(?:what(?:'s| is)|how(?:'s| is)) (?:my )?(?:capacity|workload)\b",
     r"\bcapacity (?:today|tomorrow)\b",
+    r"\bworkload (?:today|tomorrow)\b",
     r"\bhow(?:'s| is) (?:my )?day looking\b",
+    r"\bhow packed is\b",
+    r"\bhow busy (?:am i|is my day)\b",
+    r"\bam i overloaded\b",
+    r"\bday overview\b",
     r"\bdaily (?:summary|capacity)\b",
     r"\bsummar(?:y|ise|ize) (?:my )?(?:day|today)\b",
 ]
 
+_CAL_ACTIVITY = (
+    r"climbing|gym|workout|training|work|run|yoga|tennis|lunch|"
+    r"dentist|doctor|interview|standup|stand-?up"
+)
+_CAL_WHEN = (
+    r"hour|am|pm|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|wed|thu|fri|sat|sun|today|tomorrow|midday|noon"
+)
+
 CALENDAR_CREATE = [
-    r"\b(?:add|create|schedule|book|put)\b.+\b(?:event|meeting|appointment|call|reminder)\b",
+    r"\b(?:add|create|schedule|book|put|make|set up|pencil in|slot in|throw on)\b.+\b(?:event|meeting|appointment|call|reminder)\b",
+    r"\b(?:add|create|schedule|book|put|make)\b.+\b(?:lunch|break)\b",
+    r"\blunch\s+break\b",
+    r"\bbreak\s+(?:around|at|for|around)\b",
+    r"\blunch\b.+\b(?:midday|noon|today|tomorrow|at)\b",
+    r"\bnew (?:event|meeting|appointment|call|reminder)\b",
+    r"\bevent\s+(?:called|named)\b",
+    r"\bmeeting with\b",
+    r"\bcall with\b.+\bat\b",
+    r"\bappointment for\b",
     r"\b(?:add|put|schedule)\b.+\b(?:on|to)\b.+\bcalend(?:a|e)r\b",
+    r"\bput\b.+\bin (?:my )?(?:calend(?:a|e)r|diary)\b",
     r"\badd (?:this|that|it) to (?:my )?(?:calend(?:a|e)r)\b",
     r"\bremind me (?:to|about)\b",
     r"\bevery\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-    r"\b(?:climbing|gym|workout|training|work)\b.+\b(?:hour|am|pm|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b",
+    rf"\b(?:{_CAL_ACTIVITY})\b.+\b(?:{_CAL_WHEN})\b",
+    rf"\bi have (?:{_CAL_ACTIVITY})\b.+\b(?:{_CAL_WHEN})\b",
     r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\s*(?:-|to)\s*\d{1,2}:\d{2}",
     r"\bmon(?:day)?\s*(?:till|to|through|-)\s*fri",
 ]
@@ -183,50 +276,73 @@ TOOL_ALIASES = {
 }
 
 CALENDAR_DELETE = [
-    r"\b(?:delete|remove|cancel)\b.+\b(?:events?|meetings?|appointments?)\b",
-    r"\b(?:delete|remove|cancel)\b.+\b(?:from )?(?:my )?calend(?:a|e)r\b",
-    r"\b(?:clear|wipe|empty)\b.+\b(?:calendar|schedule|events?)\b",
+    r"\b(?:delete|remove|cancel|scratch|drop|unschedule)\b.+\b(?:events?|meetings?|appointments?)\b",
+    r"\b(?:delete|remove|cancel|scratch|drop|unschedule)\b.+\b(?:from )?(?:my )?calend(?:a|e)r\b",
+    r"\bget rid of\b.+\b(?:events?|meetings?|appointments?|(?:my )?calend(?:a|e)r)\b",
+    r"\btake (?:it |them )?off (?:my )?calend(?:a|e)r\b",
+    r"\b(?:clear|wipe|empty|scrub)\b.+\b(?:calendar|schedule|events?)\b",
+    r"\bcancel my\b",
     r"\bremove all\b",
     r"\bclear (?:my )?calendar\b",
     # Short title deletes: "remove gym", "delete Climbing"
-    r"^\s*(?:please\s+)?(?:delete|remove|cancel)\s+(?:the\s+)?[\w][\w\s'-]{0,40}\s*$",
+    r"^\s*(?:please\s+)?(?:delete|remove|cancel|scratch|drop|unschedule)\s+(?:the\s+)?[\w][\w\s'-]{0,40}\s*$",
 ]
 
 CALENDAR_SEARCH = [
-    r"\b(?:find|search|look up)\b.+\b(?:event|meeting|appointment|on (?:my )?calendar)\b",
+    r"\b(?:find|search|look up|look for)\b.+\b(?:event|meeting|appointment|on (?:my )?calendar|in (?:my )?calendar)\b",
+    r"\bwhere is\b.+\bon (?:my )?calend(?:a|e)r\b",
+    r"\bwhen is (?:my )?.+\b(?:event|meeting|appointment|on (?:my )?calend(?:a|e)r)\b",
+    r"\bdo i have (?:a|an|any)\b.+\b(?:event|meeting|appointment|on (?:my )?calend(?:a|e)r)\b",
 ]
 
 DREAM_LOG = [
     r"\b(?:last night'?s?|tonight'?s?)\s+dream\b",
-    r"\b(?:log|record|save)\b.+\bdream\b",
+    r"\b(?:log|record|save|write down)\b.+\bdream\b",
+    r"\bwrite down (?:this )?dream\b",
     r"\bi dreamed\b",
+    r"\bi dreamt\b",
     r"\bi (?:had a |have a )?dream(?:t)? (?:that|about)\b",
+    r"\bi had a dream\b",
+    r"\bnightmare (?:last night|about)\b",
+    r"\bdream(?:t)? (?:that|about)\b",
     r"\bdream log\b",
 ]
 
 DREAM_SEARCH = [
-    r"\b(?:show|find|list|search)\b.+\b(?:dreams?|nightmares?)\b",
+    r"\b(?:show|find|list|search|recall)\b.+\b(?:dreams?|nightmares?)\b",
+    r"\bdream journal\b",
+    r"\bpast dreams\b",
+    r"\brecall (?:my )?dreams\b",
     r"\ball my nightmares\b",
     r"\bmy nightmares\b",
 ]
 
 WORK_SALES = [
     r"\bi sold\b",
+    r"\bmade a sale\b",
+    r"\bclosed\b.+\bfor\s*[£$]\s*\d",
+    r"\brevenue today\b",
     r"\bsales?\s*(?:today|of|=|:)?\s*[£$]?\s*\d",
     r"\blog\b.+\bsales?\b",
 ]
 
 WORK_SET_HOURS = [
-    r"\b(?:finished|left|clocked out|ended)\b.+\bwork\b",
+    r"\b(?:finished|left|clocked out|clocked off|ended|stopped)\b.+\bwork\b",
     r"\bfinished work at\b",
+    r"\bstopped work at\b",
+    r"\bknocked off at\b",
+    r"\bdone for the day at\b",
     r"\bwork(?:ed)? until\b",
 ]
 
 WORK_STATS = [
     r"\bhow many hours\b.+\bwork",
     r"\bhours (?:have i |did i )?work",
+    r"\btotal hours\b",
     r"\bwork(?:ing)? hours\b.+\b(?:today|week|month)\b",
     r"\b(?:today'?s|this week'?s|this month'?s)\s+(?:hours|sales)\b",
+    r"\bsales this (?:week|month)\b",
+    r"\bhow much did i sell\b",
 ]
 
 
@@ -319,6 +435,17 @@ def _parse_time_range(text: str) -> tuple[tuple[int, int], tuple[int, int]] | No
     return start, end
 
 
+def _has_explicit_clock(text: str) -> bool:
+    """True if the segment names a clock time or explicit range (not just a duration)."""
+    if _parse_time_range(text):
+        return True
+    if re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", text, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}\b", text):
+        return True
+    return False
+
+
 def _parse_hour_minute(text: str) -> tuple[int, int]:
     """Best-effort single clock time. Ignores duration phrases."""
     tr = _parse_time_range(text)
@@ -330,8 +457,21 @@ def _parse_hour_minute(text: str) -> tuple[int, int]:
         flags=re.IGNORECASE,
     ):
         return _parse_clock_match(m.group(1), m.group(2), m.group(3))
+    # Bare HH:MM (e.g. "at 11:00") — treat as 24h local clock.
+    for m in re.finditer(r"\b(\d{1,2}):(\d{2})\b", text):
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    if re.search(r"\b(?:midday|noon)\b", text, flags=re.IGNORECASE):
+        return 12, 0
     return 9, 0
 
+
+def _is_lunch_or_break(text: str) -> bool:
+    return bool(
+        re.search(r"\blunch\b", text, flags=re.IGNORECASE)
+        or re.search(r"\b(?:lunch\s+)?break\b", text, flags=re.IGNORECASE)
+    )
 
 def _parse_duration_hours(text: str) -> float | None:
     # Prefer H:MM hour before plain "N hours" so "1:30 hour" is 1.5h, not 30h
@@ -390,32 +530,194 @@ def _next_weekday(now: datetime, by_day: list[str]) -> datetime:
 
 def _infer_title_category(segment: str) -> tuple[str, str]:
     lower = segment.lower()
-    if re.search(r"\bwork\b", lower):
-        return "Work", "work"
+    # #region agent log
+    def _dbg(hyp: str, msg: str, data: dict) -> None:
+        try:
+            import time as _t
+            with open(
+                "/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log",
+                "a",
+                encoding="utf-8",
+            ) as _f:
+                _f.write(
+                    json.dumps(
+                        {
+                            "sessionId": "ed1062",
+                            "hypothesisId": hyp,
+                            "location": "parser.py:_infer_title_category",
+                            "message": msg,
+                            "data": data,
+                            "timestamp": int(_t.time() * 1000),
+                            "runId": "post-fix",
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+
+    # #endregion
+
+    category = "general"
+    cat_m = re.search(
+        r"\b(personal|work|birthdays|holidays|general)\s+"
+        r"(?:event|meeting|appointment|call|reminder)\b",
+        lower,
+    )
+    if cat_m:
+        category = cat_m.group(1)
+    elif re.search(r"\bpersonal\b", lower):
+        category = "personal"
+    elif re.search(r"\bwork\b", lower) and not re.search(
+        r"\b(?:to|for)\s+(?:code|coding|climb|gym)\b", lower
+    ):
+        category = "work"
+
+    activity_map = {
+        "code": "Coding",
+        "coding": "Coding",
+        "climb": "Climbing",
+        "climbing": "Climbing",
+        "gym": "Gym",
+        "workout": "Training",
+        "training": "Training",
+        "lunch": "Lunch",
+    }
+
+    if re.search(r"\blunch\b", lower):
+        # #region agent log
+        _dbg(
+            "H1",
+            "lunch title branch",
+            {"segment": segment[:160], "result_title": "Lunch", "result_category": category if category != "general" else "personal"},
+        )
+        # #endregion
+        return "Lunch", "personal" if category == "general" else category
+    if re.search(r"\bbreak\b", lower) and not re.search(
+        r"\b(?:block|research)\b", lower
+    ):
+        return "Break", "personal" if category == "general" else category
+
+    # "to code" / "for coding" — often AFTER day words; one activity word only.
+    purpose = re.search(
+        r"\b(?:to|for)\s+(?!"
+        r"(?:\d+|a|an|the|me|my|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"tomorrow|today|tonight|hours?|hrs?|minutes?|mins?)\b)"
+        r"(?:go\s+|do\s+)?([a-z]+)\b",
+        lower,
+    )
+    if purpose:
+        raw = purpose.group(1).strip()
+        title = activity_map.get(
+            raw, raw[:1].upper() + raw[1:] if raw else "New event"
+        )
+        if category == "general" and raw in activity_map:
+            category = "personal"
+        # #region agent log
+        _dbg(
+            "A",
+            "purpose clause title",
+            {
+                "segment": segment[:160],
+                "purpose_raw": raw,
+                "result_title": title,
+                "result_category": category,
+            },
+        )
+        # #endregion
+        return title[:60], category
+
     if re.search(r"\bclimb", lower):
-        return "Climbing", "personal"
+        return "Climbing", "personal" if category == "general" else category
     if re.search(r"\bgym\b", lower):
-        return "Gym", "personal"
+        return "Gym", "personal" if category == "general" else category
     if re.search(r"\bworkout\b|\btraining\b", lower):
-        return "Training", "personal"
+        return "Training", "personal" if category == "general" else category
+    if re.search(r"\bcod(?:e|ing)\b", lower):
+        return "Coding", "personal" if category == "general" else category
+    if category == "work" and re.search(r"\bwork\b", lower):
+        # #region agent log
+        _dbg("B", "work category title", {"segment": segment[:120]})
+        # #endregion
+        return "Work", "work"
+
+    called = re.search(
+        r"\b(?:called|named)\s+(.+?)(?=\s+(?:for|at|on|from|tomorrow|today|tonight|every|followed|then|\d)|$)",
+        segment,
+        flags=re.IGNORECASE,
+    )
+    if called:
+        title = called.group(1).strip(" .,:-")
+        if title:
+            # #region agent log
+            _dbg("A", "called/named branch", {"title": title, "segment": segment[:120]})
+            # #endregion
+            return title[:60], category
+
+    noun_m = re.search(
+        r"\b(meeting|appointment|call|reminder|event)\b", lower
+    )
     title = re.sub(
-        r"^(?:please\s+)?(?:add|create|schedule|book|put)\s+",
+        r"^(?:please\s+)?(?:add|create|schedule|book|put|make|set up|pencil in|i have)\s+",
         "",
         segment.strip(),
         flags=re.IGNORECASE,
     )
+    after_verb = title
+    title = re.sub(r"^(?:an?\s+)", "", title, flags=re.IGNORECASE)
     title = re.sub(
-        r"\b(?:every|from|at|on|mon|tue|wed|thu|fri|sat|sun).*$",
+        r"^(?:personal|work|birthdays|holidays|general)\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    # Keep meeting/appointment as title candidate; strip only when more follows.
+    title = re.sub(
+        r"^(?:event|meeting|appointment|call|reminder)\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    after_article = title
+    title = re.sub(
+        r"\b(?:every|from|at|on|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|tonight|for\s+\d).*$",
         "",
         title,
         flags=re.IGNORECASE,
     ).strip(" .,:-")
-    return (title[:60] if title else "New event"), "general"
-
-
+    title = re.sub(r"\s+for$", "", title, flags=re.IGNORECASE).strip(" .,:-")
+    after_day_cut = title
+    title = re.sub(r"\s+block$", "", title, flags=re.IGNORECASE).strip()
+    if re.fullmatch(
+        r"(?:personal|work|birthdays|holidays|general|event|meeting|appointment|call|reminder|for|to|a|an|the|\s)+",
+        title,
+        flags=re.IGNORECASE,
+    ):
+        title = ""
+    if not title and noun_m:
+        title = noun_m.group(1).capitalize()
+    result_title = title[:60] if title else "New event"
+    # #region agent log
+    _dbg(
+        "A",
+        "default title strip path",
+        {
+            "segment": segment[:160],
+            "after_verb": after_verb[:120],
+            "after_article": after_article[:120],
+            "after_day_cut": after_day_cut[:120],
+            "result_title": result_title,
+            "result_category": category,
+            "has_personal_word": bool(re.search(r"\bpersonal\b", lower)),
+            "has_to_code": bool(re.search(r"\bto\s+code\b|\bcode\b", lower)),
+        },
+    )
+    # #endregion
+    return result_title, category
 def _split_schedule_segments(message: str) -> list[str]:
     parts = re.split(
-        r"\balong\s*side\b|\balongside\b|\bas well as\b|;|\n",
+        r"\balong\s*side\b|\balongside\b|\bas well as\b|\bfollowed by\b|\band then\b|;|\n",
         message,
         flags=re.IGNORECASE,
     )
@@ -437,7 +739,8 @@ def _build_event_payload(segment: str) -> dict[str, Any]:
     elif "today" in lower or "tonight" in lower:
         day = now
     else:
-        day = now + timedelta(days=1)
+        # Lunch/break "around midday" with no day → today; other undated → tomorrow.
+        day = now if _is_lunch_or_break(lower) else now + timedelta(days=1)
 
     if time_range:
         (sh, sm), (eh, em) = time_range
@@ -445,6 +748,10 @@ def _build_event_payload(segment: str) -> dict[str, Any]:
         end = day.replace(hour=eh, minute=em, second=0, microsecond=0)
         if end <= start:
             end = end + timedelta(days=1)
+    elif _is_lunch_or_break(lower) and not _has_explicit_clock(lower):
+        # Default lunch / midday break: 12:00–13:00 local.
+        start = day.replace(hour=12, minute=0, second=0, microsecond=0)
+        end = day.replace(hour=13, minute=0, second=0, microsecond=0)
     else:
         hour, minute = _parse_hour_minute(lower)
         start = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -470,10 +777,16 @@ def _build_event_payload(segment: str) -> dict[str, Any]:
         }
     return payload
 
-
 def _heuristic_create_event_input(message: str) -> str:
     segments = _split_schedule_segments(message)
     events = [_build_event_payload(seg) for seg in segments]
+    # Sequential phrases ("followed by") without their own clock start after the prior event.
+    for i in range(1, len(events)):
+        if not _has_explicit_clock(segments[i]):
+            prev_end = events[i - 1]["end_time"]
+            dur = max(events[i]["end_time"] - events[i]["start_time"], 15 * 60_000)
+            events[i]["start_time"] = prev_end
+            events[i]["end_time"] = prev_end + dur
     if len(events) == 1:
         return json.dumps(events[0])
     return json.dumps({"events": events})
@@ -669,63 +982,169 @@ def _heuristic_schedule_task_input(message: str) -> str:
     if m and hours is None:
         minutes = int(m.group(1))
 
+    count = _parse_occurrence_count(lower)
+    if count > 1 and hours is None and m is None:
+        # Default session length for repeated activities (climbing, gym, …).
+        minutes = 90
+
     title = re.sub(
-        r"^(?:please\s+)?(?:finish|schedule|complete|do)\s+(?:the\s+|my\s+|a\s+)?",
+        r"^(?:please\s+)?(?:finish|schedule|complete|do|i want to(?:\s+go|\s+do|\s+get to)?|make time for|fit in)\s+(?:the\s+|my\s+|a\s+)?",
         "",
         message.strip(),
         flags=re.IGNORECASE,
     )
     title = re.sub(
-        r"\b(?:this week|today|tomorrow|,?\s*\d+\s*(?:hours?|hrs?|minutes?|mins?)).*$",
+        r"\b(?:this week|next week|today|tomorrow|,?\s*\d+\s*(?:hours?|hrs?|minutes?|mins?)|\d+\s+times?|once|twice|thrice|prefer_spread).*$",
         "",
         title,
         flags=re.IGNORECASE,
     ).strip(" .,:-")
     if not title:
         title = "Task"
+    # "go climbing" → "climbing"
+    title = re.sub(r"^(?:go|do)\s+", "", title, flags=re.IGNORECASE).strip()
 
     if "tomorrow" in lower:
         deadline_day = now + timedelta(days=1)
         deadline = _local_day_bounds_ms(deadline_day)[1] - 1
     elif "today" in lower:
         deadline = _local_day_bounds_ms(now)[1] - 1
+    elif "next week" in lower:
+        # End of next local Sunday.
+        days_until_sunday = (6 - now.weekday()) % 7
+        next_week_end = now + timedelta(days=days_until_sunday + 7)
+        deadline = _local_day_bounds_ms(next_week_end)[1] - 1
     else:
         deadline = _end_of_local_week_ms(now)
 
-    return json.dumps(
-        {
-            "title": title[:80],
-            "duration_minutes": max(minutes, 15),
-            "deadline": deadline,
-            "priority": "high" if "urgent" in lower or "asap" in lower else "normal",
-            "flexibility": "flexible",
-            "start": int(now.timestamp() * 1000),
-            "end": deadline,
-            "apply": True,
-        }
-    )
+    payload: dict[str, Any] = {
+        "title": title[:80],
+        "duration_minutes": max(minutes, 15),
+        "deadline": deadline,
+        "priority": "high" if "urgent" in lower or "asap" in lower else "normal",
+        "flexibility": "flexible",
+        "start": int(now.timestamp() * 1000),
+        "end": deadline,
+        "apply": count <= 1,
+    }
+    if count > 1:
+        payload["count"] = count
+        payload["prefer_spread"] = True
+    return json.dumps(payload)
+
+
+def _parse_occurrence_count(message: str) -> int:
+    lower = message.lower()
+    m = re.search(r"\b(\d+)\s+times?\b", lower)
+    if m:
+        return min(max(int(m.group(1)), 1), 14)
+    if re.search(r"\btwice\b", lower):
+        return 2
+    if re.search(r"\bthrice\b", lower):
+        return 3
+    if re.search(r"\bonce\b", lower):
+        return 1
+    return 1
+
+
+def _resolve_plan_day_ms(message: str, now: datetime) -> int:
+    lower = message.lower()
+    if "tomorrow" in lower:
+        day = now + timedelta(days=1)
+    elif "today" in lower:
+        day = now
+    else:
+        weekday_names = [
+            ("monday", "MO"),
+            ("tuesday", "TU"),
+            ("wednesday", "WE"),
+            ("thursday", "TH"),
+            ("friday", "FR"),
+            ("saturday", "SA"),
+            ("sunday", "SU"),
+        ]
+        day = now
+        for name, code in weekday_names:
+            if re.search(rf"\b{name}\b", lower):
+                day = _next_weekday(now, [code])
+                break
+    return int(day.replace(hour=12, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
 
 def _heuristic_plan_day_input(message: str) -> str:
     lower = message.lower()
     now = datetime.now().astimezone()
-    day = now + timedelta(days=1) if "tomorrow" in lower else now
-    day_ms = int(day.replace(hour=12, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    day_ms = _resolve_plan_day_ms(message, now)
 
-    # Pull task-like phrases after "plan my day" / commas / and
     rest = re.sub(
-        r"^(?:please\s+)?(?:plan|schedule)\s+(?:out\s+)?(?:my\s+|the\s+)?day\s*(?:for\s+)?(?:tomorrow|today)?\s*[,:]?\s*",
+        r"^(?:please\s+)?(?:plan|schedule|organi[sz]e|map out|fill)\s+(?:out\s+)?(?:my\s+|the\s+)?day\s*(?:for\s+)?(?:tomorrow|today)?\s*[,:]?\s*",
         "",
         message.strip(),
         flags=re.IGNORECASE,
     )
-    parts = re.split(r"\s*(?:,| and | & |\+)\s*", rest, flags=re.IGNORECASE)
+    rest = re.sub(
+        r"^(?:please\s+)?i want to\s+",
+        "",
+        rest,
+        flags=re.IGNORECASE,
+    )
+    rest = re.sub(
+        r"\bon\s+(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b",
+        "",
+        rest,
+        flags=re.IGNORECASE,
+    )
+    rest = re.sub(
+        r"\b(?:this|next)\s+(?:sunday|saturday|monday|tuesday|wednesday|thursday|friday)\b",
+        "",
+        rest,
+        flags=re.IGNORECASE,
+    )
+
     tasks: list[dict[str, Any]] = []
+
+    spark_m = re.search(
+        r"\b(\d+|two|three|a couple of|a few)\s+(?:of\s+)?(?:my\s+)?sparks?\b",
+        rest,
+        flags=re.IGNORECASE,
+    )
+    if spark_m:
+        raw = spark_m.group(1).lower()
+        word_counts = {"two": 2, "three": 3, "a couple of": 2, "a few": 3}
+        n = word_counts.get(raw, None)
+        if n is None:
+            n = min(max(int(raw), 1), 5) if raw.isdigit() else 2
+        for i in range(n):
+            tasks.append(
+                {
+                    "title": f"Spark work {i + 1}" if n > 1 else "Spark work",
+                    "duration_minutes": 60,
+                    "flexibility": "flexible",
+                    "priority": "normal",
+                }
+            )
+        rest = rest[: spark_m.start()] + rest[spark_m.end() :]
+    elif re.search(r"\bsparks?\b", rest, flags=re.IGNORECASE):
+        tasks.append(
+            {
+                "title": "Spark work",
+                "duration_minutes": 60,
+                "flexibility": "flexible",
+                "priority": "normal",
+            }
+        )
+        rest = re.sub(r"\b(?:my\s+)?sparks?\b", "", rest, flags=re.IGNORECASE)
+
+    parts = re.split(r"\s*(?:,| and | & |\+|plus)\s*", rest, flags=re.IGNORECASE)
     for part in parts:
         name = part.strip(" .,:-")
         if not name or len(name) < 2:
             continue
-        if re.match(r"^(?:tomorrow|today|please)$", name, flags=re.IGNORECASE):
+        if re.match(
+            r"^(?:tomorrow|today|please|do|go|etc|and)$",
+            name,
+            flags=re.IGNORECASE,
+        ):
             continue
         hours = _parse_duration_hours(name)
         minutes = int(round((hours if hours is not None else 1.0) * 60))
@@ -735,7 +1154,10 @@ def _heuristic_plan_day_input(message: str) -> str:
             name,
             flags=re.IGNORECASE,
         ).strip(" .,:-")
-        if not clean:
+        clean = re.sub(r"^(?:go|do)\s+", "", clean, flags=re.IGNORECASE).strip()
+        if not clean or len(clean) < 2:
+            continue
+        if re.match(r"^spark\b", clean, flags=re.IGNORECASE):
             continue
         tasks.append(
             {
@@ -751,7 +1173,14 @@ def _heuristic_plan_day_input(message: str) -> str:
             "day": day_ms,
             "tasks": tasks,
             "include_breaks": True,
-            "apply": True,
+            # Imperative "plan my day" applies; soft desire language proposes first.
+            "apply": bool(
+                re.search(
+                    r"\b(?:plan|schedule|organi[sz]e|map out|fill)\b.+\b(?:day|tomorrow)\b",
+                    message,
+                    flags=re.IGNORECASE,
+                )
+            ),
         }
     )
 
@@ -857,6 +1286,29 @@ def _heuristic_plan(message: str) -> PlanResponse:
             reasoning="User asked to plan their day.",
             response=None,
         )
+    # Multi-occurrence ("3 times this week") before create_event.
+    if re.search(r"\b(?:\d+\s+times?|twice|thrice)\b", message, flags=re.IGNORECASE) and (
+        _matches_any(message, CALENDAR_SCHEDULE_TASK)
+        or re.search(r"\b(?:this|next)\s+(?:week|month)\b", message, flags=re.IGNORECASE)
+        or re.search(r"\bi want to\b", message, flags=re.IGNORECASE)
+    ):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.schedule_task",
+            tool_input=_heuristic_schedule_task_input(message),
+            reasoning="User asked to schedule an activity multiple times.",
+            response=None,
+        )
+    # Create before block_time so "… research block for 2h" inside an event request
+    # is not stolen by focus-block routing.
+    if _matches_any(message, CALENDAR_CREATE):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.create_event",
+            tool_input=_heuristic_create_event_input(message),
+            reasoning="User asked to schedule a calendar event.",
+            response=None,
+        )
     if _matches_any(message, CALENDAR_BLOCK_TIME):
         return PlanResponse(
             intent="tool_use",
@@ -908,14 +1360,6 @@ def _heuristic_plan(message: str) -> PlanResponse:
             tool="calendar.get_this_week",
             tool_input="{}",
             reasoning="User asked about this week's calendar.",
-            response=None,
-        )
-    if _matches_any(message, CALENDAR_CREATE):
-        return PlanResponse(
-            intent="tool_use",
-            tool="calendar.create_event",
-            tool_input=_heuristic_create_event_input(message),
-            reasoning="User asked to schedule a calendar event.",
             response=None,
         )
     if _matches_any(message, CALENDAR_SEARCH):

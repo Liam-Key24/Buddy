@@ -9,7 +9,7 @@ use crate::scheduling::types::{DayCapacity, FreeSlot, Suggestion, SuggestionActi
 use crate::scheduling::{default_task_flexibility, default_task_priority, SchedulingContext};
 
 /// Task/work item accepted by scheduling APIs (Calendar tools + future Tasks plugin).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScheduleItem {
     pub title: String,
     pub duration_minutes: u32,
@@ -23,6 +23,36 @@ pub struct ScheduleItem {
     pub category: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Place this item `count` times (capped). Expanded before placement.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Prefer different local days when placing repeated occurrences.
+    #[serde(default)]
+    pub prefer_spread: Option<bool>,
+    /// Optional spark id this block is working on (recorded in description).
+    #[serde(default)]
+    pub spark_id: Option<String>,
+}
+
+/// Expand `count` into individual items (max 14 per item).
+pub fn expand_schedule_items(items: &[ScheduleItem]) -> Vec<ScheduleItem> {
+    let mut out = Vec::new();
+    for item in items {
+        let n = item.count.unwrap_or(1).clamp(1, 14);
+        for _ in 0..n {
+            let mut copy = item.clone();
+            copy.count = None;
+            if let Some(sid) = &item.spark_id {
+                let tag = format!("spark:{sid}");
+                copy.description = Some(match copy.description {
+                    Some(d) if !d.is_empty() => format!("{d}\n{tag}"),
+                    _ => tag,
+                });
+            }
+            out.push(copy);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +113,7 @@ pub fn schedule_items(
     let mut unscheduled = Vec::new();
     let mut suggestions = Vec::new();
 
-    let mut ordered: Vec<ScheduleItem> = items.to_vec();
+    let mut ordered: Vec<ScheduleItem> = expand_schedule_items(items);
     // Meal/dinner tasks first so they claim evening before generic evening fillers.
     ordered.sort_by(|a, b| {
         let pa = a.priority.unwrap_or(default_task_priority()).rank();
@@ -106,14 +136,17 @@ pub fn schedule_items(
         if let Some(deadline) = item.deadline {
             search_ctx.range.end = search_ctx.range.end.min(deadline);
         }
+        let prefer_spread = item.prefer_spread.unwrap_or(false);
+        let used_days = used_local_days_for_title(&scheduled, &item.title);
         let slots = find_free_slots_for(
             &search_ctx,
             duration_ms,
-            12,
+            if prefer_spread { 24 } else { 12 },
             None,
             Some(item.title.as_str()),
         );
-        let Some(best) = slots.into_iter().next() else {
+        let best = pick_slot(&slots, prefer_spread, &used_days);
+        let Some(best) = best.cloned() else {
             suggestions.push(Suggestion {
                 action: SuggestionAction::Redistribute,
                 message: format!(
@@ -136,21 +169,24 @@ pub fn schedule_items(
                 >= working.policy.overload_threshold
         {
             // Try next slots on other days if available.
-            let alt = find_free_slots_for(
-                &search_ctx,
-                duration_ms,
-                16,
-                None,
-                Some(item.title.as_str()),
-            )
-            .into_iter()
-            .find(|s| {
+            let alt = slots.iter().find(|s| {
+                let day_key = local_day_key(s.start);
+                if prefer_spread && used_days.contains(&day_key) && !used_days.is_empty() {
+                    return false;
+                }
                 let cap = compute_day_capacity(&working, s.start);
                 !cap.overloaded
                     && (cap.booked_hours + added_hours) / cap.waking_hours.max(0.1)
                         < working.policy.overload_threshold
+            }).or_else(|| {
+                slots.iter().find(|s| {
+                    let cap = compute_day_capacity(&working, s.start);
+                    !cap.overloaded
+                        && (cap.booked_hours + added_hours) / cap.waking_hours.max(0.1)
+                            < working.policy.overload_threshold
+                })
             });
-            let Some(best) = alt else {
+            let Some(best) = alt.cloned() else {
                 suggestions.push(Suggestion {
                     action: SuggestionAction::Redistribute,
                     message: format!(
@@ -178,6 +214,37 @@ pub fn schedule_items(
         unscheduled,
         suggestions,
     }
+}
+
+fn local_day_key(ms: i64) -> i64 {
+    crate::scheduling::local_day_bounds_ms(ms).0
+}
+
+fn used_local_days_for_title(scheduled: &[ProposedBlock], title: &str) -> std::collections::HashSet<i64> {
+    scheduled
+        .iter()
+        .filter(|b| b.title.eq_ignore_ascii_case(title))
+        .map(|b| local_day_key(b.start))
+        .collect()
+}
+
+fn pick_slot<'a>(
+    slots: &'a [FreeSlot],
+    prefer_spread: bool,
+    used_days: &std::collections::HashSet<i64>,
+) -> Option<&'a FreeSlot> {
+    if slots.is_empty() {
+        return None;
+    }
+    if prefer_spread && !used_days.is_empty() {
+        if let Some(spread) = slots
+            .iter()
+            .find(|s| !used_days.contains(&local_day_key(s.start)))
+        {
+            return Some(spread);
+        }
+    }
+    slots.first()
 }
 
 /// Lower sorts first. Meals before sports/chores so dinner keeps the evening.

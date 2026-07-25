@@ -6,6 +6,67 @@ import { eventsOnDay } from "@buddy/calendar/services";
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const PX_PER_HOUR = 48;
+const EVENT_GAP_PX = 3;
+const EVENT_EDGE_PX = 4;
+
+type TimedLayout = {
+  event: CalendarEvent;
+  column: number;
+  columnCount: number;
+};
+
+/** Pack overlapping timed events into side-by-side columns. */
+function layoutTimedEvents(events: CalendarEvent[]): TimedLayout[] {
+  if (events.length === 0) return [];
+
+  const sorted = [...events].sort((a, b) => {
+    if (a.start_time !== b.start_time) return a.start_time - b.start_time;
+    const durA = a.end_time - a.start_time;
+    const durB = b.end_time - b.start_time;
+    return durB - durA;
+  });
+
+  const layouts: TimedLayout[] = [];
+  let cluster: CalendarEvent[] = [];
+  let clusterEnd = 0;
+
+  const flushCluster = () => {
+    if (cluster.length === 0) return;
+
+    const columnEnds: number[] = [];
+    const assigned: { event: CalendarEvent; column: number }[] = [];
+
+    for (const ev of cluster) {
+      let col = columnEnds.findIndex((end) => end <= ev.start_time);
+      if (col === -1) {
+        col = columnEnds.length;
+        columnEnds.push(ev.end_time);
+      } else {
+        columnEnds[col] = ev.end_time;
+      }
+      assigned.push({ event: ev, column: col });
+    }
+
+    const columnCount = Math.max(1, columnEnds.length);
+    for (const item of assigned) {
+      layouts.push({ ...item, columnCount });
+    }
+
+    cluster = [];
+    clusterEnd = 0;
+  };
+
+  for (const ev of sorted) {
+    if (cluster.length > 0 && ev.start_time >= clusterEnd) {
+      flushCluster();
+    }
+    cluster.push(ev);
+    clusterEnd = Math.max(clusterEnd, ev.end_time);
+  }
+  flushCluster();
+
+  return layouts;
+}
 
 /** Clip a block to a single local calendar day for painting. */
 function segmentOnDay(
@@ -103,6 +164,7 @@ export function TimeGridView({
           </div>
           {days.map((day) => {
             const dayEvents = eventsOnDay(events, day).filter((e) => !e.all_day);
+            const timedLayout = layoutTimedEvents(dayEvents);
             const allDay = eventsOnDay(events, day).filter((e) => e.all_day);
             return (
               <div
@@ -189,7 +251,7 @@ export function TimeGridView({
                     </button>
                   );
                 })}
-                {dayEvents.map((ev) => {
+                {timedLayout.map(({ event: ev, column, columnCount }) => {
                   const start = new Date(ev.start_time);
                   const end = new Date(ev.end_time);
                   const top =
@@ -201,6 +263,8 @@ export function TimeGridView({
                   );
                   const accent = colorForEvent(ev);
                   const selected = selectedEventId === ev.id;
+                  const widthPct = 100 / columnCount;
+                  const leftPct = column * widthPct;
                   return (
                     <button
                       key={ev.id}
@@ -209,7 +273,7 @@ export function TimeGridView({
                         e.stopPropagation();
                         onSelectEvent(ev.id);
                       }}
-                      className={`absolute left-1 right-1 overflow-hidden rounded-lg border-l-[3px] px-1.5 py-1 text-left text-[11px] font-medium text-zinc-100 shadow-sm transition ${
+                      className={`absolute overflow-hidden rounded-lg border-l-[3px] px-1.5 py-1 text-left text-[11px] font-medium text-zinc-100 shadow-sm transition ${
                         selected
                           ? "ring-2 ring-white/45 ring-offset-1 ring-offset-zinc-950"
                           : "hover:brightness-110"
@@ -217,12 +281,14 @@ export function TimeGridView({
                       style={{
                         top,
                         height,
+                        left: `calc(${leftPct}% + ${EVENT_EDGE_PX}px)`,
+                        width: `calc(${widthPct}% - ${EVENT_EDGE_PX * 2}px - ${EVENT_GAP_PX}px)`,
                         backgroundColor: withAlpha(
                           accent,
                           selected ? 0.38 : 0.24,
                         ),
                         borderLeftColor: accent,
-                        zIndex: 3,
+                        zIndex: 3 + column,
                       }}
                       title={`${ev.title} · ${formatTime(ev.start_time)}`}
                     >

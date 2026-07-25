@@ -249,11 +249,11 @@ impl BuddyPlugin for CalendarPlugin {
             },
             ToolDecl {
                 name: "calendar.schedule_task",
-                planner_line: "calendar.schedule_task: auto-schedule a task or tasks[]. tool_input JSON: {\"title\":\"Design report\",\"duration_minutes\":120, \"deadline\": <unix_ms>, \"priority\":\"high\", \"flexibility\":\"flexible\", \"apply\":true} OR {\"tasks\":[...]}",
+                planner_line: "calendar.schedule_task: auto-schedule a task into free slots over a date range. tool_input JSON: {\"title\":\"Climbing\",\"duration_minutes\":120,\"count\":3,\"prefer_spread\":true,\"deadline\":<unix_ms>,\"start\":<unix_ms>,\"end\":<unix_ms>,\"spark_id\":\"optional\",\"apply\":false} OR {\"tasks\":[{\"title\":\"Gym\",\"duration_minutes\":60},{\"title\":\"Spark work\",\"duration_minutes\":60,\"spark_id\":\"...\"}],\"start\":...,\"end\":...,\"apply\":false}. Use count for N times this week/month; prefer_spread spreads repeats across days. apply defaults false when count>1 or multiple tasks (propose first). Deadline/end \"this week\" = end of local Sunday.",
             },
             ToolDecl {
                 name: "calendar.plan_day",
-                planner_line: "calendar.plan_day: plan a day around protected blocks. tool_input JSON: {\"day\": <unix_ms>, \"tasks\":[{\"title\":\"...\",\"duration_minutes\":60}], \"include_breaks\":true, \"apply\":false}",
+                planner_line: "calendar.plan_day: pack tasks into one day around protected blocks. tool_input JSON: {\"day\": <unix_ms>, \"tasks\":[{\"title\":\"Gym\",\"duration_minutes\":60},{\"title\":\"Work on spark\",\"duration_minutes\":60,\"spark_id\":\"...\",\"count\":1}], \"include_breaks\":true, \"apply\":false}. Use for \"on Sunday: A, B, C\" / \"I want to do X and Y on Saturday\". Prefer schedule_task with count for \"N times this week\".",
             },
             ToolDecl {
                 name: "calendar.detect_conflicts",

@@ -119,8 +119,49 @@ pub async fn send_message(
         .memory
         .enrich_with_pending(&mut memory, &conversation_id);
     let personality = load_personality(state);
-
     let client = reqwest::Client::new();
+
+    // Conflict override: "allow" / "force" retries the pending create/update with force:true.
+    if let Some((content, tool_name)) = try_force_confirm_pending(
+        &app,
+        state,
+        &client,
+        &ctx,
+        &conversation_id,
+        &text,
+        &history,
+        &memory,
+        &personality,
+    )
+    .await?
+    {
+        let assistant_metadata = serde_json::json!({
+            "intent": "tool_use",
+            "tool": tool_name,
+            "respond_mode": "passthrough",
+            "force_confirm": true,
+        })
+        .to_string();
+        state
+            .db
+            .add_message_with_metadata(
+                &conversation_id,
+                "assistant",
+                &content,
+                Some(&assistant_metadata),
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = state.memory.store_event(
+            &ctx,
+            MemoryEvent::MessageAdded {
+                role: "assistant".into(),
+                content: content.clone(),
+            },
+        );
+        let _ = app.emit("chat-done", ());
+        return Ok(());
+    }
+
     let plan: Plan = client
         .post(format!("{}/chat/plan", state.brain_url()))
         .json(&PlanRequest {
@@ -158,6 +199,36 @@ pub async fn send_message(
 
     let assistant_content = if plan.intent == "tool_use" {
         if let Some(tool_name) = &plan.tool {
+            // #region agent log
+            {
+                use std::io::Write;
+                let payload = serde_json::json!({
+                    "sessionId": "ed1062",
+                    "hypothesisId": "H1",
+                    "location": "orchestrator.rs:handle_chat",
+                    "message": "dispatching tool",
+                    "data": {
+                        "user_text": text.chars().take(160).collect::<String>(),
+                        "intent": plan.intent,
+                        "tool": tool_name,
+                        "respond_mode": plan.respond_mode,
+                        "tool_input_preview": plan.tool_input.as_deref().unwrap_or("").chars().take(280).collect::<String>(),
+                    },
+                    "timestamp": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    "runId": "lunch-debug",
+                });
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
+                {
+                    let _ = writeln!(f, "{payload}");
+                }
+            }
+            // #endregion
             dispatch_tool(
                 &app,
                 state,
@@ -184,6 +255,34 @@ pub async fn send_message(
             content
         }
     } else {
+        // #region agent log
+        {
+            use std::io::Write;
+            let payload = serde_json::json!({
+                "sessionId": "ed1062",
+                "hypothesisId": "H1",
+                "location": "orchestrator.rs:handle_chat",
+                "message": "chat intent no tool",
+                "data": {
+                    "user_text": text.chars().take(160).collect::<String>(),
+                    "intent": plan.intent,
+                    "response_preview": plan.response.as_deref().unwrap_or("").chars().take(200).collect::<String>(),
+                },
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                "runId": "lunch-debug",
+            });
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
+            {
+                let _ = writeln!(f, "{payload}");
+            }
+        }
+        // #endregion
         state.memory.clear_pending_clarification(&conversation_id);
         let mut content = plan.response.unwrap_or_default();
         if content.is_empty() {
@@ -320,6 +419,18 @@ async fn dispatch_tool(
             match run_tool_with_tracking(state, app, ctx, tool_name, &ready_input, start) {
                 Ok(output) => {
                     info!(tool = %tool_name, respond_mode = ?respond_mode, "tool executed");
+                    // Keep the attempted payload so "allow" can force-create after a conflict.
+                    if is_calendar_write_conflict(tool_name, &output) {
+                        state.memory.set_pending_clarification(
+                            conversation_id,
+                            PendingClarification {
+                                tool: tool_name.to_string(),
+                                tool_input: ready_input.clone(),
+                                missing_labels: vec!["force".into()],
+                                conversation_id: conversation_id.to_string(),
+                            },
+                        );
+                    }
                     // Brain-owned: passthrough skips second MLX call. Buddy only routes.
                     // Personality turns JSON tool payloads into chat-ready phrasing.
                     if respond_mode == Some("passthrough") {
@@ -444,7 +555,40 @@ fn run_tool_with_tracking(
             match buddy_plugins::after_execute_hint(tool_name) {
                 buddy_core::AfterExecute::EmitSparksUpdated => emit_spark_updates(app, state),
                 buddy_core::AfterExecute::EmitCalendarUpdated => {
-                    let _ = app.emit("calendar-updated", ());
+                    let is_conflict = serde_json::from_str::<serde_json::Value>(&output)
+                        .ok()
+                        .and_then(|v| v.get("status")?.as_str().map(|s| s == "conflict"))
+                        .unwrap_or(false);
+                    if !is_conflict {
+                        // #region agent log
+                        {
+                            use std::io::Write;
+                            let payload = serde_json::json!({
+                                "sessionId": "ed1062",
+                                "hypothesisId": "H5",
+                                "location": "orchestrator.rs:run_tool_with_tracking",
+                                "message": "emit calendar-updated",
+                                "data": {
+                                    "tool": tool_name,
+                                    "output_preview": output.chars().take(240).collect::<String>(),
+                                },
+                                "timestamp": std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                                "runId": "lunch-debug",
+                            });
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
+                            {
+                                let _ = writeln!(f, "{payload}");
+                            }
+                        }
+                        // #endregion
+                        let _ = app.emit("calendar-updated", ());
+                    }
                 }
                 buddy_core::AfterExecute::None => {}
             }
@@ -529,6 +673,129 @@ fn merge_tool_input(previous: &str, next: &str) -> String {
         }
         _ => next.to_string(),
     }
+}
+
+fn is_force_confirm(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "allow"
+            | "force"
+            | "force it"
+            | "yes"
+            | "y"
+            | "ok"
+            | "okay"
+            | "go ahead"
+            | "override"
+            | "do it"
+            | "book it"
+            | "book it anyway"
+            | "schedule it anyway"
+    )
+}
+
+fn is_force_cancel(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "no" | "cancel" | "never mind" | "nevermind" | "don't" | "do not" | "stop"
+    )
+}
+
+fn pending_is_force(pending: &PendingClarification) -> bool {
+    pending.missing_labels.iter().any(|l| {
+        let t = l.to_ascii_lowercase();
+        t == "force" || t.contains("override") || t.contains("conflict")
+    }) && (pending.tool == "calendar.create_event" || pending.tool == "calendar.update_event")
+}
+
+fn is_calendar_write_conflict(tool_name: &str, output: &str) -> bool {
+    if tool_name != "calendar.create_event" && tool_name != "calendar.update_event" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| v.get("status")?.as_str().map(|s| s == "conflict"))
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_force_confirm_pending(
+    app: &AppHandle,
+    state: &AppState,
+    client: &reqwest::Client,
+    ctx: &MemoryContext,
+    conversation_id: &str,
+    text: &str,
+    history: &[HistoryMessage],
+    memory: &BrainMemoryContext,
+    personality: &PersonalityProfile,
+) -> Result<Option<(String, String)>, String> {
+    let Some(pending) = state.memory.get_pending_clarification(conversation_id) else {
+        return Ok(None);
+    };
+    if !pending_is_force(&pending) {
+        return Ok(None);
+    }
+
+    if is_force_cancel(text) {
+        state.memory.clear_pending_clarification(conversation_id);
+        let content = style_response(personality, "Okay — I won’t override that conflict.");
+        let _ = app.emit("chat-chunk", &content);
+        return Ok(Some((content, pending.tool)));
+    }
+
+    if !is_force_confirm(text) {
+        return Ok(None);
+    }
+
+    // #region agent log
+    {
+        use std::io::Write;
+        let payload = serde_json::json!({
+            "sessionId": "ed1062",
+            "hypothesisId": "H-force",
+            "location": "orchestrator.rs:try_force_confirm_pending",
+            "message": "forcing calendar write after allow",
+            "data": {
+                "tool": pending.tool,
+                "tool_input_preview": pending.tool_input.chars().take(240).collect::<String>(),
+            },
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "runId": "lunch-debug",
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/liamgk/Desktop/BUDDY/.cursor/debug-ed1062.log")
+        {
+            let _ = writeln!(f, "{payload}");
+        }
+    }
+    // #endregion
+
+    let forced_input = merge_tool_input(&pending.tool_input, r#"{"force":true}"#);
+    let tool_name = pending.tool.clone();
+    // Clear before dispatch so Ready path doesn't reuse stale pending.
+    state.memory.clear_pending_clarification(conversation_id);
+    let content = dispatch_tool(
+        app,
+        state,
+        client,
+        ctx,
+        conversation_id,
+        text,
+        history,
+        memory,
+        personality,
+        &tool_name,
+        &forced_input,
+        Some("passthrough"),
+    )
+    .await?;
+    Ok(Some((content, tool_name)))
 }
 
 struct DbPreferenceLookup<'a> {

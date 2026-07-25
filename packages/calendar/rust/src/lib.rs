@@ -21,6 +21,7 @@ pub use notifications::{
 pub use scheduling::{
     ConflictReport, DayCapacity, DaySummary, FreeSlot, PlanDayRequest, PlanDayResult,
     ProposedBlock, ScheduleItem, ScheduleItemsResult, SchedulingPolicy, WriteEventOutcome,
+    expand_schedule_items,
 };
 pub use services::{month_buffer_range, CalendarService, SettingsLookup};
 pub use tools::register_calendar_tools;
