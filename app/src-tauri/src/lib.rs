@@ -21,13 +21,12 @@ use buddy_database::Database;
 use buddy_memory::MemoryContext;
 use memory_extraction::session_end_handover;
 use services::ProcessManager;
-use state::{db_path, find_project_root, logs_dir, AppState};
+use state::{db_path, logs_dir, resolve_project_root, AppState};
 use tauri::{Manager, RunEvent};
 use tracing::{error, info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let project_root = find_project_root();
     let logs_dir = logs_dir();
     logging::init_logging(&logs_dir, "info");
 
@@ -49,6 +48,15 @@ pub fn run() {
                     .into());
                 }
             };
+            let project_root = resolve_project_root(&db);
+            info!(path = %project_root.display(), "project root");
+            if !ProcessManager::project_root_looks_valid(&project_root) {
+                warn!(
+                    path = %project_root.display(),
+                    "project root does not look like the Buddy repo — Brain/MLX auto-start may fail. Set BUDDY_PROJECT_ROOT or launch once from the repo."
+                );
+            }
+
             let state = AppState::new(db, project_root.clone());
             let process_manager = Arc::new(ProcessManager::new());
 
@@ -65,11 +73,26 @@ pub fn run() {
             let pm = process_manager.clone();
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
-                for _ in 0..10 {
+                if ProcessManager::auto_start_mlx(&st) {
+                    match pm.ensure_mlx(&st).await {
+                        Ok(()) => info!("mlx ready"),
+                        Err(e) => warn!(error = %e, "mlx auto-start failed"),
+                    }
+                } else {
+                    info!("mlx auto-start disabled");
+                }
+
+                for _ in 0..3 {
                     if ProcessManager::check_brain_ready(&st).await {
+                        info!("brain ready");
                         break;
                     }
-                    let _ = pm.ensure_brain(&st).await;
+                    if let Err(e) = pm.ensure_brain(&st).await {
+                        warn!(error = %e, "brain auto-start failed");
+                    } else {
+                        info!("brain ready");
+                        break;
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 st.memory.spawn_reindex().await;
@@ -80,6 +103,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_service_status,
             commands::start_brain,
+            commands::start_mlx,
             commands::list_conversations,
             commands::create_conversation,
             commands::delete_conversation,
@@ -139,6 +163,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                if let Some(pm) = app.try_state::<Arc<ProcessManager>>() {
+                    pm.stop_owned_services();
+                }
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
                     handle_exit(state.inner().clone());
                 }

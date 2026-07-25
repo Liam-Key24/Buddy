@@ -43,11 +43,19 @@ pub async fn get_service_status(state: State<'_, Arc<AppState>>) -> Result<Servi
 }
 
 #[tauri::command]
-pub fn start_brain(
+pub async fn start_brain(
     process_manager: State<'_, Arc<ProcessManager>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    process_manager.start_brain(&state)
+    process_manager.ensure_brain(&state).await
+}
+
+#[tauri::command]
+pub fn start_mlx(
+    process_manager: State<'_, Arc<ProcessManager>>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    process_manager.start_mlx(&state)
 }
 
 #[tauri::command]
@@ -117,7 +125,7 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, Stri
         mlx_url: state.mlx_url(),
         brain_url: state.brain_url(),
         log_level: setting_or(&state, "log_level", "info"),
-        auto_start_mlx: setting_or(&state, "auto_start_mlx", "false") == "true",
+        auto_start_mlx: setting_or(&state, "auto_start_mlx", "true") == "true",
         model_name_chat: setting_or(&state, "model_name_chat", &model_name),
         model_name_code: setting_or(&state, "model_name_code", &model_name),
         llm_profile_router: setting_or(&state, "llm_profile_router", &model_name),

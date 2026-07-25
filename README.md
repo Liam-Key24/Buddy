@@ -62,15 +62,63 @@ Buddy injects only generic session context (`conversation_id`, `workspace_path`,
 - macOS (Apple Silicon recommended)
 - Rust, Node 18+, Python 3.10+
 
-## Setup / Run
+## Setup
 
 ```bash
 cd app && npm install
 python3 -m venv brain/venv && source brain/venv/bin/activate
 pip install -r brain/requirements.txt
+```
 
-./brain/scripts/start_mlx.sh   # terminal 1
-cd app && npm run tauri dev    # terminal 2
+Keep the repo on disk (Brain + MLX run from `brain/venv`).
+
+## Run (dev)
+
+```bash
+cd app && npm run tauri dev
+```
+
+With **Auto-start MLX** enabled (default), Buddy starts MLX (`:8001`) and Brain
+(`:8002`) on launch. No separate terminal is required.
+
+To start MLX manually instead:
+
+```bash
+./brain/scripts/start_mlx.sh   # optional if auto-start is off
+cd app && npm run tauri dev
+```
+
+## Desktop build (out of dev)
+
+```bash
+cd app && npm run tauri build
+```
+
+The app is at:
+
+`app/src-tauri/target/release/bundle/macos/Buddy.app`
+
+### First launch tips
+
+1. Prefer launching once from the repo tree (or set `BUDDY_PROJECT_ROOT` to this
+   repo) so Buddy can find `brain/venv` and persist `project_root` in settings.
+2. Copy `Buddy.app` to Applications / Dock after that — later launches reuse the
+   saved path (also tries `~/Desktop/BUDDY`, etc.).
+3. Enable **Settings → Auto-start MLX** (on by default for new installs).
+4. First MLX boot may download/load the model and take several minutes; watch
+   the MLX status indicator in the sidebar.
+
+Override the repo path any time:
+
+```bash
+export BUDDY_PROJECT_ROOT=/Users/you/Desktop/BUDDY
+open /path/to/Buddy.app
+```
+
+Or after a release build:
+
+```bash
+./scripts/open-buddy.sh
 ```
 
 ## Testing

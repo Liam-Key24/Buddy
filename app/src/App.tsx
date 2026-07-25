@@ -22,7 +22,6 @@ import {
   loadCodexMessages,
   loadConversations,
   loadMessages,
-  startBrain,
   subscribeCalendarEvents,
   subscribeCalendarReminders,
   subscribeCodexEvents,
@@ -37,7 +36,6 @@ function App() {
 
   useEffect(() => {
     loadConversations();
-    startBrain().catch(console.error);
     refresh().catch(console.error);
 
     isPermissionGranted()

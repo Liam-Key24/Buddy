@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from context import MemoryContextPayload, build_messages, format_history
-from embeddings import embed_text, embedding_dimensions
+from embeddings import embed_text, embedding_dimensions, preload_model
 from mlx_client import MLXClient
 from parser import (
     CALENDAR_BLOCK_TIME,
@@ -130,6 +130,11 @@ MODEL = os.environ.get(
 
 app = FastAPI(title="Buddy Brain")
 mlx = MLXClient(base_url=MLX_BASE_URL, model=MODEL)
+
+
+@app.on_event("startup")
+def _preload_embeddings():
+    preload_model()
 
 
 class HistoryMessage(BaseModel):

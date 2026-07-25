@@ -7,10 +7,8 @@ import {
 } from "@phosphor-icons/react";
 import { useSettingsStore } from "../stores/useSettingsStore";
 import {
-  ExternalAction,
   deleteSecret,
   getSecretStatus,
-  listExternalActions,
   loadSettings,
   refreshCache,
   saveSetting,
@@ -18,35 +16,16 @@ import {
   setSecret,
 } from "../lib/api";
 
-type Tab =
-  | "general"
-  | "keys"
-  | "filesystem"
-  | "email"
-  | "calendar"
-  | "actions"
-  | "cache";
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "keys", label: "API Keys" },
-  { id: "filesystem", label: "Filesystem" },
-  { id: "email", label: "Email" },
-  { id: "calendar", label: "Calendar" },
-  { id: "actions", label: "External Actions" },
-  { id: "cache", label: "Cache" },
-];
-
 const SECRET_KEYS: { key: string; label: string }[] = [
-  { key: "openai_api_key", label: "OpenAI API Key (Codex / GPT-5.5)" },
-  { key: "cursor_api_key", label: "Cursor API Key" },
-  { key: "smtp_password", label: "Email / SMTP Password" },
+  { key: "openai_api_key", label: "OpenAI" },
+  { key: "cursor_api_key", label: "Cursor" },
+  { key: "smtp_password", label: "Email / SMTP" },
 ];
 
 export function Settings() {
   const settings = useSettingsStore();
-  const [tab, setTab] = useState<Tab>("general");
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     loadSettings().then((s) => {
@@ -78,158 +57,193 @@ export function Settings() {
     });
   }, []);
 
-  async function handleSaveGeneral() {
-    await Promise.all([
-      saveSetting("log_level", settings.logLevel),
-      saveSetting("auto_start_mlx", String(settings.autoStartMlx)),
-      saveSetting("model_name", settings.modelName),
-      saveSetting("model_name_chat", settings.modelNameChat),
-      saveSetting("model_name_code", settings.modelNameCode),
-      saveSetting("llm_profile_router", settings.llmProfileRouter),
-      saveSetting("codex_model", settings.codexModel),
-      saveSetting("codex_workspace", settings.codexWorkspace),
-      saveSetting("code_agent_backend", settings.codeAgentBackend),
-      saveSetting("code_model", settings.codeModel),
-      saveSetting("cursor_path", settings.cursorPath),
-      saveSetting("codex_path", settings.codexPath),
-    ]);
-    flashSaved();
-  }
-
-  function flashSaved() {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await Promise.all([
+        saveSetting("log_level", settings.logLevel),
+        saveSetting("auto_start_mlx", String(settings.autoStartMlx)),
+        saveSetting("model_name", settings.modelName),
+        saveSetting("model_name_chat", settings.modelName),
+        saveSetting("model_name_code", settings.modelName),
+        saveSetting("llm_profile_router", settings.modelName),
+        saveSetting("codex_model", settings.codexModel),
+        saveSetting("codex_workspace", settings.codexWorkspace),
+        saveSetting("code_agent_backend", settings.codeAgentBackend),
+        saveSetting("code_model", settings.codeModel),
+        saveSetting("email_greeting", settings.emailGreeting),
+        saveSetting("email_signature", settings.emailSignature),
+        saveSetting(
+          "calendar_notifications_enabled",
+          String(settings.calendarNotificationsEnabled),
+        ),
+        saveSetting(
+          "calendar_default_timezone",
+          settings.calendarDefaultTimezone || "UTC",
+        ),
+        setExcludedPaths(settings.fsExcludedPaths),
+      ]);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <div className="mx-auto max-w-2xl space-y-4">
-        <div className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900 p-1">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                tab === t.id
-                  ? "bg-blue-500 text-white"
-                  : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              }`}
+      <div className="mx-auto max-w-xl space-y-8 pb-16">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-lg font-semibold text-zinc-100">Settings</h1>
+            <p className="text-xs text-zinc-500">
+              Models, keys, and a few preferences.
+            </p>
+          </div>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-600 disabled:opacity-50"
+          >
+            <FloppyDisk size={16} weight="duotone" />
+            {saved ? "Saved" : saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+
+        <Section title="Models">
+          <Field
+            label="Local model"
+            value={settings.modelName}
+            onChange={(v) => settings.setSettings({ modelName: v })}
+          />
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-400">
+              Code agent
+            </label>
+            <select
+              value={settings.codeAgentBackend}
+              onChange={(e) =>
+                settings.setSettings({ codeAgentBackend: e.target.value })
+              }
+              className="w-full rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
             >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-sm">
-          {tab === "general" && (
-            <div className="space-y-4">
-              <Field label="MLX URL" value={settings.mlxUrl} readOnly />
-              <Field label="Brain URL" value={settings.brainUrl} readOnly />
-              <Field
-                label="Default Model"
-                value={settings.modelName}
-                onChange={(v) => settings.setSettings({ modelName: v })}
-              />
-              <Field
-                label="Chat Model"
-                value={settings.modelNameChat}
-                onChange={(v) => settings.setSettings({ modelNameChat: v })}
-              />
-              <Field
-                label="Code Model"
-                value={settings.modelNameCode}
-                onChange={(v) => settings.setSettings({ modelNameCode: v })}
-              />
-              <Field
-                label="Router Model"
-                value={settings.llmProfileRouter}
-                onChange={(v) =>
-                  settings.setSettings({ llmProfileRouter: v })
-                }
-              />
-              <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-400">
-                  Code Agent Backend
-                </label>
-                <select
-                  value={settings.codeAgentBackend}
-                  onChange={(e) =>
-                    settings.setSettings({ codeAgentBackend: e.target.value })
-                  }
-                  className="w-full rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                >
-                  <option value="cursor">Cursor (cursor-agent)</option>
-                  <option value="codex">Codex (codex CLI)</option>
-                </select>
-              </div>
-              <Field
-                label="Cursor Model (code)"
-                value={settings.codeModel}
-                onChange={(v) => settings.setSettings({ codeModel: v })}
-              />
-              <Field
-                label="Cursor CLI Path (leave blank to use PATH)"
-                value={settings.cursorPath}
-                onChange={(v) => settings.setSettings({ cursorPath: v })}
-              />
-              <Field
-                label="Codex Model"
-                value={settings.codexModel}
-                onChange={(v) => settings.setSettings({ codexModel: v })}
-              />
-              <Field
-                label="Codex CLI Path (leave blank to use PATH)"
-                value={settings.codexPath}
-                onChange={(v) => settings.setSettings({ codexPath: v })}
-              />
-              <Field
-                label="Project Base Folder"
-                value={settings.codexWorkspace}
-                onChange={(v) => settings.setSettings({ codexWorkspace: v })}
-              />
-              <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-400">
-                  Log Level
-                </label>
-                <select
-                  value={settings.logLevel}
-                  onChange={(e) =>
-                    settings.setSettings({ logLevel: e.target.value })
-                  }
-                  className="w-full rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                >
-                  <option value="debug">debug</option>
-                  <option value="info">info</option>
-                  <option value="warn">warn</option>
-                  <option value="error">error</option>
-                </select>
-              </div>
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input
-                  type="checkbox"
-                  checked={settings.autoStartMlx}
-                  onChange={(e) =>
-                    settings.setSettings({ autoStartMlx: e.target.checked })
-                  }
-                  className="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500/20"
-                />
-                Auto-start MLX
-              </label>
-              <SaveButton onClick={handleSaveGeneral} saved={saved} />
-            </div>
+              <option value="cursor">Cursor</option>
+              <option value="codex">Codex</option>
+            </select>
+          </div>
+          {settings.codeAgentBackend === "cursor" ? (
+            <Field
+              label="Cursor model"
+              value={settings.codeModel}
+              onChange={(v) => settings.setSettings({ codeModel: v })}
+            />
+          ) : (
+            <Field
+              label="Codex model"
+              value={settings.codexModel}
+              onChange={(v) => settings.setSettings({ codexModel: v })}
+            />
           )}
+          <Field
+            label="Project folder"
+            value={settings.codexWorkspace}
+            onChange={(v) => settings.setSettings({ codexWorkspace: v })}
+          />
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input
+              type="checkbox"
+              checked={settings.autoStartMlx}
+              onChange={(e) =>
+                settings.setSettings({ autoStartMlx: e.target.checked })
+              }
+              className="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500/20"
+            />
+            Auto-start local model server
+          </label>
+        </Section>
 
-          {tab === "keys" && <ApiKeysSection />}
-          {tab === "filesystem" && <FilesystemSection />}
-          {tab === "email" && <EmailSection onSaved={flashSaved} saved={saved} />}
-          {tab === "calendar" && (
-            <CalendarSection onSaved={flashSaved} saved={saved} />
-          )}
-          {tab === "actions" && <ExternalActionsSection />}
-          {tab === "cache" && <CacheSection />}
-        </div>
+        <Section title="API keys">
+          <p className="text-xs text-zinc-500">
+            Stored in the macOS Keychain.
+          </p>
+          <ApiKeysSection />
+        </Section>
+
+        <Section title="Email">
+          <Field
+            label="Greeting"
+            value={settings.emailGreeting}
+            onChange={(v) => settings.setSettings({ emailGreeting: v })}
+          />
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-400">
+              Signature
+            </label>
+            <textarea
+              value={settings.emailSignature}
+              onChange={(e) =>
+                settings.setSettings({ emailSignature: e.target.value })
+              }
+              rows={3}
+              className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+            />
+          </div>
+        </Section>
+
+        <Section title="Calendar">
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input
+              type="checkbox"
+              checked={settings.calendarNotificationsEnabled}
+              onChange={(e) =>
+                settings.setSettings({
+                  calendarNotificationsEnabled: e.target.checked,
+                })
+              }
+              className="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500/20"
+            />
+            Desktop reminder notifications
+          </label>
+          <Field
+            label="Timezone"
+            value={settings.calendarDefaultTimezone}
+            onChange={(v) =>
+              settings.setSettings({ calendarDefaultTimezone: v })
+            }
+          />
+        </Section>
+
+        <Section title="Filesystem">
+          <p className="text-xs text-zinc-500">
+            Paths under your home folder that Buddy should not touch.
+          </p>
+          <FilesystemSection />
+        </Section>
+
+        <Section title="Cache">
+          <CacheSection />
+        </Section>
       </div>
     </div>
+  );
+}
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-3">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        {title}
+      </h2>
+      <div className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -251,7 +265,7 @@ function ApiKeysSection() {
     if (!value) return;
     await setSecret(key, value);
     setValues((v) => ({ ...v, [key]: "" }));
-    setMessage(`Saved ${key}`);
+    setMessage("Saved");
     setTimeout(() => setMessage(null), 2000);
     await refresh();
   }
@@ -262,10 +276,7 @@ function ApiKeysSection() {
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-xs text-zinc-500">
-        Keys are stored in the macOS Keychain, never in the app database.
-      </p>
+    <div className="space-y-3">
       {SECRET_KEYS.map(({ key, label }) => (
         <div key={key}>
           <label className="mb-1 flex items-center justify-between text-xs font-medium text-zinc-400">
@@ -312,33 +323,24 @@ function ApiKeysSection() {
 function FilesystemSection() {
   const settings = useSettingsStore();
   const [newPath, setNewPath] = useState("");
-  const [saved, setSaved] = useState(false);
-
-  async function persist(paths: string[]) {
-    settings.setSettings({ fsExcludedPaths: paths });
-    await setExcludedPaths(paths);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
-  }
 
   function addPath() {
     const trimmed = newPath.trim();
     if (!trimmed || settings.fsExcludedPaths.includes(trimmed)) return;
-    persist([...settings.fsExcludedPaths, trimmed]);
+    settings.setSettings({
+      fsExcludedPaths: [...settings.fsExcludedPaths, trimmed],
+    });
     setNewPath("");
   }
 
   function removePath(path: string) {
-    persist(settings.fsExcludedPaths.filter((p) => p !== path));
+    settings.setSettings({
+      fsExcludedPaths: settings.fsExcludedPaths.filter((p) => p !== path),
+    });
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-xs text-zinc-500">
-        Buddy can read and edit files under your home folder, except these
-        excluded locations. Entries are names or paths relative to your home
-        folder.
-      </p>
+    <div className="space-y-3">
       <div className="space-y-1.5">
         {settings.fsExcludedPaths.map((path) => (
           <div
@@ -355,7 +357,7 @@ function FilesystemSection() {
           </div>
         ))}
         {settings.fsExcludedPaths.length === 0 && (
-          <p className="text-xs text-zinc-600">No exclusions configured.</p>
+          <p className="text-xs text-zinc-600">No exclusions.</p>
         )}
       </div>
       <div className="flex gap-2">
@@ -375,187 +377,6 @@ function FilesystemSection() {
           Add
         </button>
       </div>
-      {saved && <p className="text-xs text-emerald-400">Saved</p>}
-    </div>
-  );
-}
-
-function EmailSection({
-  onSaved,
-  saved,
-}: {
-  onSaved: () => void;
-  saved: boolean;
-}) {
-  const settings = useSettingsStore();
-
-  async function handleSave() {
-    await Promise.all([
-      saveSetting("email_greeting", settings.emailGreeting),
-      saveSetting("email_signature", settings.emailSignature),
-      saveSetting("email_body_template", settings.emailBodyTemplate),
-    ]);
-    onSaved();
-  }
-
-  const preview = settings.emailBodyTemplate
-    .replace("{greeting}", settings.emailGreeting.replace("{name}", "Alex"))
-    .replace("{name}", "Alex")
-    .replace("{body}", "This is the message body.")
-    .replace("{signature}", settings.emailSignature);
-
-  return (
-    <div className="space-y-4">
-      <Field
-        label="Greeting (use {name} for recipient)"
-        value={settings.emailGreeting}
-        onChange={(v) => settings.setSettings({ emailGreeting: v })}
-      />
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">
-          Signature
-        </label>
-        <textarea
-          value={settings.emailSignature}
-          onChange={(e) =>
-            settings.setSettings({ emailSignature: e.target.value })
-          }
-          rows={3}
-          className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-        />
-      </div>
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">
-          Body Template ({"{greeting}"}, {"{body}"}, {"{signature}"})
-        </label>
-        <textarea
-          value={settings.emailBodyTemplate}
-          onChange={(e) =>
-            settings.setSettings({ emailBodyTemplate: e.target.value })
-          }
-          rows={4}
-          className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-        />
-      </div>
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">
-          Preview
-        </label>
-        <pre className="whitespace-pre-wrap rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">
-          {preview}
-        </pre>
-      </div>
-      <SaveButton onClick={handleSave} saved={saved} />
-    </div>
-  );
-}
-
-function CalendarSection({
-  onSaved,
-  saved,
-}: {
-  onSaved: () => void;
-  saved: boolean;
-}) {
-  const settings = useSettingsStore();
-
-  async function handleSave() {
-    await Promise.all([
-      saveSetting(
-        "calendar_notifications_enabled",
-        String(settings.calendarNotificationsEnabled),
-      ),
-      saveSetting(
-        "calendar_default_timezone",
-        settings.calendarDefaultTimezone || "UTC",
-      ),
-      saveSetting(
-        "calendar_default_reminders_json",
-        settings.calendarDefaultRemindersJson,
-      ),
-    ]);
-    onSaved();
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="space-y-3">
-        <h3 className="text-sm font-medium text-zinc-200">BUDDY Calendar</h3>
-        <p className="text-xs text-zinc-500">
-          Native calendar is the source of truth. Reminder notifications can
-          appear on the desktop and in the calendar workspace.
-        </p>
-        <label className="flex items-center gap-3 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={settings.calendarNotificationsEnabled}
-            onChange={(e) =>
-              settings.setSettings({
-                calendarNotificationsEnabled: e.target.checked,
-              })
-            }
-            className="h-4 w-4 rounded border-zinc-600"
-          />
-          Enable desktop reminder notifications
-        </label>
-        <Field
-          label="Default timezone (IANA)"
-          value={settings.calendarDefaultTimezone}
-          onChange={(v) =>
-            settings.setSettings({ calendarDefaultTimezone: v })
-          }
-        />
-        <Field
-          label='Default reminders JSON (e.g. [{"minutes_before":15,"method":"popup"}])'
-          value={settings.calendarDefaultRemindersJson}
-          onChange={(v) =>
-            settings.setSettings({ calendarDefaultRemindersJson: v })
-          }
-        />
-        <SaveButton onClick={handleSave} saved={saved} />
-      </div>
-    </div>
-  );
-}
-
-
-
-function ExternalActionsSection() {
-  const [actions, setActions] = useState<ExternalAction[]>([]);
-
-  useEffect(() => {
-    listExternalActions(100).then(setActions).catch(console.error);
-  }, []);
-
-  if (actions.length === 0) {
-    return <p className="text-xs text-zinc-500">No external actions yet.</p>;
-  }
-
-  return (
-    <div className="space-y-2">
-      {actions.map((a) => (
-        <div
-          key={a.id}
-          className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-300">
-              {a.action_type}
-            </span>
-            <span
-              className={`text-[10px] ${
-                a.approved ? "text-emerald-400" : "text-amber-400"
-              }`}
-            >
-              {a.approved ? "approved" : "pending"}
-            </span>
-          </div>
-          <p className="mt-0.5 text-xs text-zinc-500">{a.summary}</p>
-          <p className="mt-0.5 text-[10px] text-zinc-600">
-            {new Date(a.created_at).toLocaleString()}
-          </p>
-        </div>
-      ))}
     </div>
   );
 }
@@ -580,42 +401,24 @@ function CacheSection() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <p className="text-xs text-zinc-500">
-        Rebuild the semantic index and refresh the workspace profile.
+        Rebuild the semantic index and workspace profile.
       </p>
       <button
         onClick={handleRefresh}
         disabled={running}
-        className="flex items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-600 disabled:opacity-50"
+        className="flex items-center gap-2 rounded-xl border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:opacity-50"
       >
         <ArrowsClockwise
           size={16}
           weight="bold"
           className={running ? "animate-spin" : ""}
         />
-        {running ? "Refreshing..." : "Refresh cache"}
+        {running ? "Refreshing…" : "Refresh cache"}
       </button>
       {result && <p className="text-xs text-zinc-400">{result}</p>}
     </div>
-  );
-}
-
-function SaveButton({
-  onClick,
-  saved,
-}: {
-  onClick: () => void;
-  saved: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-600"
-    >
-      <FloppyDisk size={16} weight="duotone" />
-      {saved ? "Saved" : "Save"}
-    </button>
   );
 }
 
@@ -623,12 +426,10 @@ function Field({
   label,
   value,
   onChange,
-  readOnly,
 }: {
   label: string;
   value: string;
-  onChange?: (v: string) => void;
-  readOnly?: boolean;
+  onChange: (v: string) => void;
 }) {
   return (
     <div>
@@ -638,9 +439,8 @@ function Field({
       <input
         type="text"
         value={value}
-        readOnly={readOnly}
-        onChange={(e) => onChange?.(e.target.value)}
-        className="w-full rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 read-only:opacity-60"
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
       />
     </div>
   );

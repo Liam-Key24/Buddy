@@ -1,15 +1,21 @@
 import logging
+import threading
 
 logger = logging.getLogger("buddy.brain.embeddings")
 
 _model = None
 _model_name = "sentence-transformers/all-MiniLM-L6-v2"
 _dimensions = 384
+_lock = threading.Lock()
 
 
 def _load_model():
     global _model
-    if _model is None:
+    if _model is not None:
+        return _model if _model is not False else None
+    with _lock:
+        if _model is not None:
+            return _model if _model is not False else None
         try:
             from sentence_transformers import SentenceTransformer
 
@@ -19,6 +25,11 @@ def _load_model():
             logger.warning("sentence-transformers unavailable: %s", e)
             _model = False
     return _model if _model is not False else None
+
+
+def preload_model() -> None:
+    """Warm the embedding model at process start so /embed is ready immediately."""
+    _load_model()
 
 
 def embed_text(text: str) -> list[float]:

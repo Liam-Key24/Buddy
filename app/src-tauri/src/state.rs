@@ -125,6 +125,7 @@ fn shell_extra_tools(db: Arc<Database>, slot: StateSlot) -> Vec<ExtraTool> {
 const SHELL_SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("brain_url", DEFAULT_BRAIN_URL),
     ("mlx_url", DEFAULT_MLX_URL),
+    ("auto_start_mlx", "true"),
     ("codex_model", "gpt-5.5"),
     ("code_agent_backend", "cursor"),
     ("code_model", "auto"),
@@ -144,19 +145,93 @@ fn seed_default_settings(db: &Database) {
     seed_plugin_settings(db);
 }
 
-pub fn find_project_root() -> PathBuf {
-    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for _ in 0..6 {
-        if dir.join("brain").exists() && dir.join("app").exists() {
-            return dir;
-        }
-        if dir.join("Cargo.toml").exists() && dir.join("brain").exists() {
-            return dir;
+fn looks_like_project_root(dir: &std::path::Path) -> bool {
+    dir.join("brain").is_dir()
+        && (dir.join("app").is_dir() || dir.join("Cargo.toml").is_file())
+}
+
+fn walk_up_for_root(start: PathBuf) -> Option<PathBuf> {
+    let mut dir = start;
+    for _ in 0..8 {
+        if looks_like_project_root(&dir) {
+            return Some(dir);
         }
         if !dir.pop() {
             break;
         }
     }
+    None
+}
+
+fn candidate_home_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Some(home) = dirs::home_dir() else {
+        return out;
+    };
+    for rel in [
+        "Desktop/BUDDY",
+        "Desktop/Buddy",
+        "Documents/BUDDY",
+        "Documents/Buddy",
+        "Developer/BUDDY",
+        "dev/BUDDY",
+        "BUDDY",
+        "Buddy",
+        "src/BUDDY",
+    ] {
+        out.push(home.join(rel));
+    }
+    out
+}
+
+/// Discover the repo root used for Brain/MLX (venv + scripts).
+/// Preference: env → DB setting → cwd walk → executable walk → common home paths.
+pub fn resolve_project_root(db: &Database) -> PathBuf {
+    if let Ok(env_root) = std::env::var("BUDDY_PROJECT_ROOT") {
+        let path = PathBuf::from(env_root.trim());
+        if looks_like_project_root(&path) {
+            let _ = db.set_setting("project_root", &path.display().to_string());
+            return path;
+        }
+    }
+
+    if let Ok(Some(stored)) = db.get_setting("project_root") {
+        let path = PathBuf::from(stored.trim());
+        if looks_like_project_root(&path) {
+            return path;
+        }
+    }
+
+    let discovered = find_project_root();
+    if looks_like_project_root(&discovered) {
+        let _ = db.set_setting("project_root", &discovered.display().to_string());
+        return discovered;
+    }
+
+    discovered
+}
+
+pub fn find_project_root() -> PathBuf {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = walk_up_for_root(cwd) {
+            return root;
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if let Some(root) = walk_up_for_root(parent.to_path_buf()) {
+                return root;
+            }
+        }
+    }
+
+    for candidate in candidate_home_roots() {
+        if looks_like_project_root(&candidate) {
+            return candidate;
+        }
+    }
+
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

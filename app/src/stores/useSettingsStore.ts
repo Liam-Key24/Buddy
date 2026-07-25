@@ -30,7 +30,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   brainUrl: "http://127.0.0.1:8002",
   modelName: "mlx-community/Llama-3.2-3B-Instruct-4bit",
   logLevel: "info",
-  autoStartMlx: false,
+  autoStartMlx: true,
   modelNameChat: "mlx-community/Llama-3.2-3B-Instruct-4bit",
   modelNameCode: "mlx-community/Llama-3.2-3B-Instruct-4bit",
   llmProfileRouter: "mlx-community/Llama-3.2-3B-Instruct-4bit",
