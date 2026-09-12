@@ -18,6 +18,7 @@ mod services;
 mod socials_generate;
 mod spark_checker;
 mod state;
+mod turn_controller;
 mod turn_trace;
 mod work_item;
 

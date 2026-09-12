@@ -30,19 +30,12 @@ const MAX_NATIVE_STEPS: usize = 8;
 /// Tool-calling can stall on a huge kit; fail faster than a silent 90s hang.
 const COMPLETE_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// Internal complete-loop flag, mapped from [`crate::turn_controller::ModelLane`].
+/// Not a product-facing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatMode {
     Talk,
     Tool,
-}
-
-impl ChatMode {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("talk") | Some("chat") => Self::Talk,
-            _ => Self::Tool,
-        }
-    }
 }
 
 const LIFE_KIT_SELECTORS: &[&str] = &[

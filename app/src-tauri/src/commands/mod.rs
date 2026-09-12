@@ -121,10 +121,20 @@ pub async fn send_message(
     conversation_id: String,
     text: String,
     ui_context: Option<String>,
+    #[allow(unused_variables)]
     chat_mode: Option<String>,
 ) -> Result<(), String> {
-    orchestrator::send_message(app, &state, conversation_id, text, ui_context, chat_mode)
-        .await
+    let _ = chat_mode; // leftover invoke field; UI no longer selects a model
+    crate::turn_controller::TurnController::handle(
+        app,
+        &state,
+        crate::turn_controller::TurnRequest {
+            conversation_id,
+            text,
+            ui_context,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -150,7 +160,14 @@ pub async fn resolve_clarification(
     field: String,
     value: String,
 ) -> Result<(), String> {
-    orchestrator::resolve_clarification(app, &state, conversation_id, field, value).await
+    crate::turn_controller::TurnController::resolve_clarification(
+        app,
+        &state,
+        conversation_id,
+        field,
+        value,
+    )
+    .await
 }
 
 #[tauri::command]

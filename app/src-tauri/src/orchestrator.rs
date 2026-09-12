@@ -31,6 +31,7 @@ use crate::native_loop::{self, load_transcript, NativeOutcome};
 use crate::run_control::{RunGuard, RunScope};
 use crate::services::{talk_recovery, ProcessManager, TalkRecovery};
 use crate::state::AppState;
+use crate::turn_controller::ModelLane;
 use crate::turn_trace::{self, TurnPath, TurnTrace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,11 +62,9 @@ pub async fn send_message(
     conversation_id: String,
     text: String,
     ui_context: Option<String>,
-    chat_mode: Option<String>,
 ) -> Result<(), String> {
     info!(text = %text, "user request");
     emit_trace(&app, "planning", "Reading context");
-    let _ = chat_mode; // UI no longer selects a model; kept for invoke compatibility.
 
     let started = Instant::now();
     let mut trace = TurnTrace::new(&conversation_id);
@@ -225,9 +224,10 @@ pub async fn send_message(
         }
     }
 
-    let pending_open = state
-        .memory
-        .get_pending_clarification(&conversation_id)
+    let work = state.memory.get_work_item(&conversation_id);
+    let pending_open = work
+        .as_ref()
+        .and_then(|item| item.pending_clarification.as_ref())
         .is_some();
     let has_native = load_transcript(state, &conversation_id).is_some();
 
@@ -382,14 +382,11 @@ pub async fn send_message(
     let qwen_resident = app
         .try_state::<Arc<ProcessManager>>()
         .is_some_and(|pm| pm.tool_model_loaded(state));
-    let chat_mode = if trivial {
-        native_loop::ChatMode::Talk
-    } else {
-        native_loop::ChatMode::Tool
-    };
+    let lane = ModelLane::select(trivial, qwen_resident);
+    let chat_mode = lane.native_mode();
 
     // Llama is only a latency cache for short chitchat when Qwen is not already loaded.
-    if trivial && !qwen_resident {
+    if lane == ModelLane::LlamaTalk {
         match stream_talk_reply(
             &app,
             state,
