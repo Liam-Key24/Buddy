@@ -122,13 +122,82 @@ impl LearningEngine {
             .map_err(|e| e.to_string())
     }
 
+    /// Evidence-based proposal. Not used until approved.
+    pub fn propose_preference(
+        &self,
+        workspace_path: &str,
+        key: &str,
+        value: &str,
+        evidence: &str,
+    ) -> Result<String, String> {
+        let now = buddy_database::chrono_now();
+        let id = Uuid::new_v4().to_string();
+        let description = format!("Prefers {key}: {value}");
+        let evidence_json = serde_json::json!({ "evidence": evidence, "key": key, "value": value }).to_string();
+        self.db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO learned_patterns \
+                     (id, workspace_path, pattern_type, description, evidence_json, confidence, observation_count, last_confirmed_at, created_at) \
+                     VALUES (?1, ?2, 'preference_proposal', ?3, ?4, 0.4, 1, NULL, ?5)",
+                    params![id, workspace_path, description, evidence_json, now],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    pub fn approve_preference(&self, id: &str) -> Result<(), String> {
+        let now = buddy_database::chrono_now();
+        self.db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE learned_patterns SET last_confirmed_at = ?1, confidence = MIN(confidence + 0.3, 0.95), pattern_type = 'preference' WHERE id = ?2",
+                    params![now, id],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn reject_preference(&self, id: &str) -> Result<(), String> {
+        self.db
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM learned_patterns WHERE id = ?1", params![id])?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn list_preference_proposals(
+        &self,
+        workspace_path: &str,
+    ) -> Result<Vec<(String, String, f64)>, String> {
+        self.db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, description, confidence FROM learned_patterns \
+                     WHERE workspace_path = ?1 AND pattern_type = 'preference_proposal' \
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map(params![workspace_path], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(buddy_database::DbError::from)
+            })
+            .map_err(|e| e.to_string())
+    }
+
     pub fn format_for_context(&self, workspace_path: &str) -> Result<String, String> {
         let patterns: Vec<(String, f64)> = self
             .db
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
                     "SELECT description, confidence FROM learned_patterns \
-                     WHERE workspace_path = ?1 AND confidence >= 0.7 ORDER BY confidence DESC LIMIT 10",
+                     WHERE workspace_path = ?1 AND confidence >= 0.7 AND last_confirmed_at IS NOT NULL \
+                     ORDER BY confidence DESC LIMIT 10",
                 )?;
                 let rows = stmt.query_map(params![workspace_path], |row| {
                     Ok((row.get(0)?, row.get(1)?))

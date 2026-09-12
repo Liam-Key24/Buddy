@@ -6,6 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod view_model;
+pub use view_model::{view_model_from_json, Fact, ToolViewModel};
+
 /// Configurable communication profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonalityProfile {
@@ -114,6 +117,9 @@ pub fn style_response(profile: &PersonalityProfile, content: &str) -> String {
 }
 
 fn phrase_json_result(tool: &str, value: &Value) -> Option<String> {
+    if let Some(vm) = view_model::view_model_from_json(tool, value) {
+        return Some(vm.render());
+    }
     if let Some(msg) = phrase_delete(value) {
         return Some(msg);
     }
@@ -1698,5 +1704,11 @@ mod tests {
         assert!(topic.contains("topic"), "{topic}");
         let wt = phrase_tool_result("fitness.log_weight", r#"{"kg":81.2,"date":"2026-08-09"}"#);
         assert!(wt.contains("81.2"), "{wt}");
+        let plan = phrase_tool_result(
+            "goal.propose_plan",
+            r#"{"weekly_minutes_requested":420,"needs_approval":true,"assumptions":["Released time stays free"]}"#,
+        );
+        assert!(plan.contains("420"), "{plan}");
+        assert!(plan.contains("approve"), "{plan}");
     }
 }
