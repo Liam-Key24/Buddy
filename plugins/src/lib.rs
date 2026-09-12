@@ -4,6 +4,7 @@ pub mod echo;
 pub mod external;
 pub mod fitness;
 pub mod fs;
+pub mod goals;
 pub mod manager;
 pub mod money;
 pub mod research;
@@ -28,6 +29,7 @@ pub struct ExternalPlugin;
 pub use calendar::CalendarPlugin;
 pub use docs::DocsPlugin;
 pub use fitness::FitnessPlugin;
+pub use goals::GoalsPlugin;
 pub use manager::{seed_plugin_settings, ExtraTool, PluginManager, PluginSurface};
 pub use money::MoneyPlugin;
 pub use research::ResearchPlugin;
@@ -394,6 +396,7 @@ pub fn all_builtin_plugins() -> Vec<Box<dyn BuddyPlugin>> {
         Box::new(ExternalPlugin),
         Box::new(CalendarPlugin),
         Box::new(TodosPlugin),
+        Box::new(GoalsPlugin),
         Box::new(DocsPlugin),
         Box::new(ResearchPlugin),
         Box::new(StudyPlugin),

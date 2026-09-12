@@ -153,6 +153,26 @@ fn detect_life_admin(input: &SkillDetectIn<'_>) -> bool {
     has_any(input.lower, &["send email", "email this", "git push", "push to github"])
 }
 
+fn detect_goals(input: &SkillDetectIn<'_>) -> bool {
+    let record_only = has_any(input.lower, &["i spent", "i ate", "i earned"])
+        && !has_any(input.lower, &["i want", "below", "goal"]);
+    if record_only {
+        return false;
+    }
+    has_any(
+        input.lower,
+        &[
+            "i want to",
+            "my goal",
+            "my goals",
+            "by december",
+            "keep food spending",
+            "plan my goals",
+            "behind on",
+        ],
+    ) || (has_word(input.lower, "goal") && has_actiony(input.lower))
+}
+
 pub const SKILLS: &[SkillSpec] = &[
     SkillSpec {
         id: "organise",
@@ -255,6 +275,19 @@ pub const SKILLS: &[SkillSpec] = &[
         detect: detect_build,
     },
     SkillSpec {
+        id: "goals",
+        domain: "goal",
+        description: "Turn ambiguous goals into an approved calendar plan",
+        tool_prefixes: &["goal."],
+        examples: &[
+            "By December I want to climb V6, save £2,000 and read two books.",
+            "I want to keep food spending below £250 this month.",
+        ],
+        presentation_hint: "Ask only plan-changing questions; never commit the week silently",
+        include_in_full_kit: false,
+        detect: detect_goals,
+    },
+    SkillSpec {
         id: "life_admin",
         domain: "external",
         description: "Email and git push",
@@ -316,6 +349,10 @@ mod tests {
             ("list my logged workouts", "fitness"),
             ("what's on Friday", "organise"),
             ("add a todo to buy milk", "todos"),
+            (
+                "By December I want to climb V6, save £2,000 and read two books.",
+                "goals",
+            ),
         ];
         for (text, skill) in cases {
             let ids = skill_ids_for_turn(text, None);

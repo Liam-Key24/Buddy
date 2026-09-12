@@ -87,10 +87,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "024_integrity_and_indexes",
         include_str!("../migrations/024_integrity_and_indexes.sql"),
     ),
-    (
-        "025_money_pots",
-        include_str!("../migrations/025_money_pots.sql"),
-    ),
+        (
+            "025_money_pots",
+            include_str!("../migrations/025_money_pots.sql"),
+        ),
+        ("026_goals", include_str!("../migrations/026_goals.sql")),
 ];
 
 /// Quote FTS5 terms so user input cannot change match operators.
@@ -106,6 +107,7 @@ pub(crate) fn fts_match_query(query: &str) -> String {
 
 mod documents;
 mod fitness;
+mod goals;
 mod money;
 mod research;
 mod socials;
@@ -114,6 +116,7 @@ mod todos;
 
 pub use documents::*;
 pub use fitness::*;
+pub use goals::*;
 pub use money::*;
 pub use research::*;
 pub use socials::*;
