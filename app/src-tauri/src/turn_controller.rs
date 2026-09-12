@@ -1,16 +1,74 @@
-//! Single control plane for a chat turn.
+//! Control plane for a chat turn.
 //!
 //! Every user message enters [`TurnController::handle`]. Deterministic gates
 //! run first; model adaptation is a hidden [`ModelLane`] policy. Llama is never
 //! a product mode. `/chat/plan` and `brain/parser.py` stay eval-only.
 
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
 
 use crate::native_loop::ChatMode;
 use crate::orchestrator;
+use crate::run_control::RunScope;
+use crate::runtime_policy::RuntimePolicy;
 use crate::state::AppState;
-use crate::turn_trace::TurnPath;
-use tauri::AppHandle;
+use crate::turn_trace::{self, TurnPath, TurnTrace};
+
+/// Explicit Cool Mode turn states. The controller owns the transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPhase {
+    Understand,
+    Clarify,
+    Propose,
+    Approve,
+    Execute,
+    Present,
+}
+
+impl TurnPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Understand => "understand",
+            Self::Clarify => "clarify",
+            Self::Propose => "propose",
+            Self::Approve => "approve",
+            Self::Execute => "execute",
+            Self::Present => "present",
+        }
+    }
+}
+
+/// One live turn: policy, clock, and the trace the gates mutate.
+pub struct TurnSession {
+    pub policy: RuntimePolicy,
+    pub started: Instant,
+    pub trace: TurnTrace,
+}
+
+impl TurnSession {
+    pub fn begin(conversation_id: &str, text: &str, ui_context: Option<&str>) -> Self {
+        let mut trace = TurnTrace::new(conversation_id);
+        trace.skill_ids = crate::skills::skill_ids_for_turn(text, ui_context)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut session = Self {
+            policy: RuntimePolicy::cool(),
+            started: Instant::now(),
+            trace,
+        };
+        session.set_phase(TurnPhase::Understand);
+        session
+    }
+
+    pub fn set_phase(&mut self, phase: TurnPhase) {
+        self.trace.phase = Some(phase.as_str().into());
+    }
+}
 
 /// Envelope for one user turn. UI does not choose a model.
 #[derive(Debug, Clone)]
@@ -57,18 +115,48 @@ impl ModelLane {
 pub struct TurnController;
 
 impl TurnController {
-    /// Only production front door for chat.
+    /// Only production front door for chat. Rejects a second live turn.
     pub async fn handle(
         app: AppHandle,
         state: &AppState,
         request: TurnRequest,
     ) -> Result<(), String> {
-        orchestrator::send_message(
+        let mut session = TurnSession::begin(
+            &request.conversation_id,
+            &request.text,
+            request.ui_context.as_deref(),
+        );
+
+        let scope = match RunScope::try_start(&state.runs, &request.conversation_id) {
+            Ok(scope) => scope,
+            Err(busy) => {
+                let content = "I'm still finishing the last request. Stop it first if you want to start something new.";
+                let _ = app.emit("chat-chunk", content);
+                session.trace.exit_reason = Some("busy".into());
+                session.set_phase(TurnPhase::Present);
+                let ctx = state.memory.ctx(&request.conversation_id);
+                session.trace.set_path(TurnPath::Busy);
+                turn_trace::finish_turn_trace(&app, state, &mut session.trace, session.started);
+                orchestrator::persist_assistant_turn(
+                    &app,
+                    state,
+                    &ctx,
+                    &request.conversation_id,
+                    content,
+                    &json!({"intent":"busy","active": busy.conversation_id}).to_string(),
+                )?;
+                return Ok(());
+            }
+        };
+
+        orchestrator::run_turn(
             app,
             state,
             request.conversation_id,
             request.text,
             request.ui_context,
+            &scope.guard,
+            &mut session,
         )
         .await
     }
@@ -80,7 +168,31 @@ impl TurnController {
         field: String,
         value: String,
     ) -> Result<(), String> {
-        orchestrator::resolve_clarification(app, state, conversation_id, field, value).await
+        let session = TurnSession::begin(&conversation_id, &value, None);
+        let scope = match RunScope::try_start(&state.runs, &conversation_id) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return Err(
+                    "I'm still finishing the last request. Stop it first if you want to continue."
+                        .into(),
+                );
+            }
+        };
+        orchestrator::resolve_clarification(
+            app,
+            state,
+            conversation_id,
+            field,
+            value,
+            &scope.guard,
+            &session.policy,
+        )
+        .await
+    }
+
+    /// Only place the production turn picks a hidden inference lane.
+    pub fn lane_for(text: &str, ui_context: Option<&str>, qwen_resident: bool) -> ModelLane {
+        ModelLane::select(crate::native_loop::is_trivial_chat(text, ui_context), qwen_resident)
     }
 }
 
@@ -100,5 +212,31 @@ mod tests {
     fn llama_lane_maps_to_internal_talk_flag_only() {
         assert_eq!(ModelLane::LlamaTalk.native_mode(), ChatMode::Talk);
         assert_eq!(ModelLane::QwenComplete.native_mode(), ChatMode::Tool);
+    }
+
+    #[test]
+    fn llama_never_maps_to_a_tool_lane() {
+        assert_ne!(ModelLane::LlamaTalk.native_mode(), ChatMode::Tool);
+        assert_eq!(ModelLane::LlamaTalk.path(), TurnPath::TalkLlama);
+        assert_eq!(ModelLane::QwenComplete.path(), TurnPath::CompleteQwen);
+    }
+
+    #[test]
+    fn controller_picks_the_lane_from_text() {
+        assert_eq!(
+            TurnController::lane_for("hey", None, false),
+            ModelLane::LlamaTalk
+        );
+        assert_eq!(
+            TurnController::lane_for("book the dentist tomorrow at 2", None, false),
+            ModelLane::QwenComplete
+        );
+    }
+
+    #[test]
+    fn session_starts_in_understand() {
+        let session = TurnSession::begin("c1", "hello", None);
+        assert_eq!(session.trace.phase.as_deref(), Some("understand"));
+        assert_eq!(TurnPhase::Present.as_str(), "present");
     }
 }

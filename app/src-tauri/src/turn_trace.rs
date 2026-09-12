@@ -23,6 +23,9 @@ pub enum TurnPath {
     TalkRespond,
     CompleteQwen,
     ModelError,
+    Busy,
+    Budget,
+    Deadline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,18 @@ pub struct TurnTrace {
     pub tool_steps: u32,
     pub clarification_count: u32,
     pub latency_ms: u64,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub exit_reason: Option<String>,
+    #[serde(default)]
+    pub safety_budget: bool,
+    #[serde(default)]
+    pub approval_stopped: bool,
+    #[serde(default)]
+    pub mlx_unloaded: bool,
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 impl TurnTrace {
@@ -48,6 +63,12 @@ impl TurnTrace {
             tool_steps: 0,
             clarification_count: 0,
             latency_ms: 0,
+            skill_ids: Vec::new(),
+            exit_reason: None,
+            safety_budget: false,
+            approval_stopped: false,
+            mlx_unloaded: false,
+            phase: None,
         }
     }
 
@@ -69,6 +90,7 @@ pub fn path_expects_zero_model_calls(path: TurnPath) -> bool {
             | TurnPath::Extract
             | TurnPath::LastLook
             | TurnPath::OpenJob
+            | TurnPath::Busy
     )
 }
 
@@ -121,6 +143,12 @@ pub fn finish_turn_trace(
             "tool_steps": trace.tool_steps,
             "clarification_count": trace.clarification_count,
             "latency_ms": trace.latency_ms,
+            "skill_ids": trace.skill_ids,
+            "exit_reason": trace.exit_reason,
+            "safety_budget": trace.safety_budget,
+            "approval_stopped": trace.approval_stopped,
+            "mlx_unloaded": trace.mlx_unloaded,
+            "phase": trace.phase,
         }),
     );
 }
@@ -134,9 +162,12 @@ mod tests {
         assert!(path_expects_zero_model_calls(TurnPath::Canonical));
         assert!(path_expects_zero_model_calls(TurnPath::Extract));
         assert!(path_expects_zero_model_calls(TurnPath::LastLook));
+        assert!(path_expects_zero_model_calls(TurnPath::Busy));
         assert!(!path_expects_zero_model_calls(TurnPath::TalkLlama));
         assert!(!path_expects_zero_model_calls(TurnPath::CompleteQwen));
         assert!(!path_expects_zero_model_calls(TurnPath::ResumeNative));
+        assert!(!path_expects_zero_model_calls(TurnPath::Budget));
+        assert!(!path_expects_zero_model_calls(TurnPath::Deadline));
     }
 
     #[test]
@@ -144,6 +175,7 @@ mod tests {
         assert_eq!(talk_policy_path(true, false), TurnPath::TalkLlama);
         assert_eq!(talk_policy_path(true, true), TurnPath::CompleteQwen);
         assert_eq!(talk_policy_path(false, false), TurnPath::CompleteQwen);
+        assert_eq!(talk_policy_path(false, true), TurnPath::CompleteQwen);
     }
 
     #[test]

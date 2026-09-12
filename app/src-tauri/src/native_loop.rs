@@ -1,12 +1,9 @@
 //! Native tool-call agent loop: Brain `/v1/complete` + Core execution.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use buddy_calendar::parse_when_label;
-use buddy_clarification::{
-    looks_like_proposal, JobPhase, MissingField, PendingClarification,
-};
-use buddy_core::AskKind;
 use buddy_memory::{HistoryMessage, MemoryContext};
 use buddy_personality::{phrase_tool_result, style_response, PersonalityProfile};
 use serde::{Deserialize, Serialize};
@@ -15,20 +12,14 @@ use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
 use crate::calendar_look;
-use crate::calendar_proposal::{
-    emit_proposal, proposal_from_organize, save_proposal,
-};
 use crate::memory_extraction::BrainMemoryContext;
 use crate::orchestrator::{
-    emit_trace, execute_tool_step, run_tool_with_tracking, AgentTurn, ScratchStep, ToolStepOutcome,
+    emit_trace, execute_tool_step, AgentTurn, ScratchStep, ToolStepOutcome,
 };
 use crate::run_control::RunGuard;
+use crate::runtime_policy::{tool_fingerprint, RuntimePolicy};
 use crate::state::AppState;
-use crate::turn_trace::TurnTrace;
-
-const MAX_NATIVE_STEPS: usize = 8;
-/// Tool-calling can stall on a huge kit; fail faster than a silent 90s hang.
-const COMPLETE_TIMEOUT: Duration = Duration::from_secs(25);
+use crate::turn_trace::{TurnPath, TurnTrace};
 
 /// Internal complete-loop flag, mapped from [`crate::turn_controller::ModelLane`].
 /// Not a product-facing mode.
@@ -198,6 +189,7 @@ async fn brain_complete(
     run: &RunGuard,
     max_tokens: u32,
     temperature: f32,
+    timeout: Duration,
 ) -> Result<CompleteHttp, String> {
     info!("native complete waiting on /v1/complete");
     let request = client
@@ -224,7 +216,7 @@ async fn brain_complete(
         _ = run.cancelled() => {
             Err("stopped".into())
         }
-        _ = tokio::time::sleep(COMPLETE_TIMEOUT) => {
+        _ = tokio::time::sleep(timeout) => {
             Err("model timed out".into())
         }
         res = http => res,
@@ -248,6 +240,8 @@ pub async fn run_native_turn(
     run: &RunGuard,
     chat_mode: ChatMode,
     trace: &mut TurnTrace,
+    policy: &RuntimePolicy,
+    started: Instant,
 ) -> Result<NativeOutcome, String> {
     let conv_kind = state
         .db
@@ -325,22 +319,39 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
     );
     let mut last_content = String::new();
     let mut used_tools: Vec<String> = Vec::new();
+    let mut phrased: Vec<String> = Vec::new();
     let mut last_doc_output: Option<String> = None;
+    let mut seen_tools: HashSet<String> = HashSet::new();
+    let max_steps = policy.max_model_calls.max(1) as usize;
+    let planned_tools = 0u32;
 
-    for step in 0..MAX_NATIVE_STEPS {
+    for step in 0..max_steps {
         if run.is_cancelled() {
+            save_transcript(state, conversation_id, &transcript);
             return Ok(stopped_outcome(app, state, conversation_id, personality));
+        }
+        if started.elapsed() >= policy.turn_deadline {
+            trace.safety_budget = true;
+            trace.exit_reason = Some("deadline".into());
+            trace.set_path(TurnPath::Deadline);
+            save_transcript(state, conversation_id, &transcript);
+            let content = budget_message(personality, used_tools.len() as u32, planned_tools, "the time limit");
+            let _ = app.emit("chat-chunk", &content);
+            return Ok(NativeOutcome::Paused(content));
+        }
+        if trace.model_call_count >= policy.max_model_calls {
+            break;
         }
         emit_trace(
             app,
             "planning",
-            &format!("Waiting on model ({}/{MAX_NATIVE_STEPS})", step + 1),
+            &format!("Waiting on model ({}/{})", step + 1, max_steps),
         );
         crate::orchestrator::wake_mlx(app, state).await;
         let (max_tokens, temperature) = if chat_mode == ChatMode::Talk {
-            (512_u32, 0.7_f32)
+            (policy.tokens_for_llama(), 0.7_f32)
         } else {
-            (2048_u32, 0.2_f32)
+            (policy.tokens_for_qwen(), 0.2_f32)
         };
         let mut complete = match brain_complete(
             client,
@@ -350,6 +361,7 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
             run,
             max_tokens,
             temperature,
+            policy.model_timeout,
         )
         .await
         {
@@ -360,10 +372,11 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
             Err(err) => {
                 warn!(error = %err, step, "native complete failed");
                 if run.is_cancelled() || err == "stopped" {
+                    save_transcript(state, conversation_id, &transcript);
                     return Ok(stopped_outcome(app, state, conversation_id, personality));
                 }
                 if err.contains("timed out") {
-                    state.memory.clear_agent_turn(conversation_id);
+                    save_transcript(state, conversation_id, &transcript);
                     let content = style_response(
                         personality,
                         "That took too long. Stop next time, or try a shorter question.",
@@ -374,9 +387,10 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 if step == 0 && !resume {
                     return Ok(NativeOutcome::Fallback(err));
                 }
+                save_transcript(state, conversation_id, &transcript);
                 let content = style_response(
                     personality,
-                    &format!("I couldn't reach the model ({err})."),
+                    "The local model is unavailable. Completed work is saved.",
                 );
                 let _ = app.emit("chat-chunk", &content);
                 return Ok(NativeOutcome::Paused(content));
@@ -392,14 +406,12 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 .trim()
                 .is_empty()
             {
-                complete.content = Some(
-                    "I'm in Talk mode, so I can only chat. Switch to Tool to change your data."
-                        .into(),
-                );
+                complete.content = Some("I can only chat right now.".into());
             }
         }
 
         if !complete.tool_calls.is_empty() {
+            let planned = complete.tool_calls.len() as u32;
             let openai_calls: Vec<Value> = complete
                 .tool_calls
                 .iter()
@@ -420,17 +432,34 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 "tool_calls": openai_calls,
             }));
 
-            let mut last_tool = String::new();
-            let mut last_output = String::new();
-            let all_terminal = complete.tool_calls.iter().all(|c| {
-                is_terminal_calendar_tool(&remap_legacy_tool(&c.name))
-            });
-
+            let mut capped = false;
             for call in &complete.tool_calls {
+                if started.elapsed() >= policy.turn_deadline {
+                    trace.safety_budget = true;
+                    trace.exit_reason = Some("deadline".into());
+                    trace.set_path(TurnPath::Deadline);
+                    capped = true;
+                    break;
+                }
+                if trace.tool_steps >= policy.max_tool_executions {
+                    trace.safety_budget = true;
+                    trace.exit_reason = Some("tool_budget".into());
+                    trace.set_path(TurnPath::Budget);
+                    capped = true;
+                    break;
+                }
                 let tool_name = remap_legacy_tool(&call.name);
                 let mut input = arguments_string(&call.arguments);
                 if tool_name != call.name {
                     input = remap_legacy_input(&call.name, &input);
+                }
+                let fingerprint = tool_fingerprint(&tool_name, &input);
+                if !seen_tools.insert(fingerprint) {
+                    trace.safety_budget = true;
+                    trace.exit_reason = Some("repeat_tool".into());
+                    trace.set_path(TurnPath::Budget);
+                    capped = true;
+                    break;
                 }
                 let dummy_turn = AgentTurn {
                     goal: transcript.goal.clone(),
@@ -453,6 +482,7 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                         used_tools.push(tool_name.clone());
                         trace.tool_steps += 1;
                         trace.clarification_count += 1;
+                        trace.approval_stopped = true;
                         transcript.messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call.id,
@@ -481,8 +511,7 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 if tool_name == "calendar.organize" {
                     transcript.last_organize_input = Some(input.clone());
                 }
-                last_tool = tool_name.clone();
-                last_output = output.clone();
+                phrased.push(phrase_tool_result(&tool_name, &output));
                 used_tools.push(tool_name.clone());
                 trace.tool_steps += 1;
                 if tool_name.starts_with("docs.") {
@@ -493,17 +522,24 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 }
                 remember_life_look(state, conversation_id, &tool_name, &input);
             }
-            if all_terminal && !last_output.is_empty() && !output_has_error(&last_output) {
-                emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
-                state.memory.clear_pending_clarification(conversation_id);
-                state.memory.clear_agent_turn(conversation_id);
-                let content =
-                    style_response(personality, &phrase_tool_result(&last_tool, &last_output));
-                let _ = app.emit("chat-chunk", &content);
-                return Ok(NativeOutcome::Done(content));
-            }
+            emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
             save_transcript(state, conversation_id, &transcript);
-            continue;
+            let mut content = if phrased.is_empty() {
+                style_response(personality, "I couldn't complete those actions.")
+            } else {
+                style_response(personality, &phrased.join("\n"))
+            };
+            if capped {
+                content = budget_message(personality, used_tools.len() as u32, planned, "the safe work limit");
+            } else {
+                state.memory.clear_pending_clarification(conversation_id);
+            }
+            let _ = app.emit("chat-chunk", &content);
+            return Ok(if capped {
+                NativeOutcome::Paused(content)
+            } else {
+                NativeOutcome::Done(content)
+            });
         }
 
         let text_out = complete.content.unwrap_or_default();
@@ -515,32 +551,47 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
         emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
         let _ = app.emit("chat-chunk", &last_content);
         state.memory.clear_pending_clarification(conversation_id);
-        state.memory.clear_agent_turn(conversation_id);
         return Ok(NativeOutcome::Done(last_content));
     }
 
-    let content = if last_content.is_empty() {
-        style_response(
-            personality,
-            "I hit my step limit for this turn — tell me what to do next.",
-        )
-    } else {
-        last_content
-    };
-    emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
     save_transcript(state, conversation_id, &transcript);
+    trace.safety_budget = true;
+    trace.exit_reason = Some("model_budget".into());
+    trace.set_path(TurnPath::Budget);
+    let content = budget_message(personality, used_tools.len() as u32, planned_tools, "the safe work limit");
+    emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
     let _ = app.emit("chat-chunk", &content);
     Ok(NativeOutcome::Paused(content))
 }
 
+fn budget_message(
+    personality: &PersonalityProfile,
+    completed: u32,
+    planned: u32,
+    limit_name: &str,
+) -> String {
+    let remain = planned.saturating_sub(completed);
+    let body = if planned > 0 && remain > 0 {
+        format!(
+            "I stopped this turn after completing {completed} of {planned} actions because it reached {limit_name}. The completed actions are saved. {remain} actions remain—continue when you’re ready."
+        )
+    } else if completed > 0 {
+        format!(
+            "I stopped this turn after completing {completed} actions because it reached {limit_name}. The completed actions are saved. Continue when you’re ready."
+        )
+    } else {
+        format!("I stopped this turn because it reached {limit_name}. Nothing new was saved.")
+    };
+    style_response(personality, &body)
+}
+
 fn stopped_outcome(
     app: &AppHandle,
-    state: &AppState,
-    conversation_id: &str,
+    _state: &AppState,
+    _conversation_id: &str,
     personality: &PersonalityProfile,
 ) -> NativeOutcome {
-    state.memory.clear_agent_turn(conversation_id);
-    let content = style_response(personality, "Stopped.");
+    let content = style_response(personality, "Stopped. Completed work is saved.");
     let _ = app.emit("chat-chunk", &content);
     NativeOutcome::Stopped(content)
 }
@@ -972,46 +1023,6 @@ pub fn resolve_life_look_intent(
     None
 }
 
-/// Run fitness/study/money/spark/todo reads without MLX.
-pub fn try_fast_life_look(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    conversation_id: &str,
-    text: &str,
-    ui_context: Option<&str>,
-    history: &[HistoryMessage],
-) -> Option<String> {
-    if fast_stringed_plan(text, ui_context).is_some() {
-        return None;
-    }
-    let saved = state.memory.get_last_life_look_raw(conversation_id);
-    let resolved = resolve_life_look_intent(text, ui_context, history, saved.as_deref());
-    let (tool, input) = match resolved {
-        Some(pair) => pair,
-        None if is_life_followup(text) => {
-            let content = style_response(
-                personality,
-                "What should I list — workouts, food, weight, study sessions, spend, or todos?",
-            );
-            let _ = app.emit("chat-chunk", &content);
-            return Some(content);
-        }
-        None => return None,
-    };
-    emit_trace(app, "running", &format!("Fast {tool}"));
-    let start = Instant::now();
-    let output = run_tool_with_tracking(state, app, ctx, &tool, &input, start).ok()?;
-    if output_has_error(&output) {
-        return None;
-    }
-    remember_life_look(state, conversation_id, &tool, &input);
-    emit_workspace_focus(app, &[tool.clone()], None);
-    let content = style_response(personality, &phrase_tool_result(&tool, &output));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LifeDump {
@@ -1151,81 +1162,6 @@ pub fn fast_life_write_intents_ctx(
     out
 }
 
-fn remember_after_write(state: &AppState, conversation_id: &str, tool: &str) {
-    let (look_tool, look_input) = match tool {
-        "money.log" => ("money.list", "{}"),
-        "money.pot" => ("money.pots", "{}"),
-        "fitness.log_food" => ("fitness.look", r#"{"what":"food"}"#),
-        "fitness.log_workout" => ("fitness.look", r#"{"what":"workouts"}"#),
-        "fitness.fridge" => ("fitness.look", r#"{"what":"fridge"}"#),
-        "todo.add" => ("todo.list", "{}"),
-        "study.log_session" => ("study.look", r#"{"what":"sessions"}"#),
-        "save_spark" => ("list_sparks", r#"{"status":"active"}"#),
-        _ => return,
-    };
-    remember_life_look(state, conversation_id, look_tool, look_input);
-}
-
-pub fn try_fast_life_write(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    conversation_id: &str,
-    text: &str,
-    ui_context: Option<&str>,
-) -> Option<String> {
-    if fast_stringed_plan(text, ui_context).is_some() {
-        return None;
-    }
-    let dump = classify_life_dump(text, ui_context);
-    let jobs = fast_life_write_intents_ctx(text, ui_context);
-    if jobs.is_empty() {
-        if dump.money || dump.food {
-            let hint = if dump.money {
-                "I couldn't parse that. Try “rent £497.50”, “spent £12 on lunch”, or “holiday pot £200, emergency £500”."
-            } else {
-                "I couldn't parse that into a food log. Try “I ate a burrito” or list meals with “then”."
-            };
-            let content = style_response(personality, hint);
-            let _ = app.emit("chat-chunk", &content);
-            return Some(content);
-        }
-        return None;
-    }
-    let mut bits = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
-    for (tool, input) in jobs {
-        emit_trace(app, "running", &format!("Fast {tool}"));
-        let start = Instant::now();
-        let output = run_tool_with_tracking(state, app, ctx, tool, &input, start).ok()?;
-        if output_has_error(&output) {
-            return None;
-        }
-        let mut msg = phrase_tool_result(tool, &output);
-        if tool == "fitness.log_food" {
-            msg.push_str(" Numbers are estimates.");
-        }
-        bits.push(msg);
-        tools.push(tool.to_string());
-        remember_after_write(state, conversation_id, tool);
-    }
-    emit_workspace_focus(app, &tools, None);
-    let content = style_response(personality, &bits.join("\n"));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
-}
-
-fn deadline_ymd(when: &str) -> String {
-    let today = chrono::Local::now().date_naive();
-    let d = match when {
-        "today" => today,
-        "tomorrow" => today.succ_opt().unwrap_or(today),
-        _ => today.succ_opt().unwrap_or(today),
-    };
-    d.format("%Y-%m-%d").to_string()
-}
-
 fn count_easy_todos(lower: &str) -> usize {
     if !(has_any(lower, &["todo", "to-do", "to do", "to dos", "tasks"])
         || lower.contains("to dos"))
@@ -1247,36 +1183,11 @@ fn count_easy_todos(lower: &str) -> usize {
     2
 }
 
-fn parse_ui_subject(ui_context: Option<&str>) -> Option<(String, String)> {
-    let ctx = ui_context?;
-    let marker = "subject \"";
-    let i = ctx.find(marker)?;
-    let rest = &ctx[i + marker.len()..];
-    let name_end = rest.find('"')?;
-    let name = rest[..name_end].trim();
-    if name.is_empty() {
-        return None;
-    }
-    let after = &rest[name_end..];
-    let id = after
-        .find("id=")
-        .map(|j| {
-            after[j + 3..]
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .filter(|s| !s.is_empty());
-    Some((name.to_string(), id.unwrap_or_default()))
-}
-
 struct StringedSpec {
     when: String,
     wants_slot: bool,
     spark_n: usize,
     todo_n: usize,
-    easy: bool,
     wants_study_write: bool,
 }
 
@@ -1323,7 +1234,6 @@ fn fast_stringed_spec(text: &str, _ui_context: Option<&str>) -> Option<StringedS
         wants_slot,
         spark_n,
         todo_n,
-        easy: lower.contains("easy") || lower.contains("low"),
         wants_study_write,
     })
 }
@@ -1488,219 +1398,6 @@ fn study_event_title(look_output: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn study_has_topic(output: &str, name: &str) -> bool {
-    let want = name.trim().to_ascii_lowercase();
-    parse_json_items(output).iter().any(|t| {
-        t.get("name")
-            .and_then(|n| n.as_str())
-            .map(|n| n.trim().eq_ignore_ascii_case(&want))
-            .unwrap_or(false)
-    })
-}
-
-fn pick_study_assignment_titles(output: &str, n: usize) -> Vec<String> {
-    parse_json_items(output)
-        .into_iter()
-        .filter(|a| {
-            !a.get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .eq_ignore_ascii_case("completed")
-        })
-        .filter_map(|a| {
-            a.get("title")
-                .and_then(|t| t.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .take(n)
-        .collect()
-}
-
-fn run_stringed_step(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    conversation_id: &str,
-    bits: &mut Vec<String>,
-    tools: &mut Vec<String>,
-    tool: &str,
-    input: &str,
-) -> Option<String> {
-    emit_trace(app, "running", &format!("Fast {tool}"));
-    let start = Instant::now();
-    let output = run_tool_with_tracking(state, app, ctx, tool, input, start).ok()?;
-    if output_has_error(&output) {
-        return None;
-    }
-    bits.push(phrase_tool_result(tool, &output));
-    tools.push(tool.to_string());
-    remember_after_write(state, conversation_id, tool);
-    if tool == "calendar.look" {
-        calendar_look::remember_look(state, conversation_id, &output);
-    }
-    if tool == "calendar.organize" && looks_like_proposal(tool, input, &output) {
-        if let Some(proposal) = proposal_from_organize(conversation_id, input, &output) {
-            save_proposal(state, &proposal);
-            emit_proposal(app, &proposal);
-        }
-    }
-    remember_life_look(state, conversation_id, tool, input);
-    Some(output)
-}
-
-pub fn try_fast_stringed(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    conversation_id: &str,
-    text: &str,
-    ui_context: Option<&str>,
-) -> Option<String> {
-    let spec = fast_stringed_spec(text, ui_context)?;
-    let reads = stringed_read_jobs(&spec);
-    if reads.len() < 2 {
-        return None;
-    }
-    let mut bits = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
-    let mut look_out = None;
-    let mut spark_out = None;
-    let mut todo_out = None;
-    let mut topics_out = None;
-    let mut assigns_out = None;
-
-    for (tool, input) in &reads {
-        let output = run_stringed_step(
-            app,
-            state,
-            ctx,
-            conversation_id,
-            &mut bits,
-            &mut tools,
-            tool,
-            input,
-        )?;
-        match *tool {
-            "calendar.look" => look_out = Some(output),
-            "list_sparks" => spark_out = Some(output),
-            "todo.list" => todo_out = Some(output),
-            "study.look" if input.contains("\"topics\"") => topics_out = Some(output),
-            "study.look" if input.contains("\"assignments\"") => assigns_out = Some(output),
-            _ => {}
-        }
-    }
-
-    let spark_titles = spark_out
-        .as_deref()
-        .map(|o| pick_spark_titles(o, spec.spark_n))
-        .unwrap_or_default();
-    if spec.spark_n > 0 && spark_titles.is_empty() {
-        bits.push("No active sparks to put on the calendar.".into());
-    }
-
-    let todo_titles = todo_out
-        .as_deref()
-        .map(|o| pick_todo_titles(o, spec.todo_n, spec.easy))
-        .unwrap_or_default();
-    if spec.todo_n > 0 && todo_titles.is_empty() {
-        bits.push(if spec.easy {
-            "No easy open tasks to schedule.".into()
-        } else {
-            "No open tasks to schedule.".into()
-        });
-    }
-
-    if spec.wants_study_write {
-        let (subject_name, subject_id) = parse_ui_subject(ui_context)
-            .unwrap_or_else(|| ("General".into(), String::new()));
-        let from_event = look_out
-            .as_deref()
-            .and_then(study_event_title)
-            .filter(|t| !t.eq_ignore_ascii_case("study"));
-        let topic_name = from_event.unwrap_or_else(|| subject_name.clone());
-        let already = topics_out
-            .as_deref()
-            .map(|o| study_has_topic(o, &topic_name))
-            .unwrap_or(false);
-        if !already && !topic_name.is_empty() {
-            let mut topic = json!({
-                "name": topic_name,
-                "deadline": deadline_ymd(&spec.when),
-                "priority": "medium",
-            });
-            if !subject_id.is_empty() {
-                topic["subject_id"] = json!(subject_id);
-            } else {
-                topic["subject"] = json!(subject_name);
-            }
-            run_stringed_step(
-                app,
-                state,
-                ctx,
-                conversation_id,
-                &mut bits,
-                &mut tools,
-                "study.upsert_topic",
-                &topic.to_string(),
-            )?;
-        }
-        let existing = assigns_out
-            .as_deref()
-            .map(|o| pick_study_assignment_titles(o, 2))
-            .unwrap_or_default();
-        if existing.is_empty() {
-            bits.push("No assignments on that subject yet — not inventing titles.".into());
-        }
-    }
-
-    if spec.wants_slot {
-        let mut organize_items: Vec<Value> = Vec::new();
-        for title in &spark_titles {
-            organize_items.push(json!({
-                "title": title,
-                "duration": "45m",
-                "when": "after_work",
-                "count": 1
-            }));
-        }
-        for title in &todo_titles {
-            organize_items.push(json!({
-                "title": title,
-                "duration": "30m",
-                "when": "after_work",
-                "count": 1
-            }));
-        }
-        if !organize_items.is_empty() {
-            let input = json!({
-                "window": spec.when,
-                "mode": "propose",
-                "constraints": ["after_work"],
-                "items": organize_items,
-            })
-            .to_string();
-            run_stringed_step(
-                app,
-                state,
-                ctx,
-                conversation_id,
-                &mut bits,
-                &mut tools,
-                "calendar.organize",
-                &input,
-            )?;
-        }
-    }
-
-    emit_workspace_focus(app, &tools, None);
-    let content = style_response(personality, &bits.join("\n"));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
 }
 
 /// High-precision calendar shortcut: look / clock-pin only. Organize never matches.
@@ -2936,11 +2633,6 @@ fn parse_food_logs(lower: &str, force: bool) -> Option<Vec<String>> {
     )
 }
 
-#[allow(dead_code)]
-fn parse_food_log(lower: &str) -> Option<String> {
-    parse_food_logs(lower, false)?.into_iter().next()
-}
-
 fn parse_workout_sets(lower: &str) -> Vec<Value> {
     let mut sets = Vec::new();
     for chunk in lower.split(|c: char| matches!(c, ',' | ';' | '&')) {
@@ -3296,101 +2988,6 @@ fn curriculum_subject_name(text: &str, topic: &str) -> Option<String> {
     None
 }
 
-/// Deterministic syllabus ingest — Module quizzes + Final Exam under one topic.
-pub fn try_fast_study_curriculum(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    text: &str,
-    ui_context: Option<&str>,
-) -> Option<String> {
-    let plan = parse_study_curriculum(text)?;
-    let (ui_subject, ui_subject_id) = parse_ui_subject(ui_context)
-        .map(|(n, id)| (Some(n), id))
-        .unwrap_or((None, String::new()));
-    let subject_name = plan
-        .subject
-        .clone()
-        .or(ui_subject)
-        .unwrap_or_else(|| "General".into());
-
-    let mut bits = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
-
-    let mut topic_payload = json!({
-        "name": plan.topic,
-        "priority": "medium",
-        "notes": "Course outline imported from syllabus",
-    });
-    if !ui_subject_id.is_empty() {
-        topic_payload["subject_id"] = json!(ui_subject_id);
-    } else {
-        topic_payload["subject"] = json!(subject_name);
-    }
-
-    emit_trace(app, "running", "Fast study.upsert_topic");
-    let start = Instant::now();
-    let topic_out = run_tool_with_tracking(
-        state,
-        app,
-        ctx,
-        "study.upsert_topic",
-        &topic_payload.to_string(),
-        start,
-    )
-    .ok()?;
-    if output_has_error(&topic_out) {
-        return None;
-    }
-    tools.push("study.upsert_topic".into());
-    bits.push(phrase_tool_result("study.upsert_topic", &topic_out));
-    let topic_id = serde_json::from_str::<Value>(&topic_out)
-        .ok()
-        .and_then(|v| v.get("id")?.as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    for a in &plan.assignments {
-        let mut payload = json!({
-            "title": a.title,
-            "kind": a.kind,
-            "priority": "medium",
-            "status": "not_started",
-        });
-        if let Some(notes) = &a.notes {
-            payload["notes"] = json!(notes);
-        }
-        if !topic_id.is_empty() {
-            payload["topic_id"] = json!(topic_id);
-        }
-        if !ui_subject_id.is_empty() {
-            payload["subject_id"] = json!(ui_subject_id);
-        } else {
-            payload["subject"] = json!(subject_name);
-        }
-        emit_trace(app, "running", "Fast study.upsert_assignment");
-        let start = Instant::now();
-        let out = run_tool_with_tracking(
-            state,
-            app,
-            ctx,
-            "study.upsert_assignment",
-            &payload.to_string(),
-            start,
-        )
-        .ok()?;
-        if output_has_error(&out) {
-            return None;
-        }
-        tools.push("study.upsert_assignment".into());
-        bits.push(phrase_tool_result("study.upsert_assignment", &out));
-    }
-
-    emit_workspace_focus(app, &tools, None);
-    let content = style_response(personality, &bits.join("\n"));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
-}
 
 fn parse_study_log(lower: &str) -> Option<String> {
     if !(has_word(lower, "study") || lower.contains("studied") || lower.contains("revision")) {
@@ -3630,58 +3227,7 @@ pub fn fast_docs_format_intent(text: &str, ui_context: Option<&str>) -> Option<(
     Some(("docs.format", json!({ "id": title }).to_string()))
 }
 
-pub fn try_fast_docs(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    text: &str,
-    ui_context: Option<&str>,
-) -> Option<String> {
-    if is_multi_intent(text, ui_context) {
-        return None;
-    }
-    let (tool, input) = if let Some(pair) = fast_docs_format_intent(text, ui_context) {
-        pair
-    } else {
-        fast_docs_intent(text)?
-    };
-    emit_trace(app, "running", &format!("Fast {tool}"));
-    let start = Instant::now();
-    let output = run_tool_with_tracking(state, app, ctx, tool, &input, start).ok()?;
-    if output_has_error(&output) {
-        return None;
-    }
-    emit_workspace_focus(app, &[tool.to_string()], Some(&output));
-    let content = style_response(personality, &phrase_tool_result(tool, &output));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
-}
 
-/// Run look / clock-pin without MLX. None = leave to native loop.
-pub fn try_fast_calendar(
-    app: &AppHandle,
-    state: &AppState,
-    ctx: &MemoryContext,
-    personality: &PersonalityProfile,
-    conversation_id: &str,
-    text: &str,
-) -> Option<String> {
-    let (tool, input) = fast_calendar_intent(text)?;
-    emit_trace(app, "running", &format!("Fast {tool}"));
-    let start = Instant::now();
-    let output = run_tool_with_tracking(state, app, ctx, tool, &input, start).ok()?;
-    if output_has_error(&output) {
-        return None;
-    }
-    if tool == "calendar.look" {
-        calendar_look::remember_look(state, conversation_id, &output);
-    }
-    emit_workspace_focus(app, &[tool.to_string()], None);
-    let content = style_response(personality, &phrase_tool_result(tool, &output));
-    let _ = app.emit("chat-chunk", &content);
-    Some(content)
-}
 
 pub fn emit_workspace_focus(app: &AppHandle, tools: &[String], doc_output: Option<&str>) {
     let mut pages: Vec<String> = Vec::new();
@@ -3754,17 +3300,6 @@ fn extract_doc_id(output: &str) -> Option<String> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
         })
-}
-
-fn output_has_error(output: &str) -> bool {
-    serde_json::from_str::<Value>(output)
-        .ok()
-        .and_then(|v| v.get("error").cloned())
-        .is_some()
-}
-
-fn is_terminal_calendar_tool(name: &str) -> bool {
-    name == "calendar.look" || name == "calendar.pin"
 }
 
 #[cfg(test)]
@@ -4373,6 +3908,17 @@ on Tue 11 Aug, 8:45 AM–4:45 PM"#;
                 .any(|p| *p == "save_spark" || *p == "list_sparks"),
             "{prefixes:?}"
         );
+    }
+
+    #[test]
+    fn llama_talk_never_receives_tools() {
+        assert!(selectors_for_turn("how are you?", None, ChatMode::Talk).is_empty());
+        assert!(selectors_for_turn(
+            "had eggs for breakfast, dentist tomorrow at 2pm",
+            None,
+            ChatMode::Talk
+        )
+        .is_empty());
     }
 }
 

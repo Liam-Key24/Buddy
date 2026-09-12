@@ -61,6 +61,14 @@ def test_apply_no_think_last_user():
     assert again[-1]["content"].count("/no_think") == 1
 
 
+def test_cool_mode_token_caps():
+    from mlx_client import AGENT_MAX_TOKENS, CHAT_MAX_TOKENS, NARRATE_MAX_TOKENS
+
+    assert AGENT_MAX_TOKENS == 1024
+    assert CHAT_MAX_TOKENS == 256
+    assert NARRATE_MAX_TOKENS == 256
+
+
 def test_think_stream_filter_drops_reasoning():
     filt = ThinkStreamFilter()
     assert filt.push("<think>secret") == ""
@@ -73,5 +81,6 @@ if __name__ == "__main__":
     test_qwen_json_tool_call()
     test_openai_tool_calls_win()
     test_apply_no_think_last_user()
+    test_cool_mode_token_caps()
     test_think_stream_filter_drops_reasoning()
     print("ok complete parser")

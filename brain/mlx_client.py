@@ -4,15 +4,15 @@ from openai import OpenAI
 
 from complete import ThinkStreamFilter, apply_no_think, parse_completion_message, strip_think
 
-AGENT_MAX_TOKENS = 2048
+AGENT_MAX_TOKENS = 1024
 CHAT_MAX_TOKENS = 256
-NARRATE_MAX_TOKENS = 512
+NARRATE_MAX_TOKENS = 256
 AGENT_TEMPERATURE = 0.2
 
 
 class MLXClient:
     def __init__(self, base_url: str, model: str):
-        self.client = OpenAI(base_url=base_url, api_key="not-needed", timeout=90.0)
+        self.client = OpenAI(base_url=base_url, api_key="not-needed", timeout=15.0)
         self.model = model
 
     def _create(self, **kwargs):

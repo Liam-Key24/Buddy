@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use buddy_core::{excluded_paths_from_setting, ToolResult};
 use serde::Serialize;
-use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
 use crate::orchestrator;

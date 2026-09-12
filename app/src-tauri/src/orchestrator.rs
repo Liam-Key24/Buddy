@@ -2,7 +2,7 @@
 //! Messy language goes to Qwen (`/v1/complete`). Llama is a hidden chat cache.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use buddy_clarification::{
     clarify, is_cancel_phrase, is_confirm_phrase, is_soft_constraint_phrase,
@@ -28,10 +28,11 @@ use crate::calendar_proposal::{self, clear_proposal};
 use crate::memory_api;
 use crate::memory_extraction::BrainMemoryContext;
 use crate::native_loop::{self, load_transcript, NativeOutcome};
-use crate::run_control::{RunGuard, RunScope};
+use crate::run_control::RunGuard;
+use crate::runtime_policy::RuntimePolicy;
 use crate::services::{talk_recovery, ProcessManager, TalkRecovery};
 use crate::state::AppState;
-use crate::turn_controller::ModelLane;
+use crate::turn_controller::{ModelLane, TurnController, TurnPhase, TurnSession};
 use crate::turn_trace::{self, TurnPath, TurnTrace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,22 +56,19 @@ struct RespondRequest {
     tool_result: Option<String>,
 }
 
-#[instrument(skip(state, app), fields(conversation_id = %conversation_id))]
-pub async fn send_message(
+#[instrument(skip(state, app, run, session), fields(conversation_id = %conversation_id))]
+pub async fn run_turn(
     app: AppHandle,
     state: &AppState,
     conversation_id: String,
     text: String,
     ui_context: Option<String>,
+    run: &RunGuard,
+    session: &mut TurnSession,
 ) -> Result<(), String> {
     info!(text = %text, "user request");
     emit_trace(&app, "planning", "Reading context");
-
-    let started = Instant::now();
-    let mut trace = TurnTrace::new(&conversation_id);
-
-    let _scope = RunScope::start(&state.runs, &conversation_id);
-    let run = &_scope.guard;
+    session.set_phase(TurnPhase::Understand);
 
     let ctx = state.memory.ctx(&conversation_id);
     let merged = state.memory.get_context(&conversation_id, &text).await;
@@ -147,14 +145,15 @@ pub async fn send_message(
                 content: content.clone(),
             },
         );
-        trace.tool_steps = 1;
-        seal_trace(&app, state, &mut trace, TurnPath::ForceConfirm, started);
+        session.trace.tool_steps = 1;
+        seal_session(&app, state, session, TurnPath::ForceConfirm);
         let _ = app.emit("chat-done", ());
         return Ok(());
     }
 
     // Confirm an open organize proposal without a model round.
     if is_confirm_phrase(&text) {
+        session.set_phase(TurnPhase::Approve);
         if calendar_proposal::load_proposal(state, Some(&conversation_id)).is_some()
             || calendar_proposal::load_proposal(state, None).is_some()
         {
@@ -195,8 +194,8 @@ pub async fn send_message(
                             content: content.clone(),
                         },
                     );
-                    trace.tool_steps = 1;
-                    seal_trace(&app, state, &mut trace, TurnPath::ProposalCommit, started);
+                    session.trace.tool_steps = 1;
+                    seal_session(&app, state, session, TurnPath::ProposalCommit);
                     let _ = app.emit("chat-done", ());
                     return Ok(());
                 }
@@ -218,7 +217,7 @@ pub async fn send_message(
                 .db
                 .add_message(&conversation_id, "assistant", &content)
                 .map_err(|e| e.to_string())?;
-            seal_trace(&app, state, &mut trace, TurnPath::ProposalCancel, started);
+            seal_session(&app, state, session, TurnPath::ProposalCancel);
             let _ = app.emit("chat-done", ());
             return Ok(());
         }
@@ -233,6 +232,7 @@ pub async fn send_message(
 
     // One front door: canonical syntax / plugin extract → Core. Messy NL → Qwen.
     if !pending_open {
+        session.set_phase(TurnPhase::Execute);
         if let Some(content) = try_canonical_route(
             &app,
             state,
@@ -240,7 +240,7 @@ pub async fn send_message(
             &conversation_id,
             &text,
             &personality,
-            &mut trace,
+            &mut session.trace,
         )
         .await?
         {
@@ -248,7 +248,7 @@ pub async fn send_message(
                 RouteKind::Extract => TurnPath::Extract,
                 _ => TurnPath::Canonical,
             };
-            seal_trace(&app, state, &mut trace, path, started);
+            seal_session(&app, state, session, path);
             persist_assistant_turn(
                 &app,
                 state,
@@ -262,7 +262,7 @@ pub async fn send_message(
         if let Some(content) =
             calendar_look::try_resolve(&app, state, &conversation_id, &personality, &text)
         {
-            seal_trace(&app, state, &mut trace, TurnPath::LastLook, started);
+            seal_session(&app, state, session, TurnPath::LastLook);
             persist_assistant_turn(
                 &app,
                 state,
@@ -292,12 +292,14 @@ pub async fn send_message(
             true,
             run,
             native_loop::ChatMode::Tool,
-            &mut trace,
+            &mut session.trace,
+            &session.policy,
+            session.started,
         )
         .await?
         {
             NativeOutcome::Stopped(content) => {
-                seal_trace(&app, state, &mut trace, TurnPath::ResumeNative, started);
+                seal_session(&app, state, session, TurnPath::ResumeNative);
                 persist_assistant_turn(
                     &app,
                     state,
@@ -325,7 +327,7 @@ pub async fn send_message(
                         content: content.clone(),
                     },
                 );
-                seal_trace(&app, state, &mut trace, TurnPath::ResumeNative, started);
+                seal_session(&app, state, session, TurnPath::ResumeNative);
                 let _ = app.emit("chat-done", ());
                 return Ok(());
             }
@@ -373,16 +375,16 @@ pub async fn send_message(
                 content: content.clone(),
             },
         );
-        seal_trace(&app, state, &mut trace, TurnPath::OpenJob, started);
+        session.set_phase(TurnPhase::Execute);
+        seal_session(&app, state, session, TurnPath::OpenJob);
         let _ = app.emit("chat-done", ());
         return Ok(());
     }
 
-    let trivial = native_loop::is_trivial_chat(&text, ui_context.as_deref());
     let qwen_resident = app
         .try_state::<Arc<ProcessManager>>()
         .is_some_and(|pm| pm.tool_model_loaded(state));
-    let lane = ModelLane::select(trivial, qwen_resident);
+    let lane = TurnController::lane_for(&text, ui_context.as_deref(), qwen_resident);
     let chat_mode = lane.native_mode();
 
     // Llama is only a latency cache for short chitchat when Qwen is not already loaded.
@@ -396,12 +398,14 @@ pub async fn send_message(
             &memory,
             &personality,
             run,
-            &mut trace,
+            &mut session.trace,
+            &session.policy,
         )
         .await
         {
             Ok(content) => {
-                seal_trace(&app, state, &mut trace, TurnPath::TalkLlama, started);
+                session.set_phase(TurnPhase::Present);
+                seal_session(&app, state, session, lane.path());
                 persist_assistant_turn(
                     &app,
                     state,
@@ -413,11 +417,26 @@ pub async fn send_message(
                 return Ok(());
             }
             Err(err) => {
-                warn!(error = %err, "chat stream failed — falling through to Qwen");
+                warn!(error = %err, "chat stream failed — not starting a second model route");
+                let content = style_response(
+                    &personality,
+                    "I couldn't reach the local chat model. Try again in a moment.",
+                );
+                seal_session(&app, state, session, TurnPath::ModelError);
+                persist_assistant_turn(
+                    &app,
+                    state,
+                    &ctx,
+                    &conversation_id,
+                    &content,
+                    &json!({"intent":"error","talk":true}).to_string(),
+                )?;
+                return Ok(());
             }
         }
     }
 
+    session.set_phase(TurnPhase::Execute);
     wake_mlx(&app, state).await;
     match native_loop::run_native_turn(
         &app,
@@ -433,12 +452,14 @@ pub async fn send_message(
         false,
         run,
         chat_mode,
-        &mut trace,
+        &mut session.trace,
+        &session.policy,
+        session.started,
     )
     .await?
     {
         NativeOutcome::Stopped(content) => {
-            seal_trace(&app, state, &mut trace, TurnPath::CompleteQwen, started);
+            seal_session(&app, state, session, lane.path());
             persist_assistant_turn(
                 &app,
                 state,
@@ -466,7 +487,7 @@ pub async fn send_message(
                     content: content.clone(),
                 },
             );
-            seal_trace(&app, state, &mut trace, TurnPath::CompleteQwen, started);
+            seal_session(&app, state, session, lane.path());
             let _ = app.emit("chat-done", ());
             return Ok(());
         }
@@ -476,7 +497,7 @@ pub async fn send_message(
                 &personality,
                 "I couldn't reach the local model. Try again in a moment.",
             );
-            seal_trace(&app, state, &mut trace, TurnPath::ModelError, started);
+            seal_session(&app, state, session, TurnPath::ModelError);
             persist_assistant_turn(
                 &app,
                 state,
@@ -700,7 +721,29 @@ async fn try_canonical_route(
     let mut replies: Vec<String> = Vec::new();
     let mut used_tools: Vec<String> = Vec::new();
     let mut last_doc: Option<String> = None;
+    let policy = crate::runtime_policy::RuntimePolicy::cool();
+    let mut seen = std::collections::HashSet::new();
+    let planned = jobs.len() as u32;
     for job in jobs {
+        if trace.tool_steps >= policy.max_tool_executions {
+            trace.safety_budget = true;
+            trace.exit_reason = Some("tool_budget".into());
+            replies.push(format!(
+                "I stopped this turn after completing {} of {planned} actions because it reached the safe work limit. The completed actions are saved.",
+                used_tools.len()
+            ));
+            break;
+        }
+        let fingerprint = crate::runtime_policy::tool_fingerprint(&job.tool, &job.input);
+        if !seen.insert(fingerprint) {
+            trace.safety_budget = true;
+            trace.exit_reason = Some("repeat_tool".into());
+            replies.push(format!(
+                "I stopped this turn after completing {} of {planned} actions because it reached the safe work limit. The completed actions are saved.",
+                used_tools.len()
+            ));
+            break;
+        }
         match execute_tool_step(
             app,
             state,
@@ -716,6 +759,7 @@ async fn try_canonical_route(
         {
             ToolStepOutcome::NeedsUser(content) => {
                 trace.clarification_count += 1;
+                trace.approval_stopped = true;
                 return Ok(Some(content));
             }
             ToolStepOutcome::Done { output, content }
@@ -946,13 +990,15 @@ async fn dispatch_tool(
 }
 
 /// Resolve a structured clarification answer and continue the agent loop.
-#[instrument(skip(state, app), fields(conversation_id = %conversation_id))]
+#[instrument(skip(state, app, _run, _policy), fields(conversation_id = %conversation_id))]
 pub async fn resolve_clarification(
     app: AppHandle,
     state: &AppState,
     conversation_id: String,
     field: String,
     value: String,
+    _run: &RunGuard,
+    _policy: &RuntimePolicy,
 ) -> Result<(), String> {
     let Some(pending) = state.memory.get_pending_clarification(&conversation_id) else {
         return Err("No pending clarification to resolve.".into());
@@ -961,8 +1007,7 @@ pub async fn resolve_clarification(
     let started = Instant::now();
     let mut trace = TurnTrace::new(&conversation_id);
     trace.clarification_count = 1;
-
-    let _scope = RunScope::start(&state.runs, &conversation_id);
+    trace.phase = Some(TurnPhase::Clarify.as_str().into());
 
     emit_trace(&app, "clarifying", &format!("Resolved {field}"));
 
@@ -1141,6 +1186,7 @@ async fn stream_talk_reply(
     personality: &PersonalityProfile,
     run: &RunGuard,
     trace: &mut TurnTrace,
+    policy: &RuntimePolicy,
 ) -> Result<String, String> {
     if let Some(pm) = app.try_state::<Arc<ProcessManager>>() {
         emit_trace(app, "planning", "Checking Brain");
@@ -1174,22 +1220,25 @@ async fn stream_talk_reply(
                         recycled = true;
                     }
                     TalkRecovery::FallbackRespond => {
-                        emit_trace(app, "responding", "Talk fallback");
-                        trace.set_path(TurnPath::TalkRespond);
-                        trace.model = Some("qwen".into());
-                        trace.model_call_count += 1;
-                        return stream_chat_reply(
-                            app,
-                            state,
-                            client,
-                            text,
-                            history,
-                            memory,
-                            personality,
-                            run,
-                            false,
-                        )
-                        .await;
+                        if policy.allows_model_fallback {
+                            emit_trace(app, "responding", "Talk fallback");
+                            trace.set_path(TurnPath::TalkRespond);
+                            trace.model = Some("qwen".into());
+                            trace.model_call_count += 1;
+                            return stream_chat_reply(
+                                app,
+                                state,
+                                client,
+                                text,
+                                history,
+                                memory,
+                                personality,
+                                run,
+                                false,
+                            )
+                            .await;
+                        }
+                        return Err(err);
                     }
                     TalkRecovery::GiveUp => return Err(err),
                 }
@@ -1222,6 +1271,7 @@ async fn try_stream_talk(
             "message": text,
             "history": recent,
             "model": ProcessManager::chat_model(state),
+            "max_tokens": RuntimePolicy::cool().tokens_for_llama(),
         }),
     );
     let resp = tokio::select! {
@@ -1241,7 +1291,7 @@ async fn try_stream_talk(
     let mut stream = resp.bytes_stream();
     let mut assistant_content = String::new();
     let mut got_token = false;
-    let first_token = tokio::time::sleep(Duration::from_secs(90));
+    let first_token = tokio::time::sleep(RuntimePolicy::cool().model_timeout);
     tokio::pin!(first_token);
     loop {
         tokio::select! {
@@ -1335,7 +1385,7 @@ async fn stream_chat_reply(
     let mut stream = resp.bytes_stream();
     let mut assistant_content = String::new();
     let mut got_token = false;
-    let first_token = tokio::time::sleep(Duration::from_secs(90));
+    let first_token = tokio::time::sleep(RuntimePolicy::cool().model_timeout);
     tokio::pin!(first_token);
     loop {
         tokio::select! {
@@ -1380,7 +1430,7 @@ async fn stream_chat_reply(
     Ok(assistant_content)
 }
 
-fn persist_assistant_turn(
+pub(crate) fn persist_assistant_turn(
     app: &AppHandle,
     state: &AppState,
     ctx: &MemoryContext,
@@ -1410,8 +1460,7 @@ fn persist_stopped(
     conversation_id: &str,
     personality: &PersonalityProfile,
 ) -> Result<(), String> {
-    state.memory.clear_agent_turn(conversation_id);
-    let content = style_response(personality, "Stopped.");
+    let content = style_response(personality, "Stopped. Completed work is saved.");
     let _ = app.emit("chat-chunk", &content);
     persist_assistant_turn(
         app,
@@ -1443,6 +1492,11 @@ async fn cancellable_json<T: serde::de::DeserializeOwned>(
         _ = run.cancelled() => Err("stopped".into()),
         res = http => res,
     }
+}
+
+fn seal_session(app: &AppHandle, state: &AppState, session: &mut TurnSession, path: TurnPath) {
+    session.set_phase(TurnPhase::Present);
+    seal_trace(app, state, &mut session.trace, path, session.started);
 }
 
 fn seal_trace(

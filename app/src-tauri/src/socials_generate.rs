@@ -8,11 +8,10 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::runtime_policy::RuntimePolicy;
 use crate::services::ProcessManager;
 use crate::state::AppState;
 
-const COMPLETE_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_TOKENS: u32 = 3072;
 const TEMPERATURE: f32 = 0.75;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -123,8 +122,9 @@ pub async fn generate_week(
         .map(|i| i.id)
         .collect();
 
+    let policy = RuntimePolicy::cool();
     let client = reqwest::Client::builder()
-        .timeout(COMPLETE_TIMEOUT + Duration::from_secs(5))
+        .timeout(policy.model_timeout + Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -224,15 +224,16 @@ async fn complete_posts(
     brain_url: &str,
     user: &str,
 ) -> Result<Vec<GeneratedSlot>, String> {
+    let policy = RuntimePolicy::cool();
     let resp = tokio::time::timeout(
-        COMPLETE_TIMEOUT,
+        policy.model_timeout,
         client.post(format!("{brain_url}/v1/complete")).json(&json!({
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ],
             "tools": [],
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": policy.tokens_for_qwen(),
             "temperature": TEMPERATURE,
         })).send(),
     )

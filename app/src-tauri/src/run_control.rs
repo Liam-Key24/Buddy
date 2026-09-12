@@ -1,4 +1,5 @@
 //! In-flight chat turn cancellation. One active run at a time.
+//! A second begin is rejected; it never replaces a live guard.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,6 +10,15 @@ pub struct RunGuard {
     pub conversation_id: String,
     cancelled: AtomicBool,
     notify: Notify,
+}
+
+impl std::fmt::Debug for RunGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunGuard")
+            .field("conversation_id", &self.conversation_id)
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
 }
 
 impl RunGuard {
@@ -32,20 +42,34 @@ impl RunGuard {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusyRun {
+    pub conversation_id: String,
+}
+
 #[derive(Default)]
 pub struct RunControl {
     active: Mutex<Option<Arc<RunGuard>>>,
 }
 
 impl RunControl {
-    pub fn begin(&self, conversation_id: &str) -> Arc<RunGuard> {
+    /// Start a turn, or reject if another uncancelled turn is live.
+    pub fn try_begin(&self, conversation_id: &str) -> Result<Arc<RunGuard>, BusyRun> {
+        let mut lock = self.active.lock().expect("run control");
+        if let Some(existing) = lock.as_ref() {
+            if !existing.is_cancelled() {
+                return Err(BusyRun {
+                    conversation_id: existing.conversation_id.clone(),
+                });
+            }
+        }
         let guard = Arc::new(RunGuard {
             conversation_id: conversation_id.to_string(),
             cancelled: AtomicBool::new(false),
             notify: Notify::new(),
         });
-        *self.active.lock().expect("run control") = Some(guard.clone());
-        guard
+        *lock = Some(guard.clone());
+        Ok(guard)
     }
 
     pub fn active(&self) -> Option<Arc<RunGuard>> {
@@ -81,16 +105,56 @@ pub struct RunScope<'a> {
 }
 
 impl<'a> RunScope<'a> {
-    pub fn start(control: &'a RunControl, conversation_id: &str) -> Self {
-        Self {
+    pub fn try_start(control: &'a RunControl, conversation_id: &str) -> Result<Self, BusyRun> {
+        Ok(Self {
             control,
-            guard: control.begin(conversation_id),
-        }
+            guard: control.try_begin(conversation_id)?,
+        })
     }
 }
 
 impl Drop for RunScope<'_> {
     fn drop(&mut self) {
         self.control.end(&self.guard);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_turn_is_rejected_while_first_is_live() {
+        let control = RunControl::default();
+        let first = control.try_begin("c1").expect("first turn");
+        let busy = match control.try_begin("c2") {
+            Err(busy) => busy,
+            Ok(_) => panic!("second turn"),
+        };
+        assert_eq!(busy.conversation_id, "c1");
+        assert!(!first.is_cancelled());
+        assert!(control.active().is_some_and(|g| Arc::ptr_eq(&g, &first)));
+    }
+
+    #[test]
+    fn replacing_the_slot_never_happens_so_no_orphan_guard() {
+        let control = RunControl::default();
+        let first = control.try_begin("c1").unwrap();
+        assert!(control.try_begin("c1").is_err());
+        control.end(&first);
+        let second = control.try_begin("c2").expect("after end");
+        assert_eq!(second.conversation_id, "c2");
+        assert!(control.active().is_some_and(|g| Arc::ptr_eq(&g, &second)));
+    }
+
+    #[test]
+    fn cancel_then_begin_is_allowed() {
+        let control = RunControl::default();
+        let first = control.try_begin("c1").unwrap();
+        first.cancel();
+        let second = control.try_begin("c2").expect("cancelled slot");
+        assert_eq!(second.conversation_id, "c2");
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
     }
 }

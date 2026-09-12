@@ -13,6 +13,7 @@ mod memory_extraction;
 mod memory_tools;
 mod orchestrator;
 mod run_control;
+mod runtime_policy;
 mod secrets;
 mod services;
 mod skills;

@@ -7,10 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::runtime_policy::RuntimePolicy;
 use crate::state::AppState;
-
-/// Stop the 8B server shortly after chat so it cannot sit at 100% CPU.
-const MLX_IDLE_SECS: u64 = 90;
 
 /// Brain `/health.api` required for Talk + native complete.
 pub const BRAIN_API_MIN: u32 = 2;
@@ -180,7 +178,7 @@ impl ProcessManager {
         Self::clear_port(port);
     }
 
-    /// Stop an owned MLX process after chat goes idle (unless keep-warm is on).
+    /// Stop an owned MLX process after Cool Mode idle (auto_start_mlx is keep-warm).
     pub fn spawn_idle_watcher(self: &Arc<Self>, state: Arc<AppState>) {
         let pm = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -202,7 +200,7 @@ impl ProcessManager {
                     continue;
                 }
                 let idle = ProcessManager::now_secs().saturating_sub(last);
-                if idle >= MLX_IDLE_SECS {
+                if idle >= RuntimePolicy::cool().mlx_idle.as_secs() {
                     info!(idle_secs = idle, "stopping idle mlx");
                     pm.stop_mlx();
                 }
@@ -811,6 +809,10 @@ mod brain_health_tests {
         assert!(talk_error_is_stale(err));
         assert_eq!(talk_recovery(err, false), TalkRecovery::RecycleBrain);
         assert_eq!(talk_recovery(err, true), TalkRecovery::FallbackRespond);
+        assert!(
+            !crate::runtime_policy::RuntimePolicy::cool().allows_model_fallback,
+            "Cool Mode must not execute FallbackRespond as a second model route"
+        );
     }
 
     #[test]

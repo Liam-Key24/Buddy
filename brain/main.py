@@ -174,6 +174,7 @@ class TalkRequest(BaseModel):
     message: str = Field(..., max_length=MAX_MESSAGE_CHARS)
     history: list[HistoryMessage] = Field(default_factory=list, max_length=MAX_HISTORY_ITEMS)
     model: Optional[str] = None
+    max_tokens: int = CHAT_MAX_TOKENS
 
 
 class CompleteMessage(BaseModel):
@@ -359,7 +360,7 @@ def chat_talk(req: TalkRequest):
             for chunk in mlx.stream_simple(
                 system=TALK_SYSTEM,
                 messages=messages,
-                max_tokens=CHAT_MAX_TOKENS,
+                max_tokens=min(req.max_tokens, CHAT_MAX_TOKENS),
                 temperature=0.7,
                 model=req.model,
             ):
