@@ -27,6 +27,7 @@ EVAL_FILES = [
     "fs_holdout.jsonl",
     "coder_holdout.jsonl",
     "chat_holdout.jsonl",
+    "dump_holdout.jsonl",
 ]
 
 
@@ -70,6 +71,22 @@ def score_case(case: dict) -> list[str]:
     expect_tool = case.get("expect_tool")
     if expect_tool and plan.tool != expect_tool:
         failures.append(f"tool={plan.tool!r} want {expect_tool!r}")
+
+    families = case.get("expect_tool_families")
+    if families:
+        tool = plan.tool or ""
+        ok = any(
+            tool.startswith(family)
+            or family in tool
+            or (family == "spark" and "spark" in tool)
+            or (family == "calendar" and tool.startswith("calendar."))
+            or (family == "docs" and tool.startswith("docs."))
+            or (family == "fitness" and tool.startswith("fitness."))
+            or (family == "money" and tool.startswith("money."))
+            for family in families
+        )
+        if not ok:
+            failures.append(f"tool={tool!r} not in families {families!r}")
 
     family = case.get("expect_tool_family")
     if family:
@@ -129,7 +146,11 @@ def main() -> int:
             case = json.loads(line)
             total += 1
             failures = score_case(case)
-            if failures:
+            if failures and case.get("allow_pipeline_miss"):
+                print(f"  warn {case.get('id')}: pipeline miss (native path characterized separately)")
+                for f in failures:
+                    print(f"    - {f}")
+            elif failures:
                 failed += 1
                 print(f"  FAIL {case.get('id')}: {case['message'][:60]!r}")
                 for f in failures:

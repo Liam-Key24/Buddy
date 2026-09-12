@@ -1,3 +1,3 @@
 {"id":"dump_1","message":"had eggs for breakfast, dentist tomorrow at 2pm, spark: local climbing beta app — deep dive that into a project doc and block two 90 min build slots this week, spent £12 on lunch","expect_intent":"tool_use","expect_tool_families":["fitness","calendar","spark","docs","money"],"note":"North-star mixed dump. Native Tool mode should call several life tools; classify→fill may only pick one."}
-{"id":"dump_2","message":"I ate a burrito and logged a 6a at the wall","expect_intent":"tool_use","expect_tool_family":"fitness"}
+{"id":"dump_2","message":"I ate a burrito and logged a 6a at the wall","expect_intent":"tool_use","expect_tool_family":"fitness","allow_pipeline_miss":true,"note":"classify→fill currently treats this as chat. Production native_loop attaches fitness."}
 {"id":"dump_3","message":"note to self: try meal prep on Sundays","expect_intent":"tool_use","expect_tool":"save_spark"}

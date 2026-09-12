@@ -4114,9 +4114,9 @@ mod life_tools_filter_tests {
         calendar_only_tool_filter, fast_calendar_intent, fast_life_look_intent,
         classify_life_dump, fast_life_write_intents, fast_life_write_intents_ctx, fast_stringed_plan,
         is_life_followup, is_multi_intent,
-        mixed_life_intent, page_for_tool, parse_study_curriculum, pick_spark_titles,
-        pick_todo_titles, resolve_life_look_intent, selectors_for_turn, study_event_title,
-        tool_prefixes_for_turn, turn_wants_tools, ChatMode,
+        is_trivial_chat, looks_like_spark_save, mixed_life_intent, page_for_tool,
+        parse_study_curriculum, pick_spark_titles, pick_todo_titles, resolve_life_look_intent,
+        selectors_for_turn, study_event_title, tool_prefixes_for_turn, turn_wants_tools, ChatMode,
     };
     use buddy_memory::HistoryMessage;
 
@@ -4516,6 +4516,59 @@ on Tue 11 Aug, 8:45 AM–4:45 PM"#;
             .as_deref()
             .unwrap_or("")
             .contains("CIA triad"));
+    }
+
+    #[test]
+    fn trivial_chat_skips_tools_messy_dump_does_not() {
+        assert!(is_trivial_chat("how are you?", None));
+        assert!(is_trivial_chat("whats the capital of the uk", None));
+        // Extractable todos still look like chitchat to this heuristic.
+        // orchestrator.route() takes them first, before talk policy.
+        assert!(is_trivial_chat("remind me to call the dentist", None));
+        assert!(!is_trivial_chat(
+            "Tomorrow I have the dentist at 10, need to buy milk after work, spent £25 on dinner, and I had an idea for a climbing tracker.",
+            None,
+        ));
+    }
+
+    #[test]
+    fn dump_holdout_1_is_multi_intent_not_trivial() {
+        let msg = "had eggs for breakfast, dentist tomorrow at 2pm, spark: local climbing beta app — deep dive that into a project doc and block two 90 min build slots this week, spent £12 on lunch";
+        assert!(!is_trivial_chat(msg, None));
+        assert!(is_multi_intent(msg, None));
+        let prefixes = tool_prefixes_for_turn(msg, None);
+        assert!(
+            prefixes.iter().any(|p| p.starts_with("calendar.")),
+            "{prefixes:?}"
+        );
+        assert!(
+            prefixes
+                .iter()
+                .any(|p| *p == "save_spark" || *p == "list_sparks" || *p == "update_spark"),
+            "{prefixes:?}"
+        );
+        assert!(prefixes.iter().any(|p| *p == "money."), "{prefixes:?}");
+        let selectors = selectors_for_turn(msg, None, ChatMode::Tool);
+        assert!(!selectors.is_empty(), "{selectors:?}");
+        assert!(selectors_for_turn(msg, None, ChatMode::Talk).is_empty());
+    }
+
+    #[test]
+    fn dump_holdout_2_and_3_select_expected_families() {
+        let ate = "I ate a burrito and logged a 6a at the wall";
+        assert!(!is_trivial_chat(ate, None));
+        let fitness = tool_prefixes_for_turn(ate, None);
+        assert!(fitness.iter().any(|p| *p == "fitness."), "{fitness:?}");
+
+        let spark = "note to self: try meal prep on Sundays";
+        assert!(looks_like_spark_save(&spark.to_ascii_lowercase()) || !is_trivial_chat(spark, None));
+        let prefixes = tool_prefixes_for_turn(spark, None);
+        assert!(
+            prefixes
+                .iter()
+                .any(|p| *p == "save_spark" || *p == "list_sparks"),
+            "{prefixes:?}"
+        );
     }
 }
 

@@ -967,10 +967,53 @@ mod tests {
         assert!(is_confirm_phrase("add them to my calendar"));
         assert!(is_confirm_phrase("add these"));
         assert!(!is_confirm_phrase("after work"));
+        assert!(!is_confirm_phrase("cancel"));
         assert!(is_soft_constraint_phrase("after work"));
         assert!(is_soft_constraint_phrase("prefer mornings"));
         assert!(is_soft_constraint_phrase("you tell me"));
         assert!(is_soft_constraint_phrase("you decide"));
+    }
+
+    #[test]
+    fn cancel_phrases_detected() {
+        assert!(is_cancel_phrase("cancel"));
+        assert!(is_cancel_phrase("nevermind"));
+        assert!(is_cancel_phrase("never mind"));
+        assert!(is_cancel_phrase("forget it"));
+        assert!(is_cancel_phrase("no"));
+        assert!(!is_cancel_phrase("yes"));
+        assert!(!is_cancel_phrase("go ahead"));
+        assert!(!is_cancel_phrase("after work"));
+    }
+
+    #[test]
+    fn resume_does_not_reask_supplied_title() {
+        let prefs = MapPrefs(HashMap::new());
+        let first = clarify(
+            "calendar.create_event",
+            r#"{"title":"Meet Tom"}"#,
+            Some(&CREATE),
+            &prefs,
+            &ClarificationConfig::default(),
+        );
+        match first {
+            ClarifyResult::NeedsInput { missing, .. } => {
+                assert!(missing.iter().all(|m| m.name != "title"));
+                assert!(missing.iter().any(|m| m.label.contains("time")));
+            }
+            other => panic!("expected NeedsInput, got {other:?}"),
+        }
+        let second = clarify(
+            "calendar.create_event",
+            r#"{"title":"Meet Tom","start_time":1,"end_time":2}"#,
+            Some(&CREATE),
+            &prefs,
+            &ClarificationConfig::default(),
+        );
+        assert!(
+            matches!(second, ClarifyResult::Ready { .. }),
+            "supplied fields must resume without a second ask"
+        );
     }
 
     #[test]

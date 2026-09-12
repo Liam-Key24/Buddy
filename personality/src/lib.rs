@@ -1635,6 +1635,16 @@ mod tests {
     }
 
     #[test]
+    fn phrases_save_spark_keeps_content() {
+        let msg = phrase_tool_result(
+            "save_spark",
+            r#"{"id":"s1","content":"climbing tracker app","status":"active"}"#,
+        );
+        assert!(msg.contains("climbing tracker app"), "{msg}");
+        assert!(!msg.contains("event"), "{msg}");
+    }
+
+    #[test]
     fn phrases_docs_search_hits() {
         let msg = phrase_tool_result(
             "docs.search",

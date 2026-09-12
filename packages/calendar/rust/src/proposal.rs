@@ -101,3 +101,43 @@ pub fn proposal_from_organize(
         blocks,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn propose_output_becomes_stored_proposal() {
+        let proposal = proposal_from_organize(
+            "c1",
+            r#"{"mode":"propose","window":"this_week","items":[{"title":"Climbing","duration_minutes":90}]}"#,
+            r#"{"status":"proposed","apply":false,"scheduled":[{"title":"Climbing","start":1000,"end":6400000,"score":0.8,"reasons":["after work"]}]}"#,
+        )
+        .expect("proposal");
+        assert_eq!(proposal.conversation_id, "c1");
+        assert_eq!(proposal.window.as_deref(), Some("this_week"));
+        assert_eq!(proposal.blocks.len(), 1);
+        assert_eq!(proposal.blocks[0].title, "Climbing");
+        assert_eq!(proposal.items.len(), 1);
+    }
+
+    #[test]
+    fn committed_apply_is_not_a_proposal() {
+        assert!(proposal_from_organize(
+            "c1",
+            r#"{"mode":"commit","apply":true}"#,
+            r#"{"status":"ok","apply":true,"scheduled":[{"title":"Climbing","start":1,"end":2}]}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn empty_scheduled_is_not_a_proposal() {
+        assert!(proposal_from_organize(
+            "c1",
+            r#"{"mode":"propose"}"#,
+            r#"{"status":"proposed","scheduled":[]}"#,
+        )
+        .is_none());
+    }
+}

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use buddy_core::Route;
+use buddy_core::{Route, RouteKind};
 use buddy_database::Database;
 use buddy_memory::MemoryManager;
 use buddy_plugins::PluginManager;
@@ -127,4 +127,25 @@ fn spark_and_chat_do_not_extract() {
         surface.route("how are you today?"),
         Route::Miss
     ));
+}
+
+#[test]
+fn route_kind_marks_canonical_extract_and_miss() {
+    let (_dir, surface) = surface();
+    assert_eq!(
+        surface.route_kind(r#"todo.add title="Buy milk""#),
+        RouteKind::Canonical
+    );
+    assert_eq!(
+        surface.route_kind("remind me to call the dentist"),
+        RouteKind::Extract
+    );
+    assert_eq!(
+        surface.route_kind("what's on today?"),
+        RouteKind::Extract
+    );
+    assert_eq!(
+        surface.route_kind("how are you today?"),
+        RouteKind::Miss
+    );
 }
