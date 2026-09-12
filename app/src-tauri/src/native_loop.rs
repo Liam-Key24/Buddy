@@ -106,6 +106,8 @@ pub enum NativeOutcome {
 }
 
 pub fn load_transcript(state: &AppState, conversation_id: &str) -> Option<NativeTranscript> {
+    // Compatibility reader: WorkItem is authoritative; this still understands
+    // a nested NativeTranscript without thinning it to a scratchpad.
     let raw = state.memory.get_agent_turn(conversation_id)?;
     serde_json::from_str::<NativeTranscript>(&raw)
         .ok()

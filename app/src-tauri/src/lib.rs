@@ -19,6 +19,7 @@ mod socials_generate;
 mod spark_checker;
 mod state;
 mod turn_trace;
+mod work_item;
 
 use std::sync::Arc;
 

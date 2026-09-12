@@ -7,6 +7,7 @@ use buddy_calendar::OrganizeMode;
 use buddy_personality::{phrase_tool_result, style_response, PersonalityProfile};
 
 use crate::state::AppState;
+use crate::work_item::PendingApproval;
 
 pub use buddy_calendar::{proposal_from_organize, StoredCalendarProposal};
 
@@ -22,6 +23,16 @@ pub fn save_proposal(state: &AppState, proposal: &StoredCalendarProposal) {
             .db
             .set_runtime_state(&conv_key(&proposal.conversation_id), &raw);
         let _ = state.db.set_runtime_state(LAST_PROPOSAL_KEY, &raw);
+    }
+    if !proposal.conversation_id.trim().is_empty() {
+        state.memory.attach_approval(
+            &proposal.conversation_id,
+            PendingApproval {
+                kind: "calendar_proposal".into(),
+                tool: Some("calendar.organize".into()),
+                summary: Some(format!("{} proposed blocks", proposal.blocks.len())),
+            },
+        );
     }
 }
 
@@ -48,6 +59,9 @@ pub fn clear_proposal(state: &AppState, app: &AppHandle, conversation_id: Option
         }
     } else {
         let _ = state.db.delete_runtime_state(LAST_PROPOSAL_KEY);
+    }
+    if let Some(id) = conversation_id {
+        state.memory.clear_approval(id);
     }
     let _ = app.emit(
         "calendar-proposal",

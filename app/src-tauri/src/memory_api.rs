@@ -18,6 +18,9 @@ use crate::memory_extraction::{
 };
 use crate::services::ProcessManager;
 use crate::state::AppState;
+use crate::work_item::{
+    hydrate_from_legacy, work_item_key, PendingApproval, WorkItem,
+};
 
 /// Facade Buddy uses instead of talking to Intelligence directly.
 #[derive(Clone)]
@@ -152,26 +155,102 @@ impl MemoryApi {
         format!("pending_clarification:{conversation_id}")
     }
 
-    pub fn get_pending_clarification(
-        &self,
-        conversation_id: &str,
-    ) -> Option<PendingClarification> {
+    fn agent_turn_key(conversation_id: &str) -> String {
+        format!("agent_turn:{conversation_id}")
+    }
+
+    pub fn get_work_item(&self, conversation_id: &str) -> Option<WorkItem> {
+        if let Some(raw) = self
+            .db
+            .get_runtime_state(&work_item_key(conversation_id))
+            .ok()
+            .flatten()
+        {
+            if !raw.trim().is_empty() {
+                if let Ok(item) = serde_json::from_str::<WorkItem>(&raw) {
+                    return Some(item);
+                }
+            }
+        }
+        let pending = self.read_legacy_pending(conversation_id);
+        let turn = self
+            .db
+            .get_runtime_state(&Self::agent_turn_key(conversation_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
+        let item = hydrate_from_legacy(conversation_id, pending, turn.as_deref())?;
+        self.set_work_item(item.clone());
+        self.delete_legacy_workflow_keys(conversation_id);
+        Some(item)
+    }
+
+    pub fn set_work_item(&self, mut item: WorkItem) {
+        if item.conversation_id.trim().is_empty() {
+            return;
+        }
+        item.touch();
+        if let Ok(raw) = serde_json::to_string(&item) {
+            let _ = self
+                .db
+                .set_runtime_state(&work_item_key(&item.conversation_id), &raw);
+        }
+    }
+
+    pub fn clear_work_item(&self, conversation_id: &str) {
+        let _ = self
+            .db
+            .delete_runtime_state(&work_item_key(conversation_id));
+        self.delete_legacy_workflow_keys(conversation_id);
+    }
+
+    fn persist_or_drop(&self, item: WorkItem) {
+        if item.is_idle() {
+            self.clear_work_item(&item.conversation_id);
+        } else {
+            self.set_work_item(item);
+        }
+    }
+
+    fn work_item_or_new(&self, conversation_id: &str) -> WorkItem {
+        self.get_work_item(conversation_id)
+            .unwrap_or_else(|| WorkItem::new(conversation_id))
+    }
+
+    fn read_legacy_pending(&self, conversation_id: &str) -> Option<PendingClarification> {
         let key = Self::pending_key(conversation_id);
         if let Some(raw) = self.db.get_runtime_state(&key).ok().flatten() {
             if !raw.trim().is_empty() {
-                return serde_json::from_str(&raw).ok();
+                if let Ok(pending) = serde_json::from_str::<PendingClarification>(&raw) {
+                    return Some(pending);
+                }
             }
         }
-        // Migrate legacy settings key → Memory runtime state.
         let legacy_key = format!("clarification_pending:{conversation_id}");
         let raw = self.db.get_setting(&legacy_key).ok().flatten()?;
         if raw.trim().is_empty() {
             return None;
         }
-        let pending: PendingClarification = serde_json::from_str(&raw).ok()?;
-        self.set_pending_clarification(conversation_id, pending.clone());
+        serde_json::from_str(&raw).ok()
+    }
+
+    fn delete_legacy_workflow_keys(&self, conversation_id: &str) {
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::pending_key(conversation_id));
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::agent_turn_key(conversation_id));
+        let legacy_key = format!("clarification_pending:{conversation_id}");
         let _ = self.db.set_setting(&legacy_key, "");
-        Some(pending)
+    }
+
+    pub fn get_pending_clarification(
+        &self,
+        conversation_id: &str,
+    ) -> Option<PendingClarification> {
+        self.get_work_item(conversation_id)
+            .and_then(|item| item.pending_clarification)
     }
 
     pub fn set_pending_clarification(
@@ -180,24 +259,30 @@ impl MemoryApi {
         mut pending: PendingClarification,
     ) {
         pending.conversation_id = conversation_id.to_string();
-        if let Ok(raw) = serde_json::to_string(&pending) {
-            let _ = self
-                .db
-                .set_runtime_state(&Self::pending_key(conversation_id), &raw);
-        }
+        let mut item = self.work_item_or_new(conversation_id);
+        item.set_pending(pending);
+        self.set_work_item(item);
+        self.delete_legacy_workflow_keys(conversation_id);
     }
 
     pub fn clear_pending_clarification(&self, conversation_id: &str) {
+        if let Some(mut item) = self.get_work_item(conversation_id) {
+            item.clear_pending();
+            self.persist_or_drop(item);
+        }
         let _ = self
             .db
             .delete_runtime_state(&Self::pending_key(conversation_id));
-    }
-
-    fn agent_turn_key(conversation_id: &str) -> String {
-        format!("agent_turn:{conversation_id}")
+        let legacy_key = format!("clarification_pending:{conversation_id}");
+        let _ = self.db.set_setting(&legacy_key, "");
     }
 
     pub fn get_agent_turn(&self, conversation_id: &str) -> Option<String> {
+        if let Some(item) = self.get_work_item(conversation_id) {
+            if let Some(raw) = item.transcript_json() {
+                return Some(raw);
+            }
+        }
         self.db
             .get_runtime_state(&Self::agent_turn_key(conversation_id))
             .ok()
@@ -206,15 +291,38 @@ impl MemoryApi {
     }
 
     pub fn set_agent_turn(&self, conversation_id: &str, raw: &str) {
-        let _ = self
-            .db
-            .set_runtime_state(&Self::agent_turn_key(conversation_id), raw);
-    }
-
-    pub fn clear_agent_turn(&self, conversation_id: &str) {
+        let mut item = self.work_item_or_new(conversation_id);
+        item.merge_turn_blob(raw);
+        self.set_work_item(item);
         let _ = self
             .db
             .delete_runtime_state(&Self::agent_turn_key(conversation_id));
+    }
+
+    pub fn clear_agent_turn(&self, conversation_id: &str) {
+        if let Some(mut item) = self.get_work_item(conversation_id) {
+            item.clear_transcript();
+            self.persist_or_drop(item);
+        }
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::agent_turn_key(conversation_id));
+    }
+
+    pub fn attach_approval(&self, conversation_id: &str, approval: PendingApproval) {
+        if conversation_id.trim().is_empty() {
+            return;
+        }
+        let mut item = self.work_item_or_new(conversation_id);
+        item.set_approval(approval);
+        self.set_work_item(item);
+    }
+
+    pub fn clear_approval(&self, conversation_id: &str) {
+        if let Some(mut item) = self.get_work_item(conversation_id) {
+            item.clear_approval();
+            self.persist_or_drop(item);
+        }
     }
 
     fn turn_trace_key(conversation_id: &str) -> String {
@@ -493,6 +601,100 @@ mod architecture_tests {
         assert_eq!(loaded.conversation_id, "c1");
         api.clear_pending_clarification("c1");
         assert!(api.get_pending_clarification("c1").is_none());
+    }
+
+    #[test]
+    fn work_item_is_authoritative_and_migrates_legacy_keys() {
+        let db = Arc::new(temp_db());
+        let memory_manager = Arc::new(MemoryManager::new(db.clone()));
+        let intelligence = Arc::new(IntelligenceService::new(
+            db.clone(),
+            memory_manager.clone(),
+            "http://127.0.0.1:9".into(),
+        ));
+        let api = MemoryApi::new(
+            memory_manager,
+            intelligence,
+            db.clone(),
+            PathBuf::from("/tmp"),
+        );
+        let pending = PendingClarification {
+            tool: "todo.add".into(),
+            tool_input: r#"{"title":"milk"}"#.into(),
+            missing: vec![],
+            missing_labels: vec!["deadline".into()],
+            conversation_id: String::new(),
+            follow_up: false,
+            agent_scratchpad: None,
+            agent_goal: Some("buy milk".into()),
+            phase: Default::default(),
+            last_proposal: None,
+        };
+        let _ = db.set_runtime_state(
+            "pending_clarification:c2",
+            &serde_json::to_string(&pending).unwrap(),
+        );
+        let _ = db.set_runtime_state(
+            "agent_turn:c2",
+            r#"{"goal":"buy milk","messages":[{"role":"user","content":"remind me"}],"scratchpad":[]}"#,
+        );
+
+        let item = api.get_work_item("c2").expect("hydrated");
+        assert_eq!(item.objective, "buy milk");
+        assert!(item.pending_clarification.is_some());
+        assert!(item.transcript.is_some());
+        assert!(db
+            .get_runtime_state("work_item:c2")
+            .ok()
+            .flatten()
+            .is_some());
+        assert!(db
+            .get_runtime_state("pending_clarification:c2")
+            .ok()
+            .flatten()
+            .is_none());
+        assert!(db
+            .get_runtime_state("agent_turn:c2")
+            .ok()
+            .flatten()
+            .is_none());
+    }
+
+    #[test]
+    fn new_writes_do_not_use_agent_turn_key() {
+        let db = Arc::new(temp_db());
+        let memory_manager = Arc::new(MemoryManager::new(db.clone()));
+        let intelligence = Arc::new(IntelligenceService::new(
+            db.clone(),
+            memory_manager.clone(),
+            "http://127.0.0.1:9".into(),
+        ));
+        let api = MemoryApi::new(
+            memory_manager,
+            intelligence,
+            db.clone(),
+            PathBuf::from("/tmp"),
+        );
+        api.set_agent_turn(
+            "c3",
+            r#"{"goal":"plan Friday","messages":[{"role":"user","content":"plan Friday"}],"scratchpad":[]}"#,
+        );
+        api.set_agent_turn(
+            "c3",
+            r#"{"goal":"plan Friday","scratchpad":[{"tool":"calendar.look","summary":"looked"}]}"#,
+        );
+        assert!(db
+            .get_runtime_state("agent_turn:c3")
+            .ok()
+            .flatten()
+            .is_none());
+        let raw = api.get_agent_turn("c3").expect("transcript");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(v["scratchpad"][0]["tool"], "calendar.look");
+        let item = api.get_work_item("c3").unwrap();
+        assert_eq!(item.observations.len(), 1);
+        assert_eq!(item.observations[0].payload.as_deref(), Some("calendar.look"));
     }
 }
 
