@@ -234,7 +234,120 @@ const LOOK_SPEC: ToolSpec = ToolSpec {
     respond: RespondMode::Passthrough,
     likely: &["what's on", "whats on", "am i free", "when am i"],
     extract: Some(extract_calendar_look),
+    permission: buddy_core::Permission::None,
+    openai_properties_json: r#"{"when":{"type":"string","description":"today | tomorrow | this_week | next_week | not_today | weekend | YYYY-MM-DD"},"focus":{"type":"string","description":"events | free | work"},"duration_minutes":{"type":"integer"},"query":{"type":"string"}}"#,
 };
+
+const PIN_SPEC: ToolSpec = ToolSpec {
+    name: "calendar.pin",
+    description: "fixed clock event. Use only with an explicit clock time",
+    example: r#"calendar.pin action=create title=Dentist start="tomorrow 14:00""#,
+    schema: ToolSchema {
+        tool: "calendar.pin",
+        fields: PIN_FIELDS,
+    },
+    aliases: &[],
+    rest_field: None,
+    safety: Safety::Immediate,
+    permission: buddy_core::Permission::Confirm,
+    respond: RespondMode::Passthrough,
+    likely: &[],
+    extract: None,
+    openai_properties_json: r#"{"action":{"type":"string","description":"create | update | delete"},"title":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"id":{"type":"string"},"force":{"type":"boolean"}}"#,
+};
+
+const ORGANIZE_SPEC: ToolSpec = ToolSpec {
+    name: "calendar.organize",
+    description: "self-organize flexible time. Always propose first",
+    example: r#"calendar.organize window=this_week mode=propose"#,
+    schema: ToolSchema {
+        tool: "calendar.organize",
+        fields: ORGANIZE_FIELDS,
+    },
+    aliases: &[],
+    rest_field: None,
+    safety: Safety::ProposeFirst,
+    permission: buddy_core::Permission::Confirm,
+    respond: RespondMode::Passthrough,
+    likely: &[],
+    extract: None,
+    openai_properties_json: r#"{"window":{"type":"string"},"mode":{"type":"string","description":"propose | commit"},"constraints":{"type":"array","items":{"type":"string"}},"items":{"type":"array","items":{"type":"object"}}}"#,
+};
+
+const CALENDAR_SPECS: &[ToolSpec] = &[
+    LOOK_SPEC,
+    PIN_SPEC,
+    ORGANIZE_SPEC,
+    ToolSpec::basic(
+        "lifestyle.list_blocks",
+        "list Work/Sleep schedule blocks in a range",
+        r#"lifestyle.list_blocks start=<ms> end=<ms>"#,
+        buddy_core::empty_schema("lifestyle.list_blocks"),
+    ),
+    ToolSpec::basic(
+        "lifestyle.set_schedule",
+        "update permanent Work/Sleep hours",
+        r#"lifestyle.set_schedule kind=work start_hm=09:00 end_hm=17:00"#,
+        buddy_core::empty_schema("lifestyle.set_schedule"),
+    ),
+    ToolSpec::basic(
+        "dream.log",
+        "save a dream to last night's sleep",
+        r#"dream.log body="...""#,
+        ToolSchema {
+            tool: "dream.log",
+            fields: DREAM_LOG_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "dream.list",
+        "list dreams for a sleep night",
+        r#"dream.list sleep_date=2026-09-12"#,
+        buddy_core::empty_schema("dream.list"),
+    ),
+    ToolSpec::basic(
+        "dream.search",
+        "search dreams by text/tags",
+        r#"dream.search query=nightmare"#,
+        buddy_core::empty_schema("dream.search"),
+    ),
+    ToolSpec::basic(
+        "dream.update",
+        "update a dream",
+        r#"dream.update id=<id> body="...""#,
+        buddy_core::empty_schema("dream.update"),
+    ),
+    ToolSpec::basic(
+        "dream.delete",
+        "delete a dream by id",
+        r#"dream.delete id=<id>"#,
+        buddy_core::empty_schema("dream.delete"),
+    ),
+    ToolSpec::basic(
+        "work.log_sales",
+        "record sales for a work day",
+        r#"work.log_sales amount=320"#,
+        ToolSchema {
+            tool: "work.log_sales",
+            fields: WORK_SALES_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "work.set_hours",
+        "override work start/end",
+        r#"work.set_hours end_hm=17:15"#,
+        ToolSchema {
+            tool: "work.set_hours",
+            fields: WORK_HOURS_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "work.get_stats",
+        "hours and sales for today/week/month",
+        r#"work.get_stats"#,
+        buddy_core::empty_schema("work.get_stats"),
+    ),
+];
 
 impl BuddyPlugin for CalendarPlugin {
     fn id(&self) -> &'static str {
@@ -308,7 +421,7 @@ impl BuddyPlugin for CalendarPlugin {
     }
 
     fn tool_specs(&self) -> &'static [ToolSpec] {
-        &[LOOK_SPEC]
+        CALENDAR_SPECS
     }
 
     fn setting_seeds(&self) -> &'static [SettingSeed] {

@@ -76,10 +76,17 @@ impl PluginManager {
 
     pub fn catalog_text(&self) -> String {
         let mut lines = crate::tool_catalog_text();
-        for decl in &self.extra_decls {
+        for spec in &self.extra_specs {
             lines.push('\n');
             lines.push_str("- ");
-            lines.push_str(decl.planner_line);
+            lines.push_str(&spec.planner_line());
+        }
+        if self.extra_specs.is_empty() {
+            for decl in &self.extra_decls {
+                lines.push('\n');
+                lines.push_str("- ");
+                lines.push_str(decl.planner_line);
+            }
         }
         lines
     }
@@ -143,17 +150,12 @@ impl PluginSurface {
             .find(|s| s.tool == tool_name)
     }
 
-    /// OpenAI `tools=` function schemas (JSON Schema from decls + FieldSpec).
+    /// OpenAI `tools=` function schemas derived from ToolSpec / ResolvedSpec.
     pub fn openai_tools(&self) -> Vec<serde_json::Value> {
-        let mut decls: Vec<ToolDecl> = crate::all_builtin_plugins()
+        self.specs
             .iter()
-            .flat_map(|plugin| plugin.tool_decls().iter().copied())
-            .collect();
-        decls.extend(self.extra_decls.iter().copied());
-        decls
-            .into_iter()
-            .filter(|decl| decl.name != "echo")
-            .map(|decl| openai_tool_from_decl(&decl, self.schema(decl.name)))
+            .filter(|spec| spec.name != "echo")
+            .map(|spec| spec.openai_tool())
             .collect()
     }
 
@@ -179,7 +181,17 @@ fn collect_resolved_specs(
         std::collections::HashMap::new();
     for plugin in crate::all_builtin_plugins() {
         for spec in plugin.tool_specs() {
-            by_name.insert(spec.name, ResolvedSpec::from_spec(spec));
+            let mut resolved = ResolvedSpec::from_spec(spec);
+            if resolved
+                .schema
+                .map(|schema| schema.fields.is_empty())
+                .unwrap_or(true)
+            {
+                if let Some(schema) = plugin.tool_schemas().iter().find(|s| s.tool == spec.name) {
+                    resolved.schema = Some(schema);
+                }
+            }
+            by_name.insert(spec.name, resolved);
         }
         for decl in plugin.tool_decls() {
             let schema = plugin.tool_schemas().iter().find(|s| s.tool == decl.name);
@@ -198,231 +210,6 @@ fn collect_resolved_specs(
             .or_insert_with(|| ResolvedSpec::from_decl(*decl, schema));
     }
     by_name.into_values().collect()
-}
-
-fn openai_tool_from_decl(
-    decl: &ToolDecl,
-    schema: Option<&'static ToolSchema>,
-) -> serde_json::Value {
-    let description = decl
-        .planner_line
-        .split_once(':')
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or(decl.planner_line);
-    let mut properties = serde_json::Map::new();
-    if let Some(schema) = schema {
-        for field in schema.fields {
-            properties.insert(
-                field.name.to_string(),
-                serde_json::json!({
-                    "description": field.label,
-                }),
-            );
-        }
-    }
-    // Calendar native tools: richer shapes than FieldSpec labels.
-    if decl.name == "calendar.look" {
-        properties.insert(
-            "when".into(),
-            serde_json::json!({"type": "string", "description": "today | tomorrow | this_week | next_week | not_today | weekend | YYYY-MM-DD"}),
-        );
-        properties.insert(
-            "focus".into(),
-            serde_json::json!({"type": "string", "description": "events | free | work"}),
-        );
-        properties.insert(
-            "duration_minutes".into(),
-            serde_json::json!({"type": "integer", "description": "slot length when focus=free"}),
-        );
-        properties.insert(
-            "query".into(),
-            serde_json::json!({"type": "string", "description": "optional title filter"}),
-        );
-    } else if decl.name == "calendar.pin" {
-        properties.insert(
-            "action".into(),
-            serde_json::json!({"type": "string", "description": "create | update | delete"}),
-        );
-        properties.insert("title".into(), serde_json::json!({"type": "string"}));
-        properties.insert(
-            "start".into(),
-            serde_json::json!({"type": "string", "description": "ISO or 'tomorrow 14:00'"}),
-        );
-        properties.insert("end".into(), serde_json::json!({"type": "string"}));
-        properties.insert("id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("force".into(), serde_json::json!({"type": "boolean"}));
-    } else if decl.name == "calendar.organize" {
-        properties.insert(
-            "window".into(),
-            serde_json::json!({"type": "string", "description": "this_week | next_week | today | tomorrow | weekend | sunday"}),
-        );
-        properties.insert(
-            "mode".into(),
-            serde_json::json!({"type": "string", "description": "propose | commit"}),
-        );
-        properties.insert(
-            "constraints".into(),
-            serde_json::json!({"type": "array", "items": {"type": "string"}}),
-        );
-        properties.insert(
-            "items".into(),
-            serde_json::json!({
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "duration": {"type": "string"},
-                        "duration_minutes": {"type": "integer"},
-                        "when": {"type": "string"},
-                        "count": {"type": "integer"}
-                    }
-                }
-            }),
-        );
-    } else if decl.name == "docs.upsert" {
-        properties.insert("title".into(), serde_json::json!({"type": "string"}));
-        properties.insert(
-            "content".into(),
-            serde_json::json!({
-                "type": "string",
-                "description": "markdown body; pass the user's paste through with only light cleanup"
-            }),
-        );
-        properties.insert(
-            "id".into(),
-            serde_json::json!({"type": "string", "description": "id or existing title"}),
-        );
-        properties.insert(
-            "format".into(),
-            serde_json::json!({"type": "string", "description": "markdown | html | csv"}),
-        );
-    } else if decl.name == "docs.format" {
-        properties.insert(
-            "id".into(),
-            serde_json::json!({"type": "string", "description": "id or existing title"}),
-        );
-        properties.insert("title".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "docs.patch" {
-        properties.insert(
-            "id".into(),
-            serde_json::json!({"type": "string", "description": "id or existing title"}),
-        );
-        properties.insert("find".into(), serde_json::json!({"type": "string"}));
-        properties.insert("replace".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "fitness.look" {
-        properties.insert(
-            "what".into(),
-            serde_json::json!({"type": "string", "description": "food | workouts | weight | climbs | prs | fridge | recipes | summary"}),
-        );
-        properties.insert(
-            "date".into(),
-            serde_json::json!({"type": "string", "description": "YYYY-MM-DD for food"}),
-        );
-        properties.insert("limit".into(), serde_json::json!({"type": "integer"}));
-    } else if decl.name == "fitness.log_workout" {
-        properties.insert("name".into(), serde_json::json!({"type": "string"}));
-        properties.insert("date".into(), serde_json::json!({"type": "string"}));
-        properties.insert(
-            "sets".into(),
-            serde_json::json!({
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "exercise": {"type": "string"},
-                        "reps": {"type": "integer"},
-                        "weight": {"type": "number"}
-                    }
-                }
-            }),
-        );
-    } else if decl.name == "money.list" {
-        properties.insert("year".into(), serde_json::json!({"type": "integer"}));
-        properties.insert("month".into(), serde_json::json!({"type": "integer"}));
-        properties.insert(
-            "kind".into(),
-            serde_json::json!({"type": "string", "description": "expense | income"}),
-        );
-    } else if decl.name == "money.pot" {
-        properties.insert(
-            "name".into(),
-            serde_json::json!({"type": "string", "description": "pot name e.g. holiday"}),
-        );
-        properties.insert(
-            "amount".into(),
-            serde_json::json!({"type": "number", "description": "pounds"}),
-        );
-        properties.insert(
-            "mode".into(),
-            serde_json::json!({"type": "string", "description": "set | add"}),
-        );
-    } else if decl.name == "money.pots" {
-        // no args
-    } else if decl.name == "study.look" {
-        properties.insert(
-            "what".into(),
-            serde_json::json!({"type": "string", "description": "sessions | subjects | topics | assignments | status"}),
-        );
-        properties.insert("subject_id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("limit".into(), serde_json::json!({"type": "integer"}));
-    } else if decl.name == "study.upsert_subject" {
-        properties.insert("name".into(), serde_json::json!({"type": "string"}));
-        properties.insert("id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("color".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "study.upsert_topic" {
-        properties.insert("name".into(), serde_json::json!({"type": "string"}));
-        properties.insert("subject_id".into(), serde_json::json!({"type": "string"}));
-        properties.insert(
-            "subject".into(),
-            serde_json::json!({"type": "string", "description": "subject name if id unknown"}),
-        );
-        properties.insert("deadline".into(), serde_json::json!({"type": "string"}));
-        properties.insert("priority".into(), serde_json::json!({"type": "string"}));
-        properties.insert("notes".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "study.upsert_assignment" {
-        properties.insert("title".into(), serde_json::json!({"type": "string"}));
-        properties.insert("subject_id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("subject".into(), serde_json::json!({"type": "string"}));
-        properties.insert("topic_id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("kind".into(), serde_json::json!({"type": "string"}));
-        properties.insert("deadline".into(), serde_json::json!({"type": "string"}));
-        properties.insert("priority".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "fitness.log_weight" {
-        properties.insert("kg".into(), serde_json::json!({"type": "number"}));
-        properties.insert("date".into(), serde_json::json!({"type": "string"}));
-        properties.insert("notes".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "research.get" {
-        properties.insert(
-            "conversation_id".into(),
-            serde_json::json!({"type": "string"}),
-        );
-        properties.insert("id".into(), serde_json::json!({"type": "string"}));
-        properties.insert("query".into(), serde_json::json!({"type": "string"}));
-    } else if decl.name == "socials.look" {
-        properties.insert(
-            "what".into(),
-            serde_json::json!({"type": "string", "description": "ideas | drafts | threads | projects | published | plans | profile"}),
-        );
-    } else if decl.name == "list_sparks" {
-        properties.insert(
-            "status".into(),
-            serde_json::json!({"type": "string", "description": "active | archived"}),
-        );
-        properties.insert("limit".into(), serde_json::json!({"type": "integer"}));
-    }
-    serde_json::json!({
-        "type": "function",
-        "function": {
-            "name": decl.name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "additionalProperties": true
-            }
-        }
-    })
 }
 
 /// Seeds settings from every builtin plugin (call once at startup).

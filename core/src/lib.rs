@@ -20,6 +20,6 @@ pub use router::{route, route_kind, Route, RouteKind, ToolJob};
 pub use runner::TaskRunner;
 pub use schema::{AskKind, ChoiceSpec, FieldSpec, ToolSchema, DURATION_MINUTES_CHOICES};
 pub use session::{merge_session_into_input, SessionContext};
-pub use spec::{ResolvedSpec, RespondMode, Safety, ToolSpec};
+pub use spec::{empty_schema, Permission, ResolvedSpec, RespondMode, Safety, ToolSpec};
 pub use syntax::{parse_canonical, CanonicalHit};
 pub use tool::Tool;

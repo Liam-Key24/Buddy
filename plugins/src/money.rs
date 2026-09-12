@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, SettingSeed, Tool, ToolDecl,
-    ToolError, ToolResult, ToolSchema,
+    ToolError, ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{local_today, Database, MoneyEntry, MoneyPot};
 use serde::Deserialize;
@@ -15,6 +15,15 @@ struct AnalyzeTool { db: Arc<Database> }
 struct LogTool { db: Arc<Database> }
 struct PotsTool { db: Arc<Database> }
 struct PotTool { db: Arc<Database> }
+
+const MONEY_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("money.summary", "income/expense totals for a month", r#"money.summary"#, buddy_core::empty_schema("money.summary")),
+            ToolSpec::basic("money.list", "ledger rows for a month", r#"money.list kind=expense"#, buddy_core::empty_schema("money.list")),
+            ToolSpec::basic("money.analyze", "biggest expenses and month-over-month changes", r#"money.analyze"#, buddy_core::empty_schema("money.analyze")),
+            ToolSpec::basic("money.log", "record income or an expense", r#"money.log kind=expense description=lunch amount=12.50"#, buddy_core::empty_schema("money.log")),
+            ToolSpec::basic("money.pots", "list savings pots", r#"money.pots"#, buddy_core::empty_schema("money.pots")),
+            ToolSpec::basic("money.pot", "set or add to a named savings pot", r#"money.pot name=holiday amount=200"#, buddy_core::empty_schema("money.pot")),
+        ];
 
 impl BuddyPlugin for MoneyPlugin {
     fn id(&self) -> &'static str { "money" }
@@ -39,6 +48,10 @@ impl BuddyPlugin for MoneyPlugin {
             ToolDecl { name: "money.pots", planner_line: "money.pots: list savings pots and the split. tool_input JSON: {}" },
             ToolDecl { name: "money.pot", planner_line: "money.pot: set or add to a named savings pot. tool_input JSON: {\"name\":\"holiday\", \"amount\":200, \"mode?\":\"set|add\"}. mode=set replaces the balance (split dump). mode=add puts more in (put £50 in holiday)." },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        MONEY_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {

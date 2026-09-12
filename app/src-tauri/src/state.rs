@@ -111,20 +111,20 @@ fn shell_extra_tools(db: Arc<Database>, slot: StateSlot) -> Vec<ExtraTool> {
         tool: Arc::new(CoderRunTool::new(db)),
         decl: coder_tool::coder_tool_decl(),
         schema: Some(&coder_tool::CODER_RUN_SCHEMA),
-        spec: None,
+        spec: Some(&coder_tool::CODER_RUN_SPEC),
     }];
     let decls = memory_tools::memory_tool_decls();
     extras.push(ExtraTool {
         tool: Arc::new(MemoryHandoverTool::new(slot.clone())),
         decl: decls[0],
         schema: Some(&memory_tools::MEMORY_SCHEMAS[0]),
-        spec: None,
+        spec: Some(&memory_tools::MEMORY_SPECS[0]),
     });
     extras.push(ExtraTool {
         tool: Arc::new(MemoryMaintainTool::new(slot)),
         decl: decls[1],
         schema: Some(&memory_tools::MEMORY_SCHEMAS[1]),
-        spec: None,
+        spec: Some(&memory_tools::MEMORY_SPECS[1]),
     });
     extras
 }

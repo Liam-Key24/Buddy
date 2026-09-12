@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, Tool, ToolDecl, ToolError,
-    ToolResult, ToolSchema,
+    ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{
     local_today, study_deadline_risk, Database, StudyAssignment, StudySession, StudyTopic,
@@ -29,6 +29,15 @@ struct UpsertTopicTool {
 struct UpsertAssignmentTool {
     db: Arc<Database>,
 }
+
+const STUDY_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("study.status", "progress, deadline risk, subjects, recent sessions", r#"study.status"#, buddy_core::empty_schema("study.status")),
+            ToolSpec::basic("study.look", "read study rows", r#"study.look what=sessions"#, buddy_core::empty_schema("study.look")),
+            ToolSpec::basic("study.log_session", "log a study session", r#"study.log_session duration_minutes=60"#, buddy_core::empty_schema("study.log_session")),
+            ToolSpec::basic("study.upsert_subject", "create or rename a subject", r#"study.upsert_subject name=English"#, buddy_core::empty_schema("study.upsert_subject")),
+            ToolSpec::basic("study.upsert_topic", "create or update a topic", r#"study.upsert_topic name="Intro to Cybersecurity""#, buddy_core::empty_schema("study.upsert_topic")),
+            ToolSpec::basic("study.upsert_assignment", "create or update graded work", r#"study.upsert_assignment title="Module 1 Quiz""#, buddy_core::empty_schema("study.upsert_assignment")),
+        ];
 
 impl BuddyPlugin for StudyPlugin {
     fn id(&self) -> &'static str {
@@ -73,6 +82,10 @@ impl BuddyPlugin for StudyPlugin {
                 planner_line: "study.upsert_assignment: create or update graded work. tool_input JSON: {\"title\":\"Module 1 Quiz\", \"subject_id?\":\"\", \"subject?\":\"Cybersecurity\", \"topic_id?\":\"\", \"kind?\":\"assignment|exam\", \"status?\":\"not_started\", \"deadline?\":\"YYYY-MM-DD\", \"priority?\":\"medium\", \"notes?\":\"\"}. Module N + Assignment: Module Quiz → kind=assignment title Module N Quiz. Final Exam → kind=exam. Do not invent short fragment titles.",
             },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        STUDY_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, SettingSeed, Tool, ToolDecl,
-    ToolError, ToolResult, ToolSchema,
+    ToolError, ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{
     local_today, suggest_meals, Climb, Database, FoodEntry, FridgeItem, WeightEntry, Workout,
@@ -37,6 +37,17 @@ struct ClimbingTool {
 struct LogWeightTool {
     db: Arc<Database>,
 }
+
+const FITNESS_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("fitness.summary", "today's food, weight, workouts, climbing", r#"fitness.summary"#, buddy_core::empty_schema("fitness.summary")),
+            ToolSpec::basic("fitness.look", "read tracker rows", r#"fitness.look what=food"#, buddy_core::empty_schema("fitness.look")),
+            ToolSpec::basic("fitness.log_food", "log a meal", r#"fitness.log_food name="chicken rice" calories=650"#, buddy_core::empty_schema("fitness.log_food")),
+            ToolSpec::basic("fitness.fridge", "list or add fridge items", r#"fitness.fridge action=list"#, buddy_core::empty_schema("fitness.fridge")),
+            ToolSpec::basic("fitness.suggest_meals", "meal ideas from remaining calories + fridge", r#"fitness.suggest_meals"#, buddy_core::empty_schema("fitness.suggest_meals")),
+            ToolSpec::basic("fitness.log_workout", "save a workout and detect PRs", r#"fitness.log_workout name=Push"#, buddy_core::empty_schema("fitness.log_workout")),
+            ToolSpec::basic("fitness.climbing_stats", "climbing progress V0–V17", r#"fitness.climbing_stats action=stats"#, buddy_core::empty_schema("fitness.climbing_stats")),
+            ToolSpec::basic("fitness.log_weight", "log a weigh-in", r#"fitness.log_weight kg=82.4"#, buddy_core::empty_schema("fitness.log_weight")),
+        ];
 
 impl BuddyPlugin for FitnessPlugin {
     fn id(&self) -> &'static str {
@@ -91,6 +102,10 @@ impl BuddyPlugin for FitnessPlugin {
                 planner_line: "fitness.log_weight: log a weigh-in. tool_input JSON: {\"kg\":82.4, \"date?\":\"YYYY-MM-DD\", \"notes?\":\"\"}",
             },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        FITNESS_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {

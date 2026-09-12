@@ -60,6 +60,98 @@ impl BuddyPlugin for EchoPlugin {
     }
 }
 
+const SPARK_SPECS: &[ToolSpec] = &[
+    ToolSpec::basic(
+        "save_spark",
+        "saves a note or idea to Spark",
+        r#"save_spark content="idea""#,
+        ToolSchema {
+            tool: "save_spark",
+            fields: &[
+                buddy_core::FieldSpec {
+                    name: "content",
+                    label: "idea",
+                    required: true,
+                    memory_keys: &[],
+                    ask_kind: AskKind::Text,
+                    choices: &[],
+                },
+                buddy_core::FieldSpec {
+                    name: "tags",
+                    label: "tags",
+                    required: false,
+                    memory_keys: &[],
+                    ask_kind: AskKind::Text,
+                    choices: &[],
+                },
+            ],
+        },
+    ),
+    ToolSpec::basic(
+        "list_sparks",
+        "list sparks",
+        r#"list_sparks status=active"#,
+        buddy_core::empty_schema("list_sparks"),
+    ),
+    ToolSpec::basic(
+        "update_spark",
+        "updates an existing spark",
+        r#"update_spark id=<id> action=archive"#,
+        ToolSchema {
+            tool: "update_spark",
+            fields: &[
+                buddy_core::FieldSpec {
+                    name: "id",
+                    label: "spark",
+                    required: true,
+                    memory_keys: &[],
+                    ask_kind: AskKind::Text,
+                    choices: &[],
+                },
+                buddy_core::FieldSpec {
+                    name: "action",
+                    label: "action",
+                    required: true,
+                    memory_keys: &[],
+                    ask_kind: AskKind::Text,
+                    choices: &[],
+                },
+            ],
+        },
+    ),
+];
+
+const FS_SPECS: &[ToolSpec] = &[
+    ToolSpec::basic("read_file", "read a file's contents", r#"read_file path=~/notes.md"#, buddy_core::empty_schema("read_file")),
+    ToolSpec::basic("write_file", "create or overwrite a file on disk (home folder)", r#"write_file path=~/notes.md content="...""#, buddy_core::empty_schema("write_file")),
+    ToolSpec::basic("edit_file", "edit an existing file", r#"edit_file path=~/notes.md old=a new=b"#, buddy_core::empty_schema("edit_file")),
+    ToolSpec::basic("delete_file", "delete a file", r#"delete_file path=~/notes.md"#, buddy_core::empty_schema("delete_file")),
+    ToolSpec::basic("list_dir", "list a directory", r#"list_dir path=~/Desktop"#, buddy_core::empty_schema("list_dir")),
+];
+
+const EXTERNAL_SPECS: &[ToolSpec] = &[
+    ToolSpec::basic(
+        "send_email",
+        "draft an email using saved templates. Drafted for approval, not sent automatically",
+        r#"send_email to=a@b.com subject="Hi" body="...""#,
+        ToolSchema {
+            tool: "send_email",
+            fields: &[
+                buddy_core::FieldSpec { name: "to", label: "recipient", required: true, memory_keys: &[], ask_kind: AskKind::Text, choices: &[] },
+                buddy_core::FieldSpec { name: "body", label: "message", required: true, memory_keys: &[], ask_kind: AskKind::Text, choices: &[] },
+                buddy_core::FieldSpec { name: "subject", label: "subject", required: false, memory_keys: &[], ask_kind: AskKind::Text, choices: &[] },
+                buddy_core::FieldSpec { name: "name", label: "recipient name", required: false, memory_keys: &[], ask_kind: AskKind::Text, choices: &[] },
+            ],
+        },
+    ),
+    ToolSpec::basic(
+        "git_push",
+        "request pushing a repo to its remote. Requires user approval",
+        r#"git_push"#,
+        buddy_core::empty_schema("git_push"),
+    ),
+];
+
 impl BuddyPlugin for SparkPlugin {
     fn id(&self) -> &'static str {
         "spark"
@@ -137,6 +229,10 @@ impl BuddyPlugin for SparkPlugin {
         ]
     }
 
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        SPARK_SPECS
+    }
+
     fn after_execute_hint(&self, tool_name: &str) -> AfterExecute {
         match tool_name {
             "save_spark" | "update_spark" => AfterExecute::EmitSparksUpdated,
@@ -190,6 +286,10 @@ impl BuddyPlugin for FsPlugin {
             key: "fs_excluded_paths",
             value: r#"["Library",".Trash",".ssh",".gnupg",".cache","Pictures"]"#,
         }]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        FS_SPECS
     }
 }
 
@@ -278,6 +378,10 @@ impl BuddyPlugin for ExternalPlugin {
     fn secret_keys(&self) -> &'static [&'static str] {
         &["smtp_password"]
     }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        EXTERNAL_SPECS
+    }
 }
 
 /// All compile-time builtin plugins, in registration order. Echo stays in the
@@ -340,19 +444,38 @@ fn catalog_decl(decl: &buddy_core::ToolDecl) -> bool {
 }
 
 pub fn tool_catalog_text() -> String {
-    all_builtin_plugins()
+    let mut lines: Vec<String> = all_builtin_plugins()
         .iter()
-        .flat_map(|plugin| plugin.tool_decls().iter())
-        .filter(|decl| catalog_decl(decl))
-        .map(|decl| format!("- {}", decl.planner_line))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .flat_map(|plugin| plugin.tool_specs().iter())
+        .filter(|spec| spec.name != "echo")
+        .map(|spec| format!("- {}", spec.planner_line()))
+        .collect();
+    if lines.is_empty() {
+        lines = all_builtin_plugins()
+            .iter()
+            .flat_map(|plugin| plugin.tool_decls().iter())
+            .filter(|decl| catalog_decl(decl))
+            .map(|decl| format!("- {}", decl.planner_line))
+            .collect();
+    }
+    lines.join("\n")
 }
 
-/// Clarification schemas from every builtin plugin.
+/// Clarification schemas from every builtin plugin (specs first, then decls).
 pub fn tool_schema(tool_name: &str) -> Option<&'static ToolSchema> {
-    all_builtin_plugins()
-        .iter()
-        .flat_map(|plugin| plugin.tool_schemas().iter())
-        .find(|schema| schema.tool == tool_name)
+    for plugin in all_builtin_plugins() {
+        if let Some(spec) = plugin.tool_specs().iter().find(|s| s.name == tool_name) {
+            if !spec.schema.fields.is_empty() {
+                return Some(&spec.schema);
+            }
+        }
+        if let Some(schema) = plugin
+            .tool_schemas()
+            .iter()
+            .find(|schema| schema.tool == tool_name)
+        {
+            return Some(schema);
+        }
+    }
+    None
 }

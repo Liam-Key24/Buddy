@@ -130,6 +130,27 @@ fn spark_and_chat_do_not_extract() {
 }
 
 #[test]
+fn openai_tools_come_from_specs() {
+    let (_dir, surface) = surface();
+    let tools = surface.openai_tools();
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    assert!(names.contains(&"calendar.look"));
+    assert!(names.contains(&"todo.add"));
+    assert!(names.contains(&"save_spark"));
+    assert!(!names.contains(&"echo"));
+    let look = tools
+        .iter()
+        .find(|t| t["function"]["name"] == "calendar.look")
+        .unwrap();
+    assert!(look["function"]["parameters"]["properties"]
+        .get("when")
+        .is_some());
+}
+
+#[test]
 fn route_kind_marks_canonical_extract_and_miss() {
     let (_dir, surface) = surface();
     assert_eq!(

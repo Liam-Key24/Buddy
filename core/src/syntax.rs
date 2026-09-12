@@ -294,6 +294,8 @@ mod tests {
                 respond: RespondMode::Passthrough,
                 likely: &[],
                 extract: None,
+                permission: crate::Permission::None,
+                openai_properties_json: "",
             },
             ResolvedSpec {
                 name: "echo",
@@ -306,6 +308,8 @@ mod tests {
                 respond: RespondMode::Passthrough,
                 likely: &[],
                 extract: None,
+                permission: crate::Permission::None,
+                openai_properties_json: "",
             },
             ResolvedSpec {
                 name: "calendar.look",
@@ -318,6 +322,8 @@ mod tests {
                 respond: RespondMode::Passthrough,
                 likely: &[],
                 extract: None,
+                permission: crate::Permission::None,
+                openai_properties_json: "",
             },
         ]
     }

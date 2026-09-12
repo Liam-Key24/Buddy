@@ -3,7 +3,7 @@ use std::sync::Arc;
 use buddy_calendar::{CalendarService, CreateEventInput};
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, Tool, ToolDecl, ToolError,
-    ToolRegistry, ToolResult, ToolSchema,
+    ToolRegistry, ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{
     format_social_event_notes, local_today, post_event_title, week_commencing_monday, Database,
@@ -24,6 +24,16 @@ pub struct SocialsCommitTool {
     db: Arc<Database>,
     calendar: Arc<CalendarService>,
 }
+
+const SOCIALS_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("socials.weekly_review", "gather grounded context and create social slots", r#"socials.weekly_review"#, buddy_core::empty_schema("socials.weekly_review")),
+            ToolSpec::basic("socials.get_plan", "fetch a weekly social plan", r#"socials.get_plan"#, buddy_core::empty_schema("socials.get_plan")),
+            ToolSpec::basic("socials.look", "read socials rows", r#"socials.look what=ideas"#, buddy_core::empty_schema("socials.look")),
+            ToolSpec::basic("socials.update_post", "edit/approve/reject one proposed post", r#"socials.update_post id=<id> status=approved"#, buddy_core::empty_schema("socials.update_post")),
+            ToolSpec::basic("socials.commit_approved", "pin approved posts onto the Calendar", r#"socials.commit_approved plan_id=<id>"#, buddy_core::empty_schema("socials.commit_approved")),
+            ToolSpec::basic("socials.mark_published", "mark a post as published", r#"socials.mark_published id=<id>"#, buddy_core::empty_schema("socials.mark_published")),
+            ToolSpec::basic("socials.summary", "recent plan vs published counts", r#"socials.summary"#, buddy_core::empty_schema("socials.summary")),
+        ];
 
 impl BuddyPlugin for SocialsPlugin {
     fn id(&self) -> &'static str { "socials" }
@@ -49,6 +59,10 @@ impl BuddyPlugin for SocialsPlugin {
             ToolDecl { name: "socials.mark_published", planner_line: "socials.mark_published: mark a post as published after copy-paste. tool_input JSON: {\"id\":\"...\", \"metrics?\":{\"views\":0,\"likes\":0}}" },
             ToolDecl { name: "socials.summary", planner_line: "socials.summary: recent plan vs published counts and story threads. tool_input JSON: {}" },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        SOCIALS_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {

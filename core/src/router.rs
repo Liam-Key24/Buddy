@@ -137,6 +137,8 @@ mod tests {
                 respond: RespondMode::Passthrough,
                 likely: &["remind me to"],
                 extract: Some(extract_todo),
+                permission: crate::Permission::None,
+                openai_properties_json: "",
             },
             ResolvedSpec {
                 name: "calendar.organize",
@@ -149,6 +151,8 @@ mod tests {
                 respond: RespondMode::Passthrough,
                 likely: &[],
                 extract: None,
+                permission: crate::Permission::Confirm,
+                openai_properties_json: "",
             },
         ]
     }

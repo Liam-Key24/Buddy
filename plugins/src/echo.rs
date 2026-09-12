@@ -24,9 +24,11 @@ pub const ECHO_SPEC: ToolSpec = ToolSpec {
     aliases: &[],
     rest_field: Some("text"),
     safety: buddy_core::Safety::Immediate,
+    permission: buddy_core::Permission::None,
     respond: buddy_core::RespondMode::Passthrough,
     likely: &[],
     extract: None,
+    openai_properties_json: "",
 };
 
 impl Tool for EchoTool {

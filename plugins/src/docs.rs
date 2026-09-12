@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, Tool, ToolDecl, ToolError,
-    ToolResult, ToolSchema,
+    ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{prepare_document_content, Database};
 use serde::Deserialize;
@@ -32,6 +32,16 @@ struct DocsPatchTool {
 struct DocsDeleteTool {
     db: Arc<Database>,
 }
+
+const DOCS_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("docs.search", "search saved Documents", r#"docs.search query="notes""#, buddy_core::empty_schema("docs.search")),
+            ToolSpec::basic("docs.get", "read one document by id or title", r#"docs.get id=bello.today"#, buddy_core::empty_schema("docs.get")),
+            ToolSpec::basic("docs.list", "list document titles", r#"docs.list"#, buddy_core::empty_schema("docs.list")),
+            ToolSpec::basic("docs.format", "improve layout of an existing Document", r#"docs.format id=bello.today"#, buddy_core::empty_schema("docs.format")),
+            ToolSpec::basic("docs.patch", "replace one exact snippet", r#"docs.patch id=bello.today find=old replace=new"#, buddy_core::empty_schema("docs.patch")),
+            ToolSpec::basic("docs.upsert", "create or replace an in-app Document", r#"docs.upsert title=notes content="...""#, buddy_core::empty_schema("docs.upsert")),
+            ToolSpec::basic("docs.delete", "delete an in-app Document", r#"docs.delete id=bello.today"#, buddy_core::empty_schema("docs.delete")),
+        ];
 
 impl BuddyPlugin for DocsPlugin {
     fn id(&self) -> &'static str {
@@ -81,6 +91,10 @@ impl BuddyPlugin for DocsPlugin {
                 planner_line: "docs.delete: delete an in-app Document by id or title. tool_input JSON: {\"id\":\"bello.today\"}",
             },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        DOCS_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {

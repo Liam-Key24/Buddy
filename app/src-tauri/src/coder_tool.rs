@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use buddy_coder::{run_code_turn, CodeEmit};
 use buddy_core::{
-    parse_tool_json, AskKind, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema,
+    parse_tool_json, AskKind, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::Database;
 use serde::Deserialize;
@@ -153,6 +153,13 @@ pub const CODER_RUN_SCHEMA: ToolSchema = ToolSchema {
         },
     ],
 };
+
+pub const CODER_RUN_SPEC: ToolSpec = ToolSpec::basic(
+    "coder.run",
+    "run the Code Agent in the conversation workspace",
+    r#"coder.run conversation_id=<id> prompt="...""#,
+    CODER_RUN_SCHEMA,
+);
 
 pub fn coder_tool_decl() -> ToolDecl {
     ToolDecl {

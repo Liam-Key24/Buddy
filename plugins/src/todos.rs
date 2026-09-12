@@ -157,6 +157,8 @@ const TODO_SPECS: &[ToolSpec] = &[
         respond: RespondMode::Passthrough,
         likely: &["remind me to", "add a todo", "add a task", "todo:"],
         extract: Some(extract_todo_add),
+        permission: buddy_core::Permission::None,
+        openai_properties_json: "",
     },
     ToolSpec {
         name: "todo.list",
@@ -166,9 +168,11 @@ const TODO_SPECS: &[ToolSpec] = &[
         aliases: &[],
         rest_field: None,
         safety: Safety::Immediate,
+        permission: buddy_core::Permission::None,
         respond: RespondMode::Passthrough,
         likely: &[],
         extract: None,
+        openai_properties_json: "",
     },
     ToolSpec {
         name: "todo.update",
@@ -178,9 +182,11 @@ const TODO_SPECS: &[ToolSpec] = &[
         aliases: &[],
         rest_field: None,
         safety: Safety::Immediate,
+        permission: buddy_core::Permission::None,
         respond: RespondMode::Passthrough,
         likely: &[],
         extract: None,
+        openai_properties_json: "",
     },
 ];
 

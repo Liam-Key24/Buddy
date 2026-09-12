@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use buddy_core::{
     parse_tool_json, AfterExecute, AskKind, BuddyPlugin, FieldSpec, Tool, ToolDecl, ToolError,
-    ToolResult, ToolSchema,
+    ToolResult, ToolSchema, ToolSpec,
 };
 use buddy_database::{Database, UpdateResearchInput};
 use serde::Deserialize;
@@ -18,6 +18,12 @@ struct ResearchListTool {
 struct ResearchGetTool {
     db: Arc<Database>,
 }
+
+const RESEARCH_SPECS: &[ToolSpec] = &[
+            ToolSpec::basic("research.list", "list saved research sessions", r#"research.list"#, buddy_core::empty_schema("research.list")),
+            ToolSpec::basic("research.get", "read one research session", r#"research.get"#, buddy_core::empty_schema("research.get")),
+            ToolSpec::basic("research.update", "save structured research findings", r#"research.update conversation_id=<id> summary="...""#, buddy_core::empty_schema("research.update")),
+        ];
 
 impl BuddyPlugin for ResearchPlugin {
     fn id(&self) -> &'static str {
@@ -47,6 +53,10 @@ impl BuddyPlugin for ResearchPlugin {
                 planner_line: "research.update: save structured research findings for the current research conversation. tool_input JSON: {\"conversation_id\":\"...\", \"title?\":\"\", \"question?\":\"\", \"summary?\":\"\", \"findings?\":[\"...\"], \"sources?\":[\"...\"], \"details?\":\"\", \"open_questions?\":\"\", \"next_steps?\":\"\", \"notes?\":\"\"}",
             },
         ]
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        RESEARCH_SPECS
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {
