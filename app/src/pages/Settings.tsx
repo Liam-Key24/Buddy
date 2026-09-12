@@ -5,6 +5,7 @@ import {
   Bell,
   Brain,
   ChatTeardrop,
+  CircleNotch,
   Code,
   Cpu,
   EnvelopeSimple,
@@ -16,6 +17,7 @@ import {
   HardDrives,
   Key,
   PenNib,
+  Play,
   Plus,
   Sparkle,
   Terminal,
@@ -29,8 +31,7 @@ import {
   getSecretStatus,
   loadSettings,
   refreshCache,
-  restartBrain,
-  restartMlx,
+  startRuntime,
   saveSetting,
   setExcludedPaths,
   setSecret,
@@ -141,7 +142,7 @@ export function Settings() {
           </button>
         </div>
 
-        <Section icon={HardDrives} title="Services" hint="Tap to restart.">
+        <Section icon={HardDrives} title="Services" hint="Start Brain and MLX together.">
           <ServicesSection />
         </Section>
 
@@ -499,76 +500,108 @@ function FilesystemSection() {
   );
 }
 
+function serviceLine(error: string | null, prefix: string): string | null {
+  return error?.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+function ServiceStatus({
+  icon: Icon,
+  label,
+  status,
+  error,
+  starting,
+}: {
+  icon: IconComp;
+  label: string;
+  status: string;
+  error: string | null;
+  starting: boolean;
+}) {
+  const online = status === "online";
+  const checking = status === "checking" || starting;
+  return (
+    <div
+      title={error ?? `${label} ${status}`}
+      className="flex h-12 flex-1 items-center justify-center gap-2 rounded-xl border border-zinc-800"
+    >
+      <span className="relative">
+        <Icon
+          size={20}
+          weight="duotone"
+          className={
+            checking
+              ? "animate-pulse text-amber-400"
+              : online
+                ? "text-zinc-100"
+                : error
+                  ? "text-rose-400"
+                  : "text-zinc-600"
+          }
+        />
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ${
+            checking
+              ? "animate-pulse bg-amber-400"
+              : online
+                ? "bg-emerald-400"
+                : error
+                  ? "bg-rose-500"
+                  : "bg-zinc-600"
+          }`}
+        />
+      </span>
+    </div>
+  );
+}
+
 function ServicesSection() {
   const brainStatus = useAppStore((s) => s.brainStatus);
   const mlxStatus = useAppStore((s) => s.mlxStatus);
-  const [busy, setBusy] = useState<"brain" | "mlx" | null>(null);
-
-  async function handleBrain() {
-    setBusy("brain");
-    try {
-      await restartBrain();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleMlx() {
-    setBusy("mlx");
-    try {
-      await restartMlx();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  const brainOn = brainStatus === "online";
-  const mlxOn = mlxStatus === "online";
+  const runtimeStarting = useAppStore((s) => s.runtimeStarting);
+  const runtimeError = useAppStore((s) => s.runtimeError);
 
   return (
-    <div className="flex gap-2">
-      <button
-        type="button"
-        title={busy === "brain" ? "Restarting Brain" : "Restart Brain"}
-        onClick={() => void handleBrain()}
-        disabled={busy !== null}
-        className="flex h-12 flex-1 items-center justify-center rounded-xl border border-zinc-800 transition hover:border-zinc-700 disabled:opacity-40"
-      >
-        <Brain
-          size={22}
-          weight="duotone"
-          className={
-            busy === "brain"
-              ? "animate-pulse text-amber-400"
-              : brainOn
-                ? "text-zinc-100"
-                : "text-zinc-600"
-          }
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <ServiceStatus
+          icon={Brain}
+          label="Brain"
+          status={brainStatus}
+          starting={runtimeStarting}
+          error={serviceLine(runtimeError, "BRAIN_")}
         />
-      </button>
-      <button
-        type="button"
-        title={busy === "mlx" ? "Restarting model" : "Restart model"}
-        onClick={() => void handleMlx()}
-        disabled={busy !== null}
-        className="flex h-12 flex-1 items-center justify-center rounded-xl border border-zinc-800 transition hover:border-zinc-700 disabled:opacity-40"
-      >
-        <Cpu
-          size={22}
-          weight="duotone"
-          className={
-            busy === "mlx"
-              ? "animate-pulse text-amber-400"
-              : mlxOn
-                ? "text-zinc-100"
-                : "text-zinc-600"
-          }
+        <ServiceStatus
+          icon={Cpu}
+          label="MLX"
+          status={mlxStatus}
+          starting={runtimeStarting}
+          error={serviceLine(runtimeError, "MLX_")}
         />
-      </button>
+        <button
+          type="button"
+          title={
+            runtimeStarting
+              ? "Starting Brain and MLX…"
+              : runtimeError
+                ? runtimeError
+                : "Start Brain and MLX"
+          }
+          onClick={() => void startRuntime().catch(console.error)}
+          disabled={runtimeStarting}
+          className="flex h-12 flex-1 items-center justify-center rounded-xl border border-zinc-800 text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-40"
+        >
+          {runtimeStarting ? (
+            <CircleNotch size={20} className="animate-spin" />
+          ) : (
+            <Play size={18} weight="fill" />
+          )}
+        </button>
+      </div>
+      {runtimeError && (
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-rose-900/70 bg-zinc-950 px-3 py-2 font-mono text-[11px] leading-relaxed text-rose-200">
+          {runtimeError}
+        </pre>
+      )}
     </div>
   );
 }

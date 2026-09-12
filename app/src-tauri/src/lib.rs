@@ -110,6 +110,7 @@ pub fn run() {
             commands::restart_brain,
             commands::start_mlx,
             commands::restart_mlx,
+            commands::start_runtime,
             commands::list_conversations,
             commands::create_conversation,
             commands::delete_conversation,

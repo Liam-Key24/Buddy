@@ -66,6 +66,60 @@ export async function restartMlx(): Promise<void> {
   }
 }
 
+export interface ServiceStepResult {
+  ok: boolean;
+  code: string;
+  message: string;
+}
+
+export interface RuntimeStartResult {
+  brain: ServiceStepResult;
+  mlx: ServiceStepResult;
+}
+
+function invokeErrorMessage(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+export function formatRuntimeError(result: RuntimeStartResult): string | null {
+  const parts = [result.brain, result.mlx]
+    .filter((step) => !step.ok)
+    .map((step) => `${step.code}: ${step.message}`);
+  return parts.length ? parts.join("\n") : null;
+}
+
+export async function startRuntime(): Promise<RuntimeStartResult> {
+  const store = useAppStore.getState();
+  store.setBrainStatus("checking");
+  store.setMlxStatus("checking");
+  store.setRuntimeError(null);
+  store.setRuntimeStarting(true);
+  try {
+    const result = await invoke<RuntimeStartResult>("start_runtime");
+    store.setBrainStatus(result.brain.ok ? "online" : "offline");
+    store.setMlxStatus(result.mlx.ok ? "online" : "offline");
+    store.setRuntimeError(formatRuntimeError(result));
+    await refreshServiceStatus().catch(() => {});
+    return result;
+  } catch (err) {
+    store.setBrainStatus("offline");
+    store.setMlxStatus("offline");
+    store.setRuntimeError(`RUNTIME_INVOKE: ${invokeErrorMessage(err)}`);
+    throw err;
+  } finally {
+    store.setRuntimeStarting(false);
+  }
+}
+
 interface ConversationDto {
   id: string;
   title: string;

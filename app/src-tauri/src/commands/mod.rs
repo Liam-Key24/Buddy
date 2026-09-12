@@ -6,7 +6,7 @@ use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
 use crate::orchestrator;
-use crate::services::{ProcessManager, ServiceStatus};
+use crate::services::{ProcessManager, RuntimeStartResult, ServiceStatus};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -75,6 +75,14 @@ pub async fn restart_mlx(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     process_manager.restart_mlx(&state).await
+}
+
+#[tauri::command]
+pub async fn start_runtime(
+    process_manager: State<'_, Arc<ProcessManager>>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RuntimeStartResult, String> {
+    Ok(process_manager.start_runtime(&state).await)
 }
 
 #[tauri::command]

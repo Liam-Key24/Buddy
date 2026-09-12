@@ -21,6 +21,56 @@ pub struct ServiceStatus {
     pub brain: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceStepResult {
+    pub ok: bool,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStartResult {
+    pub brain: ServiceStepResult,
+    pub mlx: ServiceStepResult,
+}
+
+fn step_ok(code: &str, message: impl Into<String>) -> ServiceStepResult {
+    ServiceStepResult {
+        ok: true,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn step_err(kind: &str, err: impl Into<String>) -> ServiceStepResult {
+    let message = err.into();
+    ServiceStepResult {
+        ok: false,
+        code: classify_service_error(kind, &message),
+        message,
+    }
+}
+
+fn classify_service_error(kind: &str, err: &str) -> String {
+    let e = err.to_ascii_lowercase();
+    let suffix = if e.contains("directory missing") || e.contains("project root") {
+        "DIR"
+    } else if e.contains("still in use") {
+        "PORT"
+    } else if e.contains("not found") || e.contains("venv") || e.contains("pip install") {
+        "BIN"
+    } else if e.contains("/embed") {
+        "EMBED"
+    } else if e.contains("/health") || e.contains("/v1/models") || e.contains("never became ready") {
+        "HEALTH"
+    } else if e.contains("failed to start") || e.contains("os error") {
+        "START"
+    } else {
+        "FAIL"
+    };
+    format!("{kind}_{suffix}")
+}
+
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct BrainHealth {
     #[serde(default)]
@@ -424,6 +474,20 @@ impl ProcessManager {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         Err("mlx restarted but /v1/models never became ready".into())
+    }
+
+    /// Start Brain and Qwen together. One failure does not skip the other.
+    pub async fn start_runtime(&self, state: &AppState) -> RuntimeStartResult {
+        let root = state.project_root.display().to_string();
+        let brain = match self.ensure_brain(state).await {
+            Ok(()) => step_ok("BRAIN_OK", format!("Brain ready ({root})")),
+            Err(err) => step_err("BRAIN", format!("{err} (root: {root})")),
+        };
+        let mlx = match self.ensure_mlx(state).await {
+            Ok(()) => step_ok("MLX_OK", format!("MLX ready ({root})")),
+            Err(err) => step_err("MLX", format!("{err} (root: {root})")),
+        };
+        RuntimeStartResult { brain, mlx }
     }
 
     fn restart_brain_process(&self, state: &AppState) -> Result<(), String> {

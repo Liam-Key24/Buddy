@@ -15,13 +15,14 @@ import {
   Gear,
   Lightning,
   MagnifyingGlass,
+  Play,
   Plus,
   ShareNetwork,
   SquaresFour,
   Trash,
   Wallet,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
 import { useConversationStore } from "../stores/useConversationStore";
 import { useChatStore } from "../stores/useChatStore";
@@ -36,31 +37,31 @@ import {
   deleteConversation,
   loadCodexMessages,
   loadMessages,
-  restartBrain,
-  restartMlx,
+  startRuntime,
 } from "../lib/api";
 
-function StatusIcon({
+function serviceLine(error: string | null, prefix: string): string | null {
+  return error?.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+function StatusDot({
   icon,
   status,
   title,
-  onClick,
+  failed,
 }: {
   icon: React.ReactNode;
   status: string;
   title: string;
-  onClick?: () => void;
+  failed?: boolean;
 }) {
   const online = status === "online";
   const checking = status === "checking";
 
   return (
-    <button
-      type="button"
+    <div
       title={title}
-      disabled={checking || !onClick}
-      onClick={onClick}
-      className="relative flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-60"
+      className="relative flex h-9 w-9 items-center justify-center text-zinc-500"
     >
       {icon}
       <span
@@ -69,10 +70,12 @@ function StatusIcon({
             ? "animate-pulse bg-amber-400"
             : online
               ? "bg-emerald-400"
-              : "bg-zinc-600"
+              : failed
+                ? "bg-rose-500"
+                : "bg-zinc-600"
         }`}
       />
-    </button>
+    </div>
   );
 }
 
@@ -116,6 +119,8 @@ export function Sidebar() {
     setCurrentPage,
     mlxStatus,
     brainStatus,
+    runtimeStarting,
+    runtimeError,
     sidebarCollapsed,
     toggleSidebar,
     setSidebarCollapsed,
@@ -131,6 +136,14 @@ export function Sidebar() {
   } = useCodeAgentStore();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [errorOpen, setErrorOpen] = useState(false);
+
+  const brainError = serviceLine(runtimeError, "BRAIN_");
+  const mlxError = serviceLine(runtimeError, "MLX_");
+
+  useEffect(() => {
+    setErrorOpen(Boolean(runtimeError));
+  }, [runtimeError]);
 
   const isCodePage = currentPage === "code";
   const isLifePage =
@@ -331,31 +344,71 @@ export function Sidebar() {
           </div>
         </nav>
 
-        <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pb-1 pt-1">
-          <StatusIcon
-            icon={<Cpu size={18} weight="duotone" />}
-            status={mlxStatus}
-            title={
-              mlxStatus === "checking"
-                ? "Model restarting…"
-                : `Model ${mlxStatus} — click to restart`
-            }
-            onClick={() => {
-              restartMlx().catch(console.error);
-            }}
-          />
-          <StatusIcon
+        <div className="relative mt-auto flex shrink-0 flex-col items-center gap-1 pb-1 pt-1">
+          <StatusDot
             icon={<Brain size={18} weight="duotone" />}
             status={brainStatus}
+            failed={Boolean(brainError)}
             title={
-              brainStatus === "checking"
-                ? "Brain restarting…"
-                : `Brain ${brainStatus} — click to restart`
+              runtimeStarting
+                ? "Brain starting…"
+                : (brainError ?? `Brain ${brainStatus}`)
+            }
+          />
+          <StatusDot
+            icon={<Cpu size={18} weight="duotone" />}
+            status={mlxStatus}
+            failed={Boolean(mlxError)}
+            title={
+              runtimeStarting
+                ? "MLX starting…"
+                : (mlxError ?? `MLX ${mlxStatus}`)
+            }
+          />
+          <button
+            type="button"
+            disabled={runtimeStarting}
+            title={
+              runtimeStarting
+                ? "Starting Brain and MLX…"
+                : runtimeError
+                  ? runtimeError
+                  : "Start Brain and MLX"
             }
             onClick={() => {
-              restartBrain().catch(console.error);
+              startRuntime().catch(console.error);
             }}
-          />
+            className={`flex h-9 w-9 items-center justify-center rounded-xl transition disabled:opacity-60 ${
+              runtimeError
+                ? "text-rose-400 hover:bg-rose-500/10 hover:text-rose-300"
+                : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            }`}
+          >
+            {runtimeStarting ? (
+              <CircleNotch size={18} className="animate-spin" />
+            ) : (
+              <Play size={16} weight="fill" />
+            )}
+          </button>
+          {errorOpen && runtimeError && (
+            <div className="absolute bottom-14 left-12 z-30 w-72 rounded-xl border border-rose-900/70 bg-zinc-950 p-2.5 shadow-xl">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-rose-400">
+                  Start failed
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setErrorOpen(false)}
+                  className="rounded px-1 text-[10px] text-zinc-500 hover:text-zinc-300"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-300">
+                {runtimeError}
+              </pre>
+            </div>
+          )}
           <RailButton
             active={currentPage === "settings"}
             onClick={() => setCurrentPage("settings")}
