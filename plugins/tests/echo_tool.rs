@@ -12,15 +12,14 @@ fn echo_tool_returns_input() {
     let path = dir.join("buddy.db");
     let db = Arc::new(Database::open(&path).unwrap());
     let memory = Arc::new(MemoryManager::new(db.clone()));
-    let registry = Arc::new(create_registry(
-        db,
-        memory,
-        dir.display().to_string(),
-    ));
+    let registry = Arc::new(create_registry(db, memory, dir.display().to_string()));
     let runner = TaskRunner::new(registry);
 
     let result = runner.run("echo", "hello").unwrap();
     assert_eq!(result.output, "hello");
+
+    let json = runner.run("echo", r#"{"text":"hi"}"#).unwrap();
+    assert_eq!(json.output, "hi");
 
     let _ = std::fs::remove_dir_all(dir);
 }

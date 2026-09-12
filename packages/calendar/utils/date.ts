@@ -12,10 +12,12 @@ export function endOfDay(d: Date): number {
   return x.getTime();
 }
 
+/** Monday-start week (ISO), matching chat `this_week`. */
 export function startOfWeek(d: Date): Date {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
-  x.setDate(x.getDate() - x.getDay());
+  const fromMonday = (x.getDay() + 6) % 7;
+  x.setDate(x.getDate() - fromMonday);
   return x;
 }
 
@@ -35,7 +37,10 @@ export function endOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
 }
 
-/** 6-week month grid starting Sunday before the 1st. */
+export const WEEKDAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"] as const;
+export const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+
+/** 6-week month grid starting Monday on or before the 1st. */
 export function monthGridDays(cursor: Date): Date[] {
   const first = startOfMonth(cursor);
   const gridStart = startOfWeek(first);

@@ -31,6 +31,7 @@ fn plugin_manager_registers_extras_without_app_changes() {
             planner_line: "ping.extra: returns pong",
         },
         schema: None,
+        spec: None,
     }]);
 
     let (registry, surface) = mgr.finish();

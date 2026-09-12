@@ -1,12 +1,15 @@
+import { useState } from "react";
 import { MagnifyingGlass, Plus } from "@phosphor-icons/react";
-import type { CalendarEvent } from "@buddy/calendar/models";
+import type { CalendarEvent, ScheduleKind } from "@buddy/calendar/models";
 import { CATEGORIES, SCHEDULE_LAYER } from "@buddy/calendar/models";
+import { useLifestyleStore } from "../../stores/useLifestyleStore";
 import {
   colorForEvent,
   formatTime,
   monthGridDays,
   sameDay,
   startOfMonth,
+  WEEKDAY_LETTERS,
 } from "@buddy/calendar/utils";
 import { eventsOnDay, upcomingEvents } from "@buddy/calendar/services";
 
@@ -46,23 +49,18 @@ export function CalendarSidebar({
   const upcoming = upcomingEvents(events, 7).slice(0, 6);
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col gap-4 overflow-y-auto border-r border-zinc-800 pr-4">
-      <div>
-        <h2 className="mb-3 text-lg font-semibold tracking-tight text-zinc-100">
-          Calendar
-        </h2>
-        <div className="relative">
-          <MagnifyingGlass
-            size={16}
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"
-          />
-          <input
-            value={searchQuery}
-            onChange={(e) => onSearch(e.target.value)}
-            placeholder="Search event..."
-            className="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 py-2 pl-9 pr-3 text-sm text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/15"
-          />
-        </div>
+    <aside className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:w-0 pr-2">
+      <div className="relative">
+        <MagnifyingGlass
+          size={16}
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"
+        />
+        <input
+          value={searchQuery}
+          onChange={(e) => onSearch(e.target.value)}
+          placeholder="Search event..."
+          className="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 py-2 pl-9 pr-3 text-sm text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/15"
+        />
       </div>
 
       <div>
@@ -73,7 +71,7 @@ export function CalendarSidebar({
           })}
         </div>
         <div className="grid grid-cols-7 gap-0.5 text-center text-[10px] text-zinc-600">
-          {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+          {WEEKDAY_LETTERS.map((d, i) => (
             <div key={`${d}-${i}`}>{d}</div>
           ))}
         </div>
@@ -172,6 +170,7 @@ export function CalendarSidebar({
             </label>
           ))}
         </div>
+        <ScheduleHoursEditor />
       </div>
 
       <button
@@ -255,5 +254,104 @@ export function CalendarSidebar({
         )}
       </div>
     </aside>
+  );
+}
+
+function typicalHm(
+  rules: { kind: ScheduleKind; segments: { start_hm: string; end_hm: string }[] }[],
+  kind: ScheduleKind,
+): { start: string; end: string } | null {
+  const seg = rules.find((r) => r.kind === kind)?.segments[0];
+  if (!seg) return null;
+  return { start: seg.start_hm, end: seg.end_hm };
+}
+
+function ScheduleHoursEditor() {
+  const saveHours = useLifestyleStore((s) => s.saveHours);
+  const rules = useLifestyleStore((s) => s.scheduleRules);
+  const [editing, setEditing] = useState<ScheduleKind | null>(null);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const work = typicalHm(rules, "work");
+  const sleep = typicalHm(rules, "sleep");
+
+  async function save() {
+    if (!editing) return;
+    setSaving(true);
+    try {
+      await saveHours(editing, start, end);
+      setEditing(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function begin(kind: ScheduleKind, current: { start: string; end: string } | null) {
+    setEditing(kind);
+    setStart(current?.start ?? (kind === "work" ? "09:00" : "22:30"));
+    setEnd(current?.end ?? (kind === "work" ? "17:00" : "07:45"));
+  }
+
+  return (
+    <div className="mt-3 space-y-2 rounded-lg border border-zinc-800/80 px-2 py-2">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+        Usual hours
+      </div>
+      {(
+        [
+          ["work", "Work", work],
+          ["sleep", "Sleep", sleep],
+        ] as const
+      ).map(([kind, label, times]) => (
+        <div key={kind} className="text-xs text-zinc-300">
+          {editing === kind ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="w-10 shrink-0 text-zinc-400">{label}</span>
+              <input
+                type="time"
+                value={start}
+                onChange={(e) => setStart(e.target.value)}
+                className="rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[11px] text-zinc-200"
+              />
+              <span className="text-zinc-600">–</span>
+              <input
+                type="time"
+                value={end}
+                onChange={(e) => setEnd(e.target.value)}
+                className="rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[11px] text-zinc-200"
+              />
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => void save()}
+                className="rounded-md bg-blue-500 px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-blue-400 disabled:opacity-50"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditing(null)}
+                className="text-[11px] text-zinc-500 hover:text-zinc-300"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => begin(kind, times)}
+              className="flex w-full items-center justify-between rounded-md px-0.5 py-0.5 text-left hover:bg-zinc-900"
+            >
+              <span className="text-zinc-400">{label}</span>
+              <span className="tabular-nums text-zinc-200">
+                {times ? `${times.start}–${times.end}` : "Set hours"}
+              </span>
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

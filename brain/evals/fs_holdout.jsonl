@@ -1,0 +1,3 @@
+{"id":"fs_1","message":"read the file Documents/notes.txt","expect_intent":"tool_use","expect_tool_family":"read_file"}
+{"id":"fs_2","message":"list files in my Downloads folder","expect_intent":"tool_use","expect_tool_family":"list"}
+{"id":"fs_3","message":"show me what's in ~/Desktop","expect_intent":"tool_use","expect_tool_family":"list"}

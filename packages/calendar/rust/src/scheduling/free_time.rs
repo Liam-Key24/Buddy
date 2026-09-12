@@ -1,3 +1,5 @@
+use chrono::Local;
+
 use crate::scheduling::occupancy::{build_occupancy_excluding, merged_hard_blocks};
 use crate::scheduling::score::score_slot_for_activity;
 use crate::scheduling::types::FreeSlot;
@@ -10,7 +12,7 @@ pub fn find_free_slots(
     limit: usize,
     exclude_event_id: Option<&str>,
 ) -> Vec<FreeSlot> {
-    find_free_slots_for(ctx, duration_ms, limit, exclude_event_id, None)
+    find_free_slots_for(ctx, duration_ms, limit, exclude_event_id, None, false)
 }
 
 /// Like [`find_free_slots`], with activity-aware ranking (e.g. dinner → evening).
@@ -20,8 +22,21 @@ pub fn find_free_slots_for(
     limit: usize,
     exclude_event_id: Option<&str>,
     activity_title: Option<&str>,
+    prefer_after_work: bool,
 ) -> Vec<FreeSlot> {
     if duration_ms <= 0 || ctx.range.end <= ctx.range.start {
+        return Vec::new();
+    }
+
+    // Live windows (range still open) never place before now. Historical
+    // ranges used by tests stay untouched.
+    let now_ms = Local::now().timestamp_millis();
+    let search_start = if ctx.range.end > now_ms {
+        ctx.range.start.max(now_ms)
+    } else {
+        ctx.range.start
+    };
+    if ctx.range.end <= search_start {
         return Vec::new();
     }
 
@@ -29,7 +44,7 @@ pub fn find_free_slots_for(
     let hard = merged_hard_blocks(&occupancy, &ctx.policy);
 
     let mut gaps = Vec::new();
-    let mut cursor = ctx.range.start;
+    let mut cursor = search_start;
     for (s, e) in &hard {
         if *s > cursor {
             gaps.push((cursor, *s));
@@ -45,8 +60,14 @@ pub fn find_free_slots_for(
         let mut start = gap_start;
         while start + duration_ms <= gap_end {
             let end = start + duration_ms;
-            let (score, reasons) =
-                score_slot_for_activity(ctx, start, end, &occupancy, activity_title);
+            let (score, reasons) = score_slot_for_activity(
+                ctx,
+                start,
+                end,
+                &occupancy,
+                activity_title,
+                prefer_after_work,
+            );
             slots.push(FreeSlot {
                 start,
                 end,
@@ -63,8 +84,14 @@ pub fn find_free_slots_for(
             let end = gap_end;
             let start = end - duration_ms;
             if start >= gap_start && !slots.iter().any(|s| s.start == start && s.end == end) {
-                let (score, reasons) =
-                    score_slot_for_activity(ctx, start, end, &occupancy, activity_title);
+                let (score, reasons) = score_slot_for_activity(
+                    ctx,
+                    start,
+                    end,
+                    &occupancy,
+                    activity_title,
+                    prefer_after_work,
+                );
                 slots.push(FreeSlot {
                     start,
                     end,

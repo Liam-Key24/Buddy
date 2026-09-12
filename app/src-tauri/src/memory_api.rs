@@ -115,6 +115,16 @@ impl MemoryApi {
         let mut memory = BrainMemoryContext::from(merged);
         memory.stale_sparks = self.stale_sparks_context();
         memory.active_sparks = self.active_sparks_context();
+        memory.open_todos = self.db.format_open_todos_context();
+        let target: f64 = self
+            .db
+            .get_setting_or("fitness_calorie_target", "2500")
+            .parse()
+            .unwrap_or(2500.0);
+        memory.fitness = self.db.format_fitness_digest(target);
+        memory.study = self.db.format_study_digest();
+        memory.money = self.db.format_money_digest();
+        memory.socials = self.db.format_socials_digest();
         memory
     }
 
@@ -130,7 +140,7 @@ impl MemoryApi {
             "Pending clarification for tool `{}`. Partial tool_input JSON: {}. Still need: {}. Merge the user's latest reply into a complete tool_input.",
             pending.tool,
             pending.tool_input,
-            pending.missing_labels.join(", ")
+            pending.labels().join(", ")
         );
         memory.working = Some(match memory.working.take() {
             Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
@@ -181,6 +191,82 @@ impl MemoryApi {
         let _ = self
             .db
             .delete_runtime_state(&Self::pending_key(conversation_id));
+    }
+
+    fn agent_turn_key(conversation_id: &str) -> String {
+        format!("agent_turn:{conversation_id}")
+    }
+
+    pub fn get_agent_turn(&self, conversation_id: &str) -> Option<String> {
+        self.db
+            .get_runtime_state(&Self::agent_turn_key(conversation_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn set_agent_turn(&self, conversation_id: &str, raw: &str) {
+        let _ = self
+            .db
+            .set_runtime_state(&Self::agent_turn_key(conversation_id), raw);
+    }
+
+    pub fn clear_agent_turn(&self, conversation_id: &str) {
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::agent_turn_key(conversation_id));
+    }
+
+    fn last_look_key(conversation_id: &str) -> String {
+        format!("last_look:{conversation_id}")
+    }
+
+    pub fn get_last_look_raw(&self, conversation_id: &str) -> Option<String> {
+        self.db
+            .get_runtime_state(&Self::last_look_key(conversation_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn set_last_look_raw(&self, conversation_id: &str, raw: &str) {
+        let _ = self
+            .db
+            .set_runtime_state(&Self::last_look_key(conversation_id), raw);
+    }
+
+    pub fn clear_last_look(&self, conversation_id: &str) {
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::last_look_key(conversation_id));
+    }
+
+    fn last_life_look_key(conversation_id: &str) -> String {
+        format!("last_life_look:{conversation_id}")
+    }
+
+    pub fn get_last_life_look_raw(&self, conversation_id: &str) -> Option<String> {
+        self.db
+            .get_runtime_state(&Self::last_life_look_key(conversation_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn set_last_life_look_raw(&self, conversation_id: &str, raw: &str) {
+        let _ = self
+            .db
+            .set_runtime_state(&Self::last_life_look_key(conversation_id), raw);
+    }
+
+    pub fn clear_last_life_look(&self, conversation_id: &str) {
+        let _ = self
+            .db
+            .delete_runtime_state(&Self::last_life_look_key(conversation_id));
+    }
+
+    pub fn set_preference_setting(&self, key: &str, value: &str) {
+        let _ = self.db.set_setting(key, value);
     }
 
     fn stale_sparks_context(&self) -> Option<String> {
@@ -332,8 +418,9 @@ mod architecture_tests {
 
     fn uuid_like() -> String {
         format!(
-            "{}{}",
+            "{}-{:?}-{}",
             std::process::id(),
+            std::thread::current().id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -373,8 +460,14 @@ mod architecture_tests {
         let pending = PendingClarification {
             tool: "calendar.create_event".into(),
             tool_input: r#"{"title":"Meet"}"#.into(),
+            missing: vec![],
             missing_labels: vec!["date and time".into()],
             conversation_id: String::new(),
+            follow_up: false,
+            agent_scratchpad: None,
+            agent_goal: None,
+            phase: Default::default(),
+            last_proposal: None,
         };
         api.set_pending_clarification("c1", pending);
         let loaded = api.get_pending_clarification("c1").expect("pending");
@@ -454,12 +547,16 @@ pub fn apply_plan_memory_side_effects(
         let _ = api.store_event(
             ctx,
             MemoryEvent::PreferenceDetected {
-                key,
-                value,
+                key: key.clone(),
+                value: value.clone(),
                 confidence,
                 source,
             },
         );
+        // High-confidence prefs also land in settings so Clarification memory_keys work.
+        if confidence >= 0.9 && !key.trim().is_empty() {
+            api.set_preference_setting(&key, &value);
+        }
     }
     if let Some((decision, reason)) = decision {
         let _ = api.store_event(

@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use buddy_core::{parse_tool_json, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema};
+use buddy_core::{
+    parse_tool_json, AskKind, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema,
+};
 use serde::Deserialize;
 use tokio::runtime::Handle;
 
@@ -102,6 +104,8 @@ pub const MEMORY_SCHEMAS: &[ToolSchema] = &[
             label: "conversation",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         }],
     },
     ToolSchema {
@@ -111,6 +115,8 @@ pub const MEMORY_SCHEMAS: &[ToolSchema] = &[
             label: "conversation",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         }],
     },
 ];

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CreateDreamInput,
   DreamEntry,
+  LifestyleScheduleRule,
   ScheduleBlock,
   ScheduleKind,
   UpdateDreamInput,
@@ -15,6 +16,8 @@ import {
   dreamLog,
   dreamUpdate,
   lifestyleListBlocks,
+  lifestyleListRules,
+  lifestyleSetTimes,
   workGetDayLog,
   workGetStats,
   workLogSales,
@@ -24,6 +27,7 @@ import { useCalendarStore } from "./useCalendarStore";
 
 interface LifestyleState {
   scheduleBlocks: ScheduleBlock[];
+  scheduleRules: LifestyleScheduleRule[];
   showWork: boolean;
   showSleep: boolean;
   selectedBlockId: string | null;
@@ -37,6 +41,8 @@ interface LifestyleState {
   selectBlock: (id: string | null) => void;
   clearError: () => void;
   loadBlocks: () => Promise<void>;
+  loadRules: () => Promise<void>;
+  saveHours: (kind: ScheduleKind, startHm: string, endHm: string) => Promise<void>;
   loadDreamsForSelected: () => Promise<void>;
   loadWorkPanel: () => Promise<void>;
   addDream: (input: CreateDreamInput) => Promise<void>;
@@ -52,6 +58,7 @@ function selectedBlock(state: LifestyleState): ScheduleBlock | null {
 
 export const useLifestyleStore = create<LifestyleState>((set, get) => ({
   scheduleBlocks: [],
+  scheduleRules: [],
   showWork: true,
   showSleep: true,
   selectedBlockId: null,
@@ -83,6 +90,20 @@ export const useLifestyleStore = create<LifestyleState>((set, get) => ({
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     }
+  },
+
+  loadRules: async () => {
+    try {
+      const scheduleRules = await lifestyleListRules();
+      set({ scheduleRules, error: null });
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  saveHours: async (kind, startHm, endHm) => {
+    await lifestyleSetTimes(kind, startHm, endHm);
+    await Promise.all([get().loadRules(), get().loadBlocks()]);
   },
 
   loadDreamsForSelected: async () => {

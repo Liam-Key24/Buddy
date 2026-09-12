@@ -37,6 +37,9 @@ export function CalendarWorkspace() {
     searchQuery,
     enabledCategories,
     deleteConfirmId,
+    proposalBlocks,
+    acceptProposal,
+    dismissProposal,
     setView,
     setCursorDate,
     selectEvent,
@@ -65,6 +68,7 @@ export function CalendarWorkspace() {
     setShowSleep,
     selectBlock,
     loadBlocks,
+    loadRules,
     addDream,
     removeDream,
     saveSales,
@@ -74,6 +78,7 @@ export function CalendarWorkspace() {
   const { count, panelOpen, setPanelOpen } = useCalendarNotificationStore();
   const [daySummary, setDaySummary] = useState<DaySummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const drawerRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
@@ -96,7 +101,8 @@ export function CalendarWorkspace() {
   useEffect(() => {
     void loadRange();
     void loadBlocks();
-  }, [loadRange, loadBlocks, view, cursorDate]);
+    void loadRules();
+  }, [loadRange, loadBlocks, loadRules, view, cursorDate]);
 
   useEffect(() => {
     if (view !== "day") {
@@ -162,33 +168,51 @@ export function CalendarWorkspace() {
 
   return (
     <div className="relative flex min-h-0 flex-1 gap-0 overflow-hidden p-4">
-      <CalendarSidebar
-        cursorDate={cursorDate}
-        searchQuery={searchQuery}
-        enabledCategories={enabledCategories}
-        showWork={showWork}
-        showSleep={showSleep}
-        events={events}
-        onSearch={setSearchQuery}
-        onToggleCategory={toggleCategory}
-        onToggleWork={() => setShowWork(!showWork)}
-        onToggleSleep={() => setShowSleep(!showSleep)}
-        onSelectDay={(d) => {
-          setCursorDate(d);
-          if (view === "month") setView("day");
-        }}
-        onCreate={() => openCreate()}
-        onSelectEvent={(id) => {
-          selectBlock(null);
-          selectEvent(id);
-        }}
-      />
+      <div
+        className={`flex shrink-0 flex-col overflow-hidden border-r transition-[width,padding,border-color] duration-300 ease-in-out ${
+          sidebarOpen ? "w-64 border-zinc-800 pr-4" : "pointer-events-none w-0 border-transparent pr-0"
+        }`}
+      >
+        <div
+          className={`flex min-h-0 w-64 flex-1 flex-col transition-opacity duration-200 ease-in-out ${
+            sidebarOpen ? "opacity-100 delay-75" : "opacity-0"
+          }`}
+        >
+          <CalendarSidebar
+            cursorDate={cursorDate}
+            searchQuery={searchQuery}
+            enabledCategories={enabledCategories}
+            showWork={showWork}
+            showSleep={showSleep}
+            events={events}
+            onSearch={setSearchQuery}
+            onToggleCategory={toggleCategory}
+            onToggleWork={() => setShowWork(!showWork)}
+            onToggleSleep={() => setShowSleep(!showSleep)}
+            onSelectDay={(d) => {
+              setCursorDate(d);
+              if (view === "month") setView("day");
+            }}
+            onCreate={() => openCreate()}
+            onSelectEvent={(id) => {
+              selectBlock(null);
+              selectEvent(id);
+            }}
+          />
+        </div>
+      </div>
 
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col pl-4">
+      <div
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col transition-[padding] duration-300 ease-in-out ${
+          sidebarOpen ? "pl-4" : "pl-0"
+        }`}
+      >
         <CalendarHeader
           cursorDate={cursorDate}
           view={view}
           notificationCount={count}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((open) => !open)}
           onPrev={() => navigate(-1)}
           onNext={() => navigate(1)}
           onToday={() => setCursorDate(new Date())}
@@ -196,6 +220,29 @@ export function CalendarWorkspace() {
           onToggleNotifications={() => setPanelOpen(!panelOpen)}
         />
         <NotificationPanel panelRef={notifRef} />
+
+        {proposalBlocks.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
+            <span className="flex-1">
+              Proposed week · not saved ({proposalBlocks.length} block
+              {proposalBlocks.length === 1 ? "" : "s"})
+            </span>
+            <button
+              type="button"
+              onClick={() => void acceptProposal()}
+              className="rounded-lg bg-sky-500 px-2.5 py-1 font-medium text-zinc-950 hover:bg-sky-400"
+            >
+              Accept week
+            </button>
+            <button
+              type="button"
+              onClick={() => void dismissProposal()}
+              className="rounded-lg px-2.5 py-1 text-sky-200/80 hover:text-white"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {error && (
           <div className="mb-3 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -247,6 +294,21 @@ export function CalendarWorkspace() {
             <TimeGridView
               days={view === "day" ? [cursorDate] : weekDays}
               events={events}
+              ghostEvents={proposalBlocks.map((b, i) => ({
+                id: `ghost-${i}-${b.start}`,
+                title: b.title,
+                start_time: b.start,
+                end_time: b.end,
+                all_day: false,
+                category: "personal",
+                color: "#38bdf8",
+                reminders: [],
+                sync_status: "local",
+                created_at: 0,
+                updated_at: 0,
+                timezone:
+                  Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+              }))}
               scheduleBlocks={visibleBlocks}
               selectedEventId={selectedEventId}
               selectedBlockId={selectedBlockId}

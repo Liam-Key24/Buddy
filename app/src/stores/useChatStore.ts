@@ -7,11 +7,33 @@ export interface Message {
   created_at: number;
 }
 
+export interface TraceStep {
+  id: string;
+  step: string;
+  detail: string;
+}
+
+export interface AskOption {
+  id: string;
+  label: string;
+  value: string;
+}
+
+export interface StructuredAsk {
+  tool: string;
+  question: string;
+  field: string;
+  ask_kind: "text" | "choice";
+  options: AskOption[];
+}
+
 interface ChatState {
   messages: Message[];
   activeConversationId: string | null;
   isStreaming: boolean;
   streamingContent: string;
+  traceSteps: TraceStep[];
+  activeAsk: StructuredAsk | null;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
   beginSend: (text: string) => void;
@@ -20,6 +42,9 @@ interface ChatState {
   setActiveConversationId: (id: string | null) => void;
   setIsStreaming: (streaming: boolean) => void;
   clearStreaming: () => void;
+  appendTrace: (step: string, detail: string) => void;
+  clearTrace: () => void;
+  setActiveAsk: (ask: StructuredAsk | null) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -27,6 +52,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeConversationId: null,
   isStreaming: false,
   streamingContent: "",
+  traceSteps: [],
+  activeAsk: null,
   setMessages: (messages) => set({ messages }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
@@ -43,6 +70,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ],
       streamingContent: "",
       isStreaming: true,
+      traceSteps: [],
+      activeAsk: null,
     })),
   appendStreaming: (chunk) =>
     set((state) => ({ streamingContent: state.streamingContent + chunk })),
@@ -61,12 +90,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ],
         streamingContent: "",
         isStreaming: false,
+        traceSteps: [],
       }));
     } else {
-      set({ isStreaming: false });
+      set({ isStreaming: false, traceSteps: [] });
     }
   },
   setActiveConversationId: (id) => set({ activeConversationId: id }),
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
-  clearStreaming: () => set({ streamingContent: "", isStreaming: false }),
+  clearStreaming: () =>
+    set({ streamingContent: "", isStreaming: false, traceSteps: [] }),
+  appendTrace: (step, detail) =>
+    set((state) => ({
+      traceSteps: [
+        ...state.traceSteps,
+        { id: crypto.randomUUID(), step, detail },
+      ],
+    })),
+  clearTrace: () => set({ traceSteps: [] }),
+  setActiveAsk: (ask) => set({ activeAsk: ask }),
 }));

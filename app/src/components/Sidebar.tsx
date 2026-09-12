@@ -1,17 +1,24 @@
 import {
+  Barbell,
+  BookOpen,
   Brain,
   CaretDoubleLeft,
   CaretDoubleRight,
   CalendarBlank,
+  CheckSquare,
   ChatsCircle,
   CircleNotch,
   Code,
   Cpu,
+  FileText,
   Gear,
   Lightning,
+  MagnifyingGlass,
   Plus,
+  ShareNetwork,
   SquaresFour,
   Trash,
+  Wallet,
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
@@ -27,16 +34,21 @@ import {
   createCodexConversation,
   deleteConversation,
   loadCodexMessages,
+  loadMessages,
+  restartBrain,
+  restartMlx,
 } from "../lib/api";
 
 function StatusIcon({
   icon,
   status,
   title,
+  onClick,
 }: {
   icon: React.ReactNode;
   status: string;
   title: string;
+  onClick?: () => void;
 }) {
   const online = status === "online";
   const checking = status === "checking";
@@ -45,7 +57,9 @@ function StatusIcon({
     <button
       type="button"
       title={title}
-      className="relative flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300"
+      disabled={checking || !onClick}
+      onClick={onClick}
+      className="relative flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-60"
     >
       {icon}
       <span
@@ -117,15 +131,39 @@ export function Sidebar() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const isCodePage = currentPage === "code";
-  const visibleConversations = conversations.filter((c) =>
-    isCodePage ? c.kind === "codex" : c.kind !== "codex",
-  );
+  const isLifePage =
+    currentPage === "documents" ||
+    currentPage === "fitness" ||
+    currentPage === "money" ||
+    currentPage === "study" ||
+    currentPage === "todo" ||
+    currentPage === "socials";
+  const isBuddyChatSurface = currentPage === "chat" || isLifePage;
+
+  function ensureBuddyConversation() {
+    const active = useConversationStore
+      .getState()
+      .conversations.find((c) => c.id === activeConversationId);
+    if (active?.kind === "research" || active?.kind === "codex") {
+      const buddy = useConversationStore
+        .getState()
+        .conversations.find((c) => c.kind !== "research" && c.kind !== "codex");
+      setActiveConversationId(buddy?.id ?? null);
+      setMessages([]);
+      if (buddy) loadMessages(buddy.id).catch(console.error);
+    }
+  }
+
+  const visibleConversations = conversations.filter((c) => {
+    if (isCodePage) return c.kind === "codex";
+    return c.kind !== "codex";
+  });
 
   async function handleNewChat() {
     const conv = await createConversation();
     setActiveConversationId(conv.id);
     setMessages([]);
-    setCurrentPage("chat");
+    if (!isLifePage) setCurrentPage("chat");
     setSidebarCollapsed(false);
   }
 
@@ -186,7 +224,7 @@ export function Sidebar() {
           className="h-9 w-9 rounded-xl object-cover"
         />
 
-        <nav className="mt-4 flex flex-col items-center gap-1">
+        <nav className="mt-4 flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">
           <RailButton
             active={currentPage === "dashboard"}
             onClick={() => setCurrentPage("dashboard")}
@@ -202,22 +240,11 @@ export function Sidebar() {
               <CaretDoubleRight size={18} />
             </RailButton>
           )}
-        </nav>
-
-        <div className="mt-auto flex flex-col items-center gap-1 pb-1">
-          <StatusIcon
-            icon={<Cpu size={18} weight="duotone" />}
-            status={mlxStatus}
-            title={`MLX ${mlxStatus}`}
-          />
-          <StatusIcon
-            icon={<Brain size={18} weight="duotone" />}
-            status={brainStatus}
-            title={`Brain ${brainStatus}`}
-          />
+          <div className="my-1 h-px w-6 bg-zinc-800" />
           <RailButton
             active={currentPage === "chat"}
             onClick={() => {
+              ensureBuddyConversation();
               setCurrentPage("chat");
               if (sidebarCollapsed) setSidebarCollapsed(false);
             }}
@@ -268,6 +295,94 @@ export function Sidebar() {
               weight={currentPage === "calendar" ? "fill" : "regular"}
             />
           </RailButton>
+          <div className="my-1 h-px w-6 bg-zinc-800" />
+          <RailButton
+            active={currentPage === "documents"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("documents");
+            }}
+            title="Documents"
+          >
+            <FileText size={20} weight={currentPage === "documents" ? "fill" : "regular"} />
+          </RailButton>
+          <RailButton
+            active={currentPage === "fitness"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("fitness");
+            }}
+            title="Fitness & Tracking"
+          >
+            <Barbell size={20} weight={currentPage === "fitness" ? "fill" : "regular"} />
+          </RailButton>
+          <RailButton
+            active={currentPage === "money"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("money");
+            }}
+            title="Money"
+          >
+            <Wallet size={20} weight={currentPage === "money" ? "fill" : "regular"} />
+          </RailButton>
+          <RailButton
+            active={currentPage === "study"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("study");
+            }}
+            title="Study Planner"
+          >
+            <BookOpen size={20} weight={currentPage === "study" ? "fill" : "regular"} />
+          </RailButton>
+          <RailButton
+            active={currentPage === "todo"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("todo");
+            }}
+            title="To-Do"
+          >
+            <CheckSquare size={20} weight={currentPage === "todo" ? "fill" : "regular"} />
+          </RailButton>
+          <RailButton
+            active={currentPage === "socials"}
+            onClick={() => {
+              ensureBuddyConversation();
+              setCurrentPage("socials");
+            }}
+            title="Socials"
+          >
+            <ShareNetwork size={20} weight={currentPage === "socials" ? "fill" : "regular"} />
+          </RailButton>
+        </nav>
+
+        <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pb-1 pt-1">
+          <StatusIcon
+            icon={<Cpu size={18} weight="duotone" />}
+            status={mlxStatus}
+            title={
+              mlxStatus === "checking"
+                ? "Model restarting…"
+                : `Model ${mlxStatus} — click to restart`
+            }
+            onClick={() => {
+              restartMlx().catch(console.error);
+            }}
+          />
+          <StatusIcon
+            icon={<Brain size={18} weight="duotone" />}
+            status={brainStatus}
+            title={
+              brainStatus === "checking"
+                ? "Brain restarting…"
+                : `Brain ${brainStatus} — click to restart`
+            }
+            onClick={() => {
+              restartBrain().catch(console.error);
+            }}
+          />
           <RailButton
             active={currentPage === "settings"}
             onClick={() => setCurrentPage("settings")}
@@ -321,7 +436,7 @@ export function Sidebar() {
             {visibleConversations.map((conv) => {
               const isActive = isCodePage
                 ? activeCodeConversationId === conv.id
-                : activeConversationId === conv.id && currentPage === "chat";
+                : activeConversationId === conv.id && isBuddyChatSurface;
               const deleteBlocked =
                 !isCodePage && isStreaming && activeConversationId === conv.id;
               const showDelete =
@@ -350,12 +465,15 @@ export function Sidebar() {
                         );
                       } else {
                         setActiveConversationId(conv.id);
-                        setCurrentPage("chat");
+                        if (conv.kind === "research" || !isLifePage) setCurrentPage("chat");
                       }
                     }}
-                    className="min-w-0 flex-1 truncate px-2.5 py-2 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2.5 py-2 text-left"
                   >
-                    {conv.title}
+                    {conv.kind === "research" && (
+                      <MagnifyingGlass size={12} className="shrink-0 text-zinc-500" />
+                    )}
+                    <span className="truncate">{conv.title}</span>
                   </button>
                   <button
                     type="button"

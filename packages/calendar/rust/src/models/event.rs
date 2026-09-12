@@ -233,6 +233,7 @@ pub struct ReminderDelivery {
 pub const CATEGORIES: &[(&str, &str, &str)] = &[
     ("work", "Work", "#3B82F6"),
     ("personal", "Personal", "#8B5CF6"),
+    ("social", "Socials", "#EC4899"),
     ("birthdays", "Birthdays", "#10B981"),
     ("holidays", "Holidays", "#F59E0B"),
     ("general", "General", "#64748B"),

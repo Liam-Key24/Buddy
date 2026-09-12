@@ -8,14 +8,18 @@ import {
 } from "react";
 import {
   PaperPlaneTilt,
+  Square,
   TextB,
   TextItalic,
   Code,
   ListBullets,
+  MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useChatStore } from "../stores/useChatStore";
-import { useAppStore } from "../stores/useAppStore";
-import { sendMessage, createConversation } from "../lib/api";
+import { useAppStore, type AppPage } from "../stores/useAppStore";
+import { useConversationStore } from "../stores/useConversationStore";
+import { sendMessage, createConversation, loadConversations, loadMessages, stopRun } from "../lib/api";
+import { createResearchConversation, researchEnsure } from "../lib/lifeApi";
 
 const MIN_HEIGHT = 40;
 const MAX_HEIGHT = 200;
@@ -25,9 +29,17 @@ type FormatAction = "bold" | "italic" | "code" | "list";
 export function ChatInput() {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { activeConversationId, isStreaming, setActiveConversationId } =
+  const { activeConversationId, isStreaming, setActiveConversationId, setMessages } =
     useChatStore();
-  const { pendingChatMessage, setPendingChatMessage } = useAppStore();
+  const conversations = useConversationStore((s) => s.conversations);
+  const {
+    pendingChatMessage,
+    setPendingChatMessage,
+    currentPage,
+    setCurrentPage,
+  } = useAppStore();
+  const isResearchChat =
+    conversations.find((c) => c.id === activeConversationId)?.kind === "research";
 
   useEffect(() => {
     if (pendingChatMessage) {
@@ -72,7 +84,44 @@ export function ChatInput() {
     }
   }
 
+  async function handleStop() {
+    const store = useChatStore.getState();
+    const id = store.activeConversationId;
+    store.clearTrace();
+    if (!id) {
+      store.clearStreaming();
+      return;
+    }
+    try {
+      await stopRun(id);
+    } catch (err) {
+      console.error("stop failed:", err);
+      useChatStore.getState().clearStreaming();
+    }
+  }
+
+  async function startResearch() {
+    if (isStreaming) return;
+    if (isResearchChat) {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+    const conv = await createResearchConversation("Deep research");
+    await loadConversations();
+    await researchEnsure(conv.id, conv.title, text.trim()).catch(() => {});
+    setActiveConversationId(conv.id);
+    setMessages([]);
+    await loadMessages(conv.id);
+    setCurrentPage("chat");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Escape" && isStreaming) {
+      e.preventDefault();
+      void handleStop();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -150,9 +199,9 @@ export function ChatInput() {
   return (
     <div className="border-t border-zinc-800 px-4 py-3">
       <div
-        className={`rounded-2xl border bg-zinc-800/50 shadow-sm transition-colors ${
+        className={`rounded-2xl border bg-zinc-800/50 transition-colors ${
           isStreaming
-            ? "border-zinc-800 opacity-70"
+            ? "border-zinc-700"
             : "border-zinc-800 focus-within:border-zinc-600"
         }`}
       >
@@ -189,7 +238,9 @@ export function ChatInput() {
             <ListBullets size={15} />
           </FormatButton>
           <span className="ml-auto hidden px-1 text-[11px] text-zinc-600 sm:inline">
-            Enter to send · Shift+Enter for new line
+            {isStreaming
+              ? "Esc to stop"
+              : "Enter to send · Shift+Enter for new line"}
           </span>
         </div>
 
@@ -199,25 +250,77 @@ export function ChatInput() {
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isStreaming}
-            placeholder="Message Buddy…"
+            placeholder={
+              isStreaming
+                ? "Waiting on the model…"
+                : composerPlaceholder(currentPage, isResearchChat)
+            }
             rows={1}
-            className="chat-composer max-h-50 min-h-10 flex-1 resize-y bg-transparent px-2 py-2 text-sm leading-relaxed text-zinc-200 placeholder-zinc-500 outline-none disabled:opacity-50"
+            className="chat-composer max-h-50 min-h-10 flex-1 resize-y bg-transparent px-2 py-2 text-sm leading-relaxed text-zinc-200 placeholder-zinc-500 outline-none"
             style={{ height: MIN_HEIGHT }}
           />
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={() => void handleStop()}
+              aria-label="Stop run"
+              title="Stop"
+              className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-red-500 text-white transition hover:bg-red-600"
+            >
+              <Square size={14} weight="fill" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!canSend}
+              aria-label="Send message"
+              className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-500 text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <PaperPlaneTilt size={16} weight="fill" />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3 px-0.5">
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={handleSend}
-            disabled={!canSend}
-            aria-label="Send message"
-            className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-500 text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Deep research"
+            aria-label="Deep research"
+            aria-pressed={isResearchChat}
+            disabled={isStreaming}
+            onClick={() => void startResearch()}
+            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition disabled:opacity-40 ${
+              isResearchChat
+                ? "border-blue-500/40 bg-blue-500/15 text-blue-400"
+                : "border-zinc-800 bg-zinc-800/60 text-zinc-500 hover:text-zinc-300"
+            }`}
           >
-            <PaperPlaneTilt size={16} weight="fill" />
+            <MagnifyingGlass size={12} weight={isResearchChat ? "fill" : "regular"} />
+            Research
           </button>
         </div>
+        <p className="hidden text-[11px] text-zinc-600 sm:block">
+          {isResearchChat
+            ? "Deep research — local 14B, findings saved on this thread"
+            : "Dump your day or ask anything — Buddy files it"}
+        </p>
       </div>
     </div>
   );
+}
+
+function composerPlaceholder(page: AppPage, research: boolean): string {
+  if (research) return "Dump a question to research…";
+  switch (page) {
+    case "documents":
+      return "Paste a brief, or dump an idea into a doc…";
+    case "calendar":
+      return "Dump your day — pins, plans, what’s on…";
+    default:
+      return "Dump your day — Buddy files it…";
+  }
 }
 
 function FormatButton({

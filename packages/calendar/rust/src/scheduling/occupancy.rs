@@ -89,6 +89,10 @@ pub fn build_occupancy_excluding(
         if event.end_time <= ctx.range.start || event.start_time >= ctx.range.end {
             continue;
         }
+        // All-day holiday/birthday markers are not midnight–midnight busy.
+        if !crate::scheduling::event_occupies_time(event) {
+            continue;
+        }
         intervals.push(BusyInterval {
             start: event.start_time,
             end: event.end_time,

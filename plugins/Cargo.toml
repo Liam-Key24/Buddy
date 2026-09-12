@@ -8,14 +8,17 @@ buddy-core = { path = "../core" }
 buddy-database = { path = "../database" }
 buddy-memory = { path = "../memory" }
 buddy-calendar = { path = "../packages/calendar/rust" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
 buddy-core = { path = "../core" }
 buddy-database = { path = "../database" }
 buddy-memory = { path = "../memory" }
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 
 [[test]]
 name = "echo_tool"
@@ -28,3 +31,19 @@ path = "tests/calendar_tools.rs"
 [[test]]
 name = "plugin_manager"
 path = "tests/plugin_manager.rs"
+
+[[test]]
+name = "socials_commit"
+path = "tests/socials_commit.rs"
+
+[[test]]
+name = "docs_tools"
+path = "tests/docs_tools.rs"
+
+[[test]]
+name = "life_look_tools"
+path = "tests/life_look_tools.rs"
+
+[[test]]
+name = "tool_router"
+path = "tests/tool_router.rs"

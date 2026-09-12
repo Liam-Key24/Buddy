@@ -60,7 +60,65 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "015_calendar_scheduling",
         include_str!("../migrations/015_calendar_scheduling.sql"),
     ),
+    ("016_todos", include_str!("../migrations/016_todos.sql")),
+    (
+        "017_documents",
+        include_str!("../migrations/017_documents.sql"),
+    ),
+    (
+        "018_research",
+        include_str!("../migrations/018_research.sql"),
+    ),
+    ("019_study", include_str!("../migrations/019_study.sql")),
+    (
+        "020_socials",
+        include_str!("../migrations/020_socials.sql"),
+    ),
+    (
+        "021_fitness",
+        include_str!("../migrations/021_fitness.sql"),
+    ),
+    ("022_money", include_str!("../migrations/022_money.sql")),
+    (
+        "023_socials_generate",
+        include_str!("../migrations/023_socials_generate.sql"),
+    ),
+    (
+        "024_integrity_and_indexes",
+        include_str!("../migrations/024_integrity_and_indexes.sql"),
+    ),
+    (
+        "025_money_pots",
+        include_str!("../migrations/025_money_pots.sql"),
+    ),
 ];
+
+/// Quote FTS5 terms so user input cannot change match operators.
+pub(crate) fn fts_match_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| term.replace('"', ""))
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+mod documents;
+mod fitness;
+mod money;
+mod research;
+mod socials;
+mod study;
+mod todos;
+
+pub use documents::*;
+pub use fitness::*;
+pub use money::*;
+pub use research::*;
+pub use socials::*;
+pub use study::*;
+pub use todos::*;
 
 pub const SPARK_STALE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub const SPARK_NUDGE_COOLDOWN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -582,11 +640,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<MessageSearchResult>, DbError> {
         let conn = self.conn.lock().unwrap();
-        let fts_query = query
-            .split_whitespace()
-            .map(|term| format!("\"{term}\"*"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let fts_query = fts_match_query(query);
 
         if fts_query.is_empty() {
             return Ok(Vec::new());
@@ -1198,6 +1252,24 @@ impl Database {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
+    pub fn upsert_lifestyle_schedule_rule(
+        &self,
+        kind: &str,
+        segments_json: &str,
+        updated_at: i64,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO lifestyle_schedule_rules (kind, segments_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(kind) DO UPDATE SET
+                segments_json = excluded.segments_json,
+                updated_at = excluded.updated_at",
+            params![kind, segments_json, updated_at],
+        )?;
+        Ok(())
     }
 
     pub fn get_lifestyle_schedule_rule(

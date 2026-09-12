@@ -7,10 +7,22 @@ use std::sync::Arc;
 #[test]
 fn calendar_tools_appear_in_catalog() {
     let catalog = tool_catalog_text();
-    assert!(catalog.contains("calendar.list_events"));
-    assert!(catalog.contains("calendar.create_event"));
-    assert!(catalog.contains("calendar.duplicate_event"));
-    assert!(catalog.contains("calendar.get_today"));
+    assert!(catalog.contains("calendar.look"));
+    assert!(catalog.contains("calendar.pin"));
+    assert!(catalog.contains("calendar.organize"));
+    assert!(catalog.contains("money.log"));
+    assert!(catalog.contains("money.pot"));
+    assert!(catalog.contains("money.pots"));
+    assert!(catalog.contains("fitness.log_food"));
+    assert!(catalog.contains("fitness.look"));
+    assert!(catalog.contains("money.list"));
+    assert!(catalog.contains("study.look"));
+    assert!(catalog.contains("research.get"));
+    assert!(catalog.contains("socials.look"));
+    assert!(catalog.contains("list_sparks"));
+    assert!(catalog.contains("lifestyle.set_schedule"));
+    assert!(!catalog.contains("calendar.schedule_task"));
+    assert!(!catalog.contains("echo:"));
 }
 
 #[test]

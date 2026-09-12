@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use buddy_core::{excluded_paths_from_setting, ToolResult};
 use serde::Serialize;
-use tauri::{Emitter, State};
+use serde_json::json;
+use tauri::{Emitter, Manager, State};
 
 use crate::orchestrator;
 use crate::services::{ProcessManager, ServiceStatus};
@@ -31,6 +32,8 @@ pub struct SettingsMap {
     pub calendar_notifications_enabled: bool,
     pub calendar_default_timezone: String,
     pub calendar_default_reminders_json: String,
+    pub fitness_calorie_target: String,
+    pub money_currency: String,
 }
 
 fn setting_or(state: &AppState, key: &str, default: &str) -> String {
@@ -51,11 +54,27 @@ pub async fn start_brain(
 }
 
 #[tauri::command]
+pub async fn restart_brain(
+    process_manager: State<'_, Arc<ProcessManager>>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    process_manager.restart_brain(&state).await
+}
+
+#[tauri::command]
 pub fn start_mlx(
     process_manager: State<'_, Arc<ProcessManager>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     process_manager.start_mlx(&state)
+}
+
+#[tauri::command]
+pub async fn restart_mlx(
+    process_manager: State<'_, Arc<ProcessManager>>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    process_manager.restart_mlx(&state).await
 }
 
 #[tauri::command]
@@ -101,8 +120,37 @@ pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     conversation_id: String,
     text: String,
+    ui_context: Option<String>,
+    chat_mode: Option<String>,
 ) -> Result<(), String> {
-    orchestrator::send_message(app, &state, conversation_id, text).await
+    orchestrator::send_message(app, &state, conversation_id, text, ui_context, chat_mode)
+        .await
+}
+
+#[tauri::command]
+pub fn stop_run(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> Result<(), String> {
+    tracing::info!(conversation_id = %conversation_id, "stop run requested");
+    if state.runs.cancel(Some(&conversation_id)) {
+        if let Some(pm) = app.try_state::<Arc<ProcessManager>>() {
+            pm.interrupt_mlx(&state);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resolve_clarification(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    field: String,
+    value: String,
+) -> Result<(), String> {
+    orchestrator::resolve_clarification(app, &state, conversation_id, field, value).await
 }
 
 #[tauri::command]
@@ -116,7 +164,7 @@ pub fn run_tool(
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, String> {
-    const DEFAULT_MODEL: &str = "mlx-community/Llama-3.2-3B-Instruct-4bit";
+    const DEFAULT_MODEL: &str = "mlx-community/Qwen3-14B-4bit";
     let model_name = setting_or(&state, "model_name", DEFAULT_MODEL);
     let fs_excluded_paths =
         excluded_paths_from_setting(state.db.get_setting("fs_excluded_paths").ok().flatten());
@@ -125,7 +173,7 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, Stri
         mlx_url: state.mlx_url(),
         brain_url: state.brain_url(),
         log_level: setting_or(&state, "log_level", "info"),
-        auto_start_mlx: setting_or(&state, "auto_start_mlx", "true") == "true",
+        auto_start_mlx: setting_or(&state, "auto_start_mlx", "false") == "true",
         model_name_chat: setting_or(&state, "model_name_chat", &model_name),
         model_name_code: setting_or(&state, "model_name_code", &model_name),
         llm_profile_router: setting_or(&state, "llm_profile_router", &model_name),
@@ -159,6 +207,8 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsMap, Stri
             "calendar_default_reminders_json",
             "[{\"minutes_before\":15,\"method\":\"popup\"}]",
         ),
+        fitness_calorie_target: setting_or(&state, "fitness_calorie_target", "2500"),
+        money_currency: setting_or(&state, "money_currency", "GBP"),
     })
 }
 
@@ -692,6 +742,36 @@ pub async fn lifestyle_list_blocks(
 }
 
 #[tauri::command]
+pub async fn lifestyle_list_rules(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<buddy_calendar::LifestyleScheduleRule>, String> {
+    state
+        .calendar
+        .list_schedule_rules()
+        .await
+        .map_err(calendar_err)
+}
+
+#[tauri::command]
+pub async fn lifestyle_set_times(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    kind: String,
+    start_hm: String,
+    end_hm: String,
+) -> Result<buddy_calendar::LifestyleScheduleRule, String> {
+    let parsed = buddy_calendar::ScheduleKind::parse(&kind)
+        .ok_or_else(|| format!("kind must be work or sleep, got {kind}"))?;
+    let rule = state
+        .calendar
+        .set_schedule_times(parsed, &start_hm, &end_hm)
+        .await
+        .map_err(calendar_err)?;
+    let _ = app.emit("calendar-updated", ());
+    Ok(rule)
+}
+
+#[tauri::command]
 pub async fn dream_list(
     state: State<'_, Arc<AppState>>,
     sleep_date: String,
@@ -832,3 +912,30 @@ pub async fn calendar_day_summary(
 ) -> Result<buddy_calendar::DaySummary, String> {
     state.calendar.day_summary(day).await.map_err(calendar_err)
 }
+
+#[tauri::command]
+pub async fn calendar_commit_proposal(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    conversation_id: Option<String>,
+) -> Result<String, String> {
+    crate::calendar_proposal::commit_stored_proposal(
+        &app,
+        &state,
+        conversation_id.as_deref(),
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn calendar_dismiss_proposal(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    conversation_id: Option<String>,
+) -> Result<(), String> {
+    crate::calendar_proposal::clear_proposal(&state, &app, conversation_id.as_deref());
+    Ok(())
+}
+
+pub mod life;

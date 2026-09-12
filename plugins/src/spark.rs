@@ -9,6 +9,10 @@ pub struct SaveSparkTool {
     db: Arc<Database>,
 }
 
+pub struct ListSparkTool {
+    db: Arc<Database>,
+}
+
 pub struct UpdateSparkTool {
     db: Arc<Database>,
     memory: Arc<MemoryManager>,
@@ -18,6 +22,61 @@ pub struct UpdateSparkTool {
 impl SaveSparkTool {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
+    }
+}
+
+impl ListSparkTool {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ListSparkInput {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl Tool for ListSparkTool {
+    fn name(&self) -> &str {
+        "list_sparks"
+    }
+
+    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let parsed: ListSparkInput = parse_tool_json(input, "list_sparks").unwrap_or_default();
+        let status = parsed
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let limit = parsed.limit.unwrap_or(30).clamp(1, 80);
+        let sparks = self
+            .db
+            .list_sparks(status)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        let rows: Vec<_> = sparks
+            .into_iter()
+            .take(limit)
+            .map(|s| {
+                let content = if s.content.chars().count() > 280 {
+                    format!("{}…", s.content.chars().take(280).collect::<String>())
+                } else {
+                    s.content.clone()
+                };
+                serde_json::json!({
+                    "id": s.id,
+                    "content": content,
+                    "tags": s.tags,
+                    "status": s.status,
+                    "updated_at": s.updated_at,
+                })
+            })
+            .collect();
+        Ok(ToolResult {
+            output: serde_json::to_string_pretty(&rows).unwrap_or_default(),
+        })
     }
 }
 

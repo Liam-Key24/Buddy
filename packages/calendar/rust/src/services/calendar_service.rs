@@ -7,17 +7,20 @@ use uuid::Uuid;
 use crate::error::CalendarError;
 use crate::models::{
     default_color_for_category, CreateEventInput, DateRange, Event, EventFilters, EventPriority,
-    Flexibility, ReminderDelivery, UpdateEventInput,
+    Flexibility, LifestyleScheduleRule, ReminderDelivery, ScheduleKind, ScheduleSegment,
+    UpdateEventInput,
 };
 use crate::notifications::{
     dismiss_reminder, list_due_deliveries, list_notifications, mark_reminder_sent,
     parse_reminders, rebuild_reminders_for_event, serialize_reminders, snooze_reminder,
 };
 use crate::scheduling::{
-    block_focus_time, compose_day_summary, detect_conflicts, find_free_slots, plan_day,
-    reschedule_flexible, schedule_items, ConflictReport, DayCapacity, DaySummary, FreeSlot,
-    PlanDayRequest, PlanDayResult, ProposedBlock, ScheduleItem, ScheduleItemsResult,
-    SchedulingContext, SchedulingPolicy, WriteEventOutcome,
+    block_focus_time, compose_day_summary, compose_look_snapshot, constraint_after_work,
+    constraint_weekend, detect_conflicts, find_free_slots, parse_duration_minutes, plan_day,
+    punch_work_for_off_days, reschedule_flexible, resolve_when_range, resolve_window,
+    schedule_items, ConflictReport, DayCapacity, DaySummary, FreeSlot, LookSnapshot,
+    OrganizeItemIn, OrganizeMode, OrganizeResult, PlanDayRequest, PlanDayResult, ProposedBlock,
+    ScheduleItem, ScheduleItemsResult, SchedulingContext, SchedulingPolicy, WriteEventOutcome,
 };
 use crate::services::recurrence::{
     expand_event_in_range, parse_recurrence, serialize_recurrence,
@@ -128,9 +131,9 @@ impl CalendarService {
         let mut policy = self.scheduling_policy();
         policy.allow_reduce_buffer = allow_reduce_buffer;
         let events = self.list_events(range, EventFilters::default()).await?;
-        let lifestyle_blocks = self
-            .list_schedule_blocks(range.start, range.end)
-            .await?;
+        let lifestyle_blocks =
+            crate::services::schedule_service::list_blocks_in_range(&self.db, range.start, range.end)?;
+        let lifestyle_blocks = punch_work_for_off_days(&events, lifestyle_blocks);
         Ok(SchedulingContext::new(
             events,
             lifestyle_blocks,
@@ -454,18 +457,8 @@ impl CalendarService {
     }
 
     pub async fn get_this_week(&self) -> Result<Vec<Event>, CalendarError> {
-        let now = Utc::now();
-        let weekday = now.weekday().num_days_from_sunday() as i64;
-        let start_day = now.date_naive() - Duration::days(weekday);
-        let start = Utc
-            .from_utc_datetime(&start_day.and_hms_opt(0, 0, 0).unwrap())
-            .timestamp_millis();
-        let end = start + Duration::days(7).num_milliseconds();
-        self.list_events(
-            DateRange { start, end },
-            EventFilters::default(),
-        )
-        .await
+        let range = resolve_window(Some("this_week"));
+        self.list_events(range, EventFilters::default()).await
     }
 
     // --- Reminders / notifications ---
@@ -508,7 +501,82 @@ impl CalendarService {
         start: i64,
         end: i64,
     ) -> Result<Vec<crate::models::ScheduleBlock>, CalendarError> {
-        crate::services::schedule_service::list_blocks_in_range(&self.db, start, end)
+        let events = self
+            .list_events(DateRange { start, end }, EventFilters::default())
+            .await?;
+        let blocks =
+            crate::services::schedule_service::list_blocks_in_range(&self.db, start, end)?;
+        Ok(punch_work_for_off_days(&events, blocks))
+    }
+
+    pub async fn list_schedule_rules(&self) -> Result<Vec<LifestyleScheduleRule>, CalendarError> {
+        let rows = self.db.list_lifestyle_schedule_rules()?;
+        rows.into_iter().map(row_to_schedule_rule).collect()
+    }
+
+    pub async fn set_schedule_rule(
+        &self,
+        kind: ScheduleKind,
+        segments: Vec<ScheduleSegment>,
+    ) -> Result<LifestyleScheduleRule, CalendarError> {
+        if segments.is_empty() {
+            return Err(CalendarError::InvalidInput(
+                "schedule needs at least one segment".into(),
+            ));
+        }
+        let normalized = normalize_segments(segments)?;
+        let updated_at = chrono_now();
+        let json = serde_json::to_string(&normalized)
+            .map_err(|e| CalendarError::InvalidInput(e.to_string()))?;
+        self.db
+            .upsert_lifestyle_schedule_rule(kind.as_str(), &json, updated_at)?;
+        Ok(LifestyleScheduleRule {
+            kind,
+            segments: normalized,
+            updated_at,
+        })
+    }
+
+    /// Update clock times on existing segments (keep weekdays), or seed a default week.
+    pub async fn set_schedule_times(
+        &self,
+        kind: ScheduleKind,
+        start_hm: &str,
+        end_hm: &str,
+    ) -> Result<LifestyleScheduleRule, CalendarError> {
+        let (sh, sm) = crate::services::schedule_service::parse_hm(start_hm)?;
+        let (eh, em) = crate::services::schedule_service::parse_hm(end_hm)?;
+        let start_hm = format!("{sh:02}:{sm:02}");
+        let end_hm = format!("{eh:02}:{em:02}");
+        let crosses = hm_minutes(&start_hm)? >= hm_minutes(&end_hm)?;
+        let existing = self.db.get_lifestyle_schedule_rule(kind.as_str()).ok();
+        let mut segments: Vec<ScheduleSegment> = match existing {
+            Some(row) => serde_json::from_str(&row.segments_json)
+                .map_err(|e| CalendarError::InvalidInput(e.to_string()))?,
+            None => Vec::new(),
+        };
+        if segments.is_empty() {
+            let by_day = match kind {
+                ScheduleKind::Work => vec!["MO", "TU", "WE", "TH", "FR"],
+                ScheduleKind::Sleep => vec!["MO", "TU", "WE", "TH", "FR", "SA", "SU"],
+            }
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+            segments.push(ScheduleSegment {
+                by_day,
+                start_hm: start_hm.clone(),
+                end_hm: end_hm.clone(),
+                crosses_midnight: crosses,
+            });
+        } else {
+            for seg in &mut segments {
+                seg.start_hm = start_hm.clone();
+                seg.end_hm = end_hm.clone();
+                seg.crosses_midnight = crosses;
+            }
+        }
+        self.set_schedule_rule(kind, segments).await
     }
 
     pub async fn log_dream(
@@ -645,6 +713,188 @@ impl CalendarService {
         Ok(compose_day_summary(&ctx, day_ms))
     }
 
+    pub async fn look(
+        &self,
+        when: Option<String>,
+        focus: Option<String>,
+        query: Option<String>,
+        duration_minutes: Option<u32>,
+    ) -> Result<LookSnapshot, CalendarError> {
+        let range = resolve_when_range(when.as_deref());
+        let focus = focus.unwrap_or_else(|| "events".into()).to_ascii_lowercase();
+        let ctx = self.build_scheduling_context(range, false).await?;
+        let slots = if focus == "free" || focus == "slots" {
+            let duration = duration_minutes.unwrap_or(60).max(15) as i64 * 60_000;
+            find_free_slots(&ctx, duration, 8, None)
+        } else {
+            vec![]
+        };
+        let mut snap = compose_look_snapshot(
+            &ctx,
+            when,
+            &focus,
+            slots,
+            query.as_deref(),
+        );
+        if focus == "work" {
+            snap.events.clear();
+            snap.schedule
+                .retain(|b| b.kind == crate::models::ScheduleKind::Work);
+            if snap.schedule.is_empty() {
+                let next_range = DateRange {
+                    start: range.end,
+                    end: range.end + 8 * 86_400_000,
+                };
+                let next = self.build_scheduling_context(next_range, false).await?;
+                if let Some(block) = next
+                    .lifestyle_blocks
+                    .iter()
+                    .find(|b| b.kind == crate::models::ScheduleKind::Work)
+                {
+                    snap.schedule
+                        .push(crate::scheduling::look_block(block));
+                }
+            }
+        }
+        Ok(snap)
+    }
+
+    pub async fn organize(
+        &self,
+        window: Option<String>,
+        items: Vec<OrganizeItemIn>,
+        constraints: Vec<String>,
+        mode: OrganizeMode,
+        previous_items: Option<Vec<OrganizeItemIn>>,
+        lift_event_ids: Option<Vec<String>>,
+    ) -> Result<OrganizeResult, CalendarError> {
+        let mut range = resolve_window(window.as_deref());
+        let mut working_items = items;
+        if working_items.is_empty() {
+            if let Some(prev) = previous_items {
+                working_items = prev;
+            }
+        }
+
+        let mut lifted_ids = lift_event_ids.unwrap_or_default();
+        let mut ctx = self.build_scheduling_context(range, false).await?;
+        if !lifted_ids.is_empty() {
+            ctx.events
+                .retain(|e| !lifted_ids.iter().any(|id| id == &e.id || e.id.starts_with(&format!("{id}::"))));
+        }
+
+        // Rebalance: no new titles — lift flexible events in window and reschedule them.
+        if working_items.is_empty() {
+            let movable: Vec<Event> = ctx
+                .events
+                .iter()
+                .filter(|e| {
+                    e.flexibility.is_movable()
+                        && e.start_time < range.end
+                        && e.end_time > range.start
+                })
+                .cloned()
+                .collect();
+            for ev in &movable {
+                lifted_ids.push(ev.id.clone());
+                let mins = ((ev.end_time - ev.start_time).max(60_000) / 60_000) as u32;
+                working_items.push(OrganizeItemIn {
+                    title: ev.title.clone(),
+                    duration: None,
+                    duration_minutes: Some(mins.max(15)),
+                    when: None,
+                    count: Some(1),
+                });
+            }
+            ctx.events.retain(|e| !lifted_ids.iter().any(|id| id == &e.id));
+        }
+
+        let default_mins = self
+            .settings
+            .get("preferred_activity_duration")
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n >= 15)
+            .unwrap_or(60);
+
+        let after_work_all = constraint_after_work(&constraints, None);
+        let weekend_all = constraint_weekend(&constraints, None);
+        if weekend_all {
+            range = resolve_window(Some("weekend"));
+            ctx = self.build_scheduling_context(range, false).await?;
+            ctx.events.retain(|e| !lifted_ids.iter().any(|id| id == &e.id));
+        }
+
+        let schedule_items_in: Vec<ScheduleItem> = working_items
+            .iter()
+            .map(|item| {
+                let mins = item
+                    .duration_minutes
+                    .or_else(|| item.duration.as_deref().and_then(parse_duration_minutes))
+                    .unwrap_or(default_mins);
+                let after = after_work_all
+                    || constraint_after_work(&constraints, item.when.as_deref());
+                let weekend = weekend_all || constraint_weekend(&constraints, item.when.as_deref());
+                ScheduleItem {
+                    title: item.title.clone(),
+                    duration_minutes: mins,
+                    deadline: None,
+                    priority: None,
+                    flexibility: Some(Flexibility::Flexible),
+                    category: Some("personal".into()),
+                    description: weekend.then(|| "prefer weekend".into()),
+                    count: item.count,
+                    prefer_spread: Some(item.count.unwrap_or(1) > 1),
+                    prefer_after_work: Some(after),
+                    spark_id: None,
+                }
+            })
+            .collect();
+
+        if schedule_items_in.is_empty() {
+            return Ok(OrganizeResult {
+                status: "empty".into(),
+                window_start: range.start,
+                window_end: range.end,
+                scheduled: vec![],
+                unscheduled: vec![],
+                suggestions: vec![],
+                lifted_ids,
+                apply: false,
+                tradeoff: None,
+            });
+        }
+
+        let apply = matches!(mode, OrganizeMode::Commit);
+        if apply && !lifted_ids.is_empty() {
+            for id in &lifted_ids {
+                let _ = self.delete_event(id).await;
+            }
+        }
+
+        let mut result = schedule_items(&ctx, &schedule_items_in);
+        if apply {
+            result.scheduled = self.persist_proposals(&result.scheduled).await?;
+        }
+
+        Ok(OrganizeResult {
+            status: if result.tradeoff.is_some() {
+                "needs_tradeoff".into()
+            } else if apply {
+                "committed".into()
+            } else {
+                "proposed".into()
+            },
+            window_start: range.start,
+            window_end: range.end,
+            scheduled: result.scheduled,
+            unscheduled: result.unscheduled,
+            suggestions: result.suggestions,
+            lifted_ids,
+            apply,
+            tradeoff: result.tradeoff,
+        })
+    }
+
     pub async fn schedule_task_items(
         &self,
         items: Vec<ScheduleItem>,
@@ -771,6 +1021,45 @@ impl CalendarService {
         }
         Ok(out)
     }
+}
+
+fn row_to_schedule_rule(
+    row: buddy_database::LifestyleScheduleRuleRow,
+) -> Result<LifestyleScheduleRule, CalendarError> {
+    let kind = ScheduleKind::parse(&row.kind)
+        .ok_or_else(|| CalendarError::InvalidInput(format!("bad schedule kind {}", row.kind)))?;
+    let segments: Vec<ScheduleSegment> = serde_json::from_str(&row.segments_json)
+        .map_err(|e| CalendarError::InvalidInput(e.to_string()))?;
+    Ok(LifestyleScheduleRule {
+        kind,
+        segments,
+        updated_at: row.updated_at,
+    })
+}
+
+fn hm_minutes(hm: &str) -> Result<u32, CalendarError> {
+    let (h, m) = crate::services::schedule_service::parse_hm(hm)?;
+    Ok(h * 60 + m)
+}
+
+fn normalize_segments(segments: Vec<ScheduleSegment>) -> Result<Vec<ScheduleSegment>, CalendarError> {
+    let mut out = Vec::new();
+    for mut seg in segments {
+        if seg.by_day.is_empty() {
+            return Err(CalendarError::InvalidInput(
+                "segment by_day cannot be empty".into(),
+            ));
+        }
+        let (sh, sm) = crate::services::schedule_service::parse_hm(&seg.start_hm)?;
+        let (eh, em) = crate::services::schedule_service::parse_hm(&seg.end_hm)?;
+        seg.start_hm = format!("{sh:02}:{sm:02}");
+        seg.end_hm = format!("{eh:02}:{em:02}");
+        if hm_minutes(&seg.start_hm)? >= hm_minutes(&seg.end_hm)? {
+            seg.crosses_midnight = true;
+        }
+        out.push(seg);
+    }
+    Ok(out)
 }
 
 /// Day bounds in local-ish UTC (midnight UTC + day_offset). Sufficient for AI tools.

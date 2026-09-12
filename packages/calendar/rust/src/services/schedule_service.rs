@@ -18,7 +18,7 @@ fn weekday_code(d: Weekday) -> &'static str {
     }
 }
 
-fn parse_hm(hm: &str) -> Result<(u32, u32), CalendarError> {
+pub(crate) fn parse_hm(hm: &str) -> Result<(u32, u32), CalendarError> {
     let parts: Vec<_> = hm.trim().split(':').collect();
     if parts.len() != 2 {
         return Err(CalendarError::InvalidInput(format!("bad time {hm}")));

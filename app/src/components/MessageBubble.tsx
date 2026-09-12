@@ -1,4 +1,5 @@
 import { FormattedText } from "./FormattedText";
+import { ReplyLayer } from "./ReplyLayer";
 
 interface MessageBubbleProps {
   role: "user" | "assistant";
@@ -16,13 +17,13 @@ export function MessageBubble({
   return (
     <div className={`mb-4 flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+        className={`rounded-2xl text-sm leading-relaxed ${
           isUser
-            ? "bg-blue-500 text-white shadow-sm"
-            : "border border-zinc-800 bg-zinc-900 text-zinc-200 shadow-sm"
+            ? "max-w-[75%] bg-blue-500 px-4 py-2.5 text-white"
+            : "max-w-[min(42rem,92%)] border border-zinc-800 bg-zinc-900 px-4 py-3 text-zinc-200"
         }`}
       >
-        <FormattedText text={content} />
+        {isUser ? <FormattedText text={content} /> : <ReplyLayer text={content} />}
         {streaming && (
           <span
             className="streaming-caret ml-0.5 inline-block h-3.5 w-0.5 translate-y-0.5 bg-current align-middle"

@@ -1,5 +1,18 @@
 export type ScheduleKind = "work" | "sleep";
 
+export interface ScheduleSegment {
+  by_day: string[];
+  start_hm: string;
+  end_hm: string;
+  crosses_midnight?: boolean;
+}
+
+export interface LifestyleScheduleRule {
+  kind: ScheduleKind;
+  segments: ScheduleSegment[];
+  updated_at: number;
+}
+
 export interface ScheduleBlock {
   id: string;
   kind: ScheduleKind;

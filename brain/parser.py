@@ -30,6 +30,8 @@ class PlanResponse(BaseModel):
     respond_mode: Optional[str] = None
     preference_detected: Optional[PreferenceDetected] = None
     decision_detected: Optional[DecisionDetected] = None
+    # Agent loop: ask | tool | finish (null → derived from intent).
+    next: Optional[str] = None
 
 
 # Tools whose Core output is already user-facing — skip second MLX call.
@@ -44,7 +46,7 @@ _PASSTHROUGH_TOOLS = frozenset(
         "git_push",
     }
 )
-_PASSTHROUGH_PREFIXES = ("calendar.", "dream.", "work.")
+_PASSTHROUGH_PREFIXES = ("calendar.", "dream.", "work.", "docs.")
 # Prefer MLX planning for these even when heuristics match.
 _HEURISTIC_SLOW_TOOLS = frozenset({"coder.run"})
 
@@ -76,11 +78,27 @@ def try_fast_heuristic_plan(message: str) -> Optional[PlanResponse]:
         return None
     if plan.tool in _HEURISTIC_SLOW_TOOLS:
         return None
+    # Soft idea language goes through MLX — only high-precision spark phrases skip it.
+    if plan.tool == "save_spark" and not _looks_like_idea_fast(message):
+        return None
+    # Never invent a fixed create_event for soft slot booking — schedule into free time.
+    if plan.tool in ("calendar.create_event", "calendar.pin") and _is_soft_slot_booking(
+        message
+    ):
+        plan = PlanResponse(
+            intent="tool_use",
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
+            reasoning="Soft booking without a fixed clock — organize into free time.",
+            response=None,
+        )
+        plan = normalize_plan(plan)
     # Chat fallback from heuristics always says MLX unavailable — not a fast path.
     if plan.reasoning and "MLX unavailable" in plan.reasoning and plan.tool is None:
         return None
     return apply_respond_mode(plan)
 
+# Broad idea language — used when MLX is unavailable (full heuristic fallback).
 IDEA_TRIGGERS = [
     r"\bi have an idea\b",
     r"\bi got an idea\b",
@@ -108,6 +126,16 @@ IDEA_TRIGGERS = [
     r"\bwould be (?:cool|nice|good) if\b",
     r"\bi('ve| have) been thinking\b",
     r"\bsomething to (?:try|do|look into)\b",
+    r"\bspark:\s*",
+    r"\bspark\s+\w",
+]
+
+# High-precision only — safe to skip MLX on the fast path.
+IDEA_TRIGGERS_FAST = [
+    r"\bbrain dump\b",
+    r"\bjot this down\b",
+    r"\bsave this (?:idea|thought|note)\b",
+    r"\bnote to self\b",
     r"\bspark:\s*",
     r"\bspark\s+\w",
 ]
@@ -141,6 +169,16 @@ CALENDAR_QUERY_TODAY = [
     r"\bdo i have anything today\b",
 ]
 
+CALENDAR_QUERY_WORK = [
+    r"\bwhen am i working\b",
+    r"\bwhen do i work\b",
+    r"\bwhat time do i work\b",
+    r"\bwhat are my work hours\b",
+    r"\bwhen do i finish work\b",
+    r"\bwhen does work end\b",
+    r"\bwhen am i at work\b",
+]
+
 CALENDAR_QUERY_TOMORROW = [
     r"\bwhat(?:'s| is) on (?:my )?(?:calendar )?tomorrow\b",
     r"\bwhat(?:'s| is) happening tomorrow\b",
@@ -165,6 +203,22 @@ CALENDAR_QUERY_WEEK = [
     r"\bdo i have anything this week\b",
 ]
 
+CALENDAR_LOOK_CUES = [
+    r"\bwhat(?:'s|s| is) on\b",
+    r"\bwhat(?:'s|s| is) happening\b",
+    r"\bwhat(?:'s|s| is) planned\b",
+    r"\bon my calendar\b",
+    r"\bmy (?:calendar|schedule|agenda|plans)\b",
+    r"\banything\b",
+    r"\bshow me\b",
+    r"\bdo i have\b",
+    r"\bagenda\b",
+    r"\bevents?\b",
+    r"\bplans\b",
+    r"\bgive me\b.+\b(?:week|calendar|agenda|schedule|slots?|free)\b",
+    r"\b(?:all|whole|entire) week\b",
+]
+
 CALENDAR_FREE_TIME = [
     r"\bwhen am i free\b",
     r"\bwhen (?:do i|can i) have free\b",
@@ -174,6 +228,7 @@ CALENDAR_FREE_TIME = [
     r"\bgot any free time\b",
     r"\bwhat(?:'s| is) (?:my )?availability\b",
     r"\bopen slots?\b",
+    r"\bfree slots?\b",
     r"\bfree windows?\b",
     r"\bgaps? in (?:my )?schedule\b",
     r"\bavailable (?:tomorrow|today|this week)\b",
@@ -191,11 +246,156 @@ CALENDAR_BLOCK_TIME = [
     r"\bfocus\s+block\b",
 ]
 
+_CAL_ACTIVITY = (
+    r"climbing|climb|gym|workout|training|yoga|tennis|lunch|"
+    r"study|studying|dentist|doctor|interview|standup|stand-?up|"
+    r"swim|swimming|cycle|cycling|run|running|walk|walking|"
+    r"pilates|cook|cooking|bath"
+)
+
+_COUNT_WORDS = {
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "once": 1,
+    "two": 2,
+    "twice": 2,
+    "couple": 2,
+    "three": 3,
+    "thrice": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+_ACTIVITY_ALIASES = {
+    "climb": "Climbing",
+    "climbing": "Climbing",
+    "gym": "Gym",
+    "workout": "Training",
+    "training": "Training",
+    "yoga": "Yoga",
+    "tennis": "Tennis",
+    "lunch": "Lunch",
+    "study": "Study",
+    "studying": "Study",
+    "dentist": "Dentist",
+    "doctor": "Doctor",
+    "interview": "Interview",
+    "standup": "Standup",
+    "stand-up": "Standup",
+    "swim": "Swim",
+    "swimming": "Swim",
+    "cycle": "Cycling",
+    "cycling": "Cycling",
+    "run": "Run",
+    "running": "Run",
+    "walk": "Walk",
+    "walking": "Walk",
+    "pilates": "Pilates",
+    "cook": "Cooking",
+    "cooking": "Cooking",
+    "bath": "Bath",
+    "code": "Coding",
+    "coding": "Coding",
+    "spark": "Spark",
+    "sparks": "Spark",
+}
+
+_PURPOSE_FILLERS = frozenset(
+    {
+        "include",
+        "plan",
+        "finish",
+        "make",
+        "get",
+        "book",
+        "do",
+        "go",
+        "spend",
+        "have",
+        "take",
+        "fit",
+        "schedule",
+        "want",
+        "need",
+        "try",
+        "add",
+        "put",
+        "set",
+        "keep",
+        "use",
+        "find",
+        "block",
+        "hold",
+        "reserve",
+        "organise",
+        "organize",
+        "help",
+        "start",
+        "work",
+    }
+)
+
+_JUNK_TITLES = frozenset(
+    {
+        "session",
+        "sessions",
+        "include",
+        "want",
+        "week",
+        "time",
+        "times",
+        "plan",
+        "after",
+        "work",
+        "my",
+        "the",
+        "to",
+        "for",
+        "next",
+        "this",
+        "today",
+        "tomorrow",
+        "weekend",
+        "hour",
+        "hours",
+        "min",
+        "mins",
+        "minute",
+        "minutes",
+        "and",
+        "or",
+        "a",
+        "an",
+        "some",
+        "it",
+        "them",
+        "these",
+        "that",
+        "with",
+    }
+)
+
+_ACTIVITY_ALT = "|".join(
+    sorted((_ACTIVITY_ALIASES.keys()), key=len, reverse=True)
+)
+_CAL_WHEN = (
+    r"hour|am|pm|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|wed|thu|fri|sat|sun|today|tomorrow|midday|noon"
+)
+
 CALENDAR_SCHEDULE_TASK = [
     r"\bfinish\b.+\b(?:this week|today|tomorrow)\b",
     r"\bneed to finish\b.+\b(?:by|this week|today|tomorrow)\b",
     r"\bget\b.+\bdone\b.+\b(?:this week|today|tomorrow)\b",
     r"\bfit\b.+\binto (?:my )?week\b",
+    r"\bplan (?:out )?(?:my )?week\b",
+    r"\bschedule (?:out )?(?:my )?week\b",
     r"\bfind time for\b",
     r"\bschedule (?:the |a |my )?(?:task|report|project)\b",
     r"\bauto[- ]?schedule\b",
@@ -206,6 +406,15 @@ CALENDAR_SCHEDULE_TASK = [
     r"\bmake time for\b",
     r"\bfit in\b.+\b(?:this week|today|tomorrow|\d+\s+times?)\b",
     r"\bschedule\b.+\b\d+\s+times?\b",
+    # Soft NL: book time / book an activity without a fixed clock time.
+    r"\bbook (?:some |a )?time\b",
+    rf"\bbook\b.+\bfor\b.+\b(?:{_CAL_ACTIVITY})\b",
+    r"\b(?:want to|wanna|need to)\s+book\b",
+    r"\bi want to book\b",
+    rf"\bbook\b.+\b(?:{_CAL_ACTIVITY})\b",
+    # Multi-session week packing ("3 30min study sessions, 2 climbing…").
+    r"\b\d+\s+(?:\d+\s*(?:min(?:ute)?s?|hours?|hrs?|hr)|(?:\d+:\d+)\s*(?:hours?|hrs?|hr)?)\s+\w[\w\s]{0,40}?\s+sessions?\b",
+    r"\b\d+\s+\w[\w\s]{0,40}?\s+sessions?\s+for\b",
 ]
 
 CALENDAR_PLAN_DAY = [
@@ -236,15 +445,6 @@ CALENDAR_CAPACITY = [
     r"\bsummar(?:y|ise|ize) (?:my )?(?:day|today)\b",
 ]
 
-_CAL_ACTIVITY = (
-    r"climbing|gym|workout|training|work|run|yoga|tennis|lunch|"
-    r"dentist|doctor|interview|standup|stand-?up"
-)
-_CAL_WHEN = (
-    r"hour|am|pm|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-    r"mon|tue|wed|thu|fri|sat|sun|today|tomorrow|midday|noon"
-)
-
 CALENDAR_CREATE = [
     r"\b(?:add|create|schedule|book|put|make|set up|pencil in|slot in|throw on)\b.+\b(?:event|meeting|appointment|call|reminder)\b",
     r"\b(?:add|create|schedule|book|put|make)\b.+\b(?:lunch|break)\b",
@@ -261,18 +461,32 @@ CALENDAR_CREATE = [
     r"\badd (?:this|that|it) to (?:my )?(?:calend(?:a|e)r)\b",
     r"\bremind me (?:to|about)\b",
     r"\bevery\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-    rf"\b(?:{_CAL_ACTIVITY})\b.+\b(?:{_CAL_WHEN})\b",
-    rf"\bi have (?:{_CAL_ACTIVITY})\b.+\b(?:{_CAL_WHEN})\b",
+    # Fixed clock only for activity+when create — soft day-only booking is schedule_task.
+    rf"\b(?:{_CAL_ACTIVITY})\b.+\b(?:\d{{1,2}}(?::\d{{2}})?\s*(?:am|pm)|noon|midday)\b",
+    rf"\bi have (?:{_CAL_ACTIVITY})\b.+\b(?:\d{{1,2}}(?::\d{{2}})?\s*(?:am|pm)|noon|midday)\b",
     r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\s*(?:-|to)\s*\d{1,2}:\d{2}",
     r"\bmon(?:day)?\s*(?:till|to|through|-)\s*fri",
 ]
 
 TOOL_ALIASES = {
-    "calendar.add_event": "calendar.create_event",
-    "calendar.schedule_event": "calendar.create_event",
-    "calendar.add": "calendar.create_event",
-    "calendar.schedule": "calendar.create_event",
-    "calendar.create": "calendar.create_event",
+    "calendar.add_event": "calendar.pin",
+    "calendar.schedule_event": "calendar.pin",
+    "calendar.add": "calendar.pin",
+    "calendar.schedule": "calendar.organize",
+    "calendar.create": "calendar.pin",
+    "calendar.create_event": "calendar.pin",
+    "calendar.schedule_task": "calendar.organize",
+    "calendar.plan_day": "calendar.organize",
+    "calendar.block_time": "calendar.organize",
+    "calendar.find_free_time": "calendar.look",
+    "calendar.get_today": "calendar.look",
+    "calendar.get_tomorrow": "calendar.look",
+    "calendar.get_this_week": "calendar.look",
+    "calendar.search_events": "calendar.look",
+    "calendar.get_capacity": "calendar.look",
+    "calendar.day_summary": "calendar.look",
+    "calendar.delete_event": "calendar.pin",
+    "calendar.update_event": "calendar.pin",
 }
 
 CALENDAR_DELETE = [
@@ -365,6 +579,11 @@ def _looks_like_idea(message: str) -> bool:
     return any(re.search(pattern, lower) for pattern in IDEA_TRIGGERS)
 
 
+def _looks_like_idea_fast(message: str) -> bool:
+    lower = message.strip().lower()
+    return any(re.search(pattern, lower) for pattern in IDEA_TRIGGERS_FAST)
+
+
 def _looks_like_code_request(message: str) -> bool:
     lower = message.strip().lower()
     return any(re.search(pattern, lower) for pattern in CODE_TRIGGERS)
@@ -442,6 +661,31 @@ def _has_explicit_clock(text: str) -> bool:
     if re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", text, flags=re.IGNORECASE):
         return True
     if re.search(r"\b\d{1,2}:\d{2}\b", text):
+        return True
+    if re.search(r"\b(?:noon|midday)\b", text, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_soft_slot_booking(message: str) -> bool:
+    """True when the user wants a slot found, not a fixed-clock appointment."""
+    if _has_explicit_clock(message):
+        return False
+    if re.search(
+        r"\b(?:meeting|appointment|event|call|reminder|lunch|break)\b",
+        message,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if _matches_any(message, CALENDAR_SCHEDULE_TASK):
+        return True
+    if re.search(r"\bbook\b", message, flags=re.IGNORECASE):
+        return True
+    if re.search(rf"\b(?:{_CAL_ACTIVITY})\b", message, flags=re.IGNORECASE) and re.search(
+        r"\b(?:today|tomorrow|this week|next week)\b",
+        message,
+        flags=re.IGNORECASE,
+    ):
         return True
     return False
 
@@ -564,10 +808,10 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     ):
         return "Break", "personal" if category == "general" else category
 
-    # "to code" / "for coding" — often AFTER day words; one activity word only.
+    # "to code" / "for coding" — skip glue ("to include", "to finish").
     purpose = re.search(
         r"\b(?:to|for)\s+(?!"
-        r"(?:\d+|a|an|the|me|my|"
+        r"(?:\d+|a|an|the|me|my|book|"
         r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
         r"tomorrow|today|tonight|hours?|hrs?|minutes?|mins?)\b)"
         r"(?:go\s+|do\s+)?([a-z]+)\b",
@@ -575,12 +819,13 @@ def _infer_title_category(segment: str) -> tuple[str, str]:
     )
     if purpose:
         raw = purpose.group(1).strip()
-        title = activity_map.get(
-            raw, raw[:1].upper() + raw[1:] if raw else "New event"
-        )
-        if category == "general" and raw in activity_map:
-            category = "personal"
-        return title[:60], category
+        if raw not in _PURPOSE_FILLERS:
+            title = activity_map.get(
+                raw, _ACTIVITY_ALIASES.get(raw, raw[:1].upper() + raw[1:] if raw else "New event")
+            )
+            if category == "general" and (raw in activity_map or raw in _ACTIVITY_ALIASES):
+                category = "personal"
+            return title[:60], category
 
     if re.search(r"\bclimb", lower):
         return "Climbing", "personal" if category == "general" else category
@@ -719,8 +964,10 @@ def _heuristic_create_event_input(message: str) -> str:
             events[i]["start_time"] = prev_end
             events[i]["end_time"] = prev_end + dur
     if len(events) == 1:
-        return json.dumps(events[0])
-    return json.dumps({"events": events})
+        out = json.dumps(events[0])
+    else:
+        out = json.dumps({"events": events})
+    return out
 
 
 def _heuristic_delete_event_input(message: str) -> str:
@@ -841,8 +1088,9 @@ def _heuristic_free_time_input(message: str) -> str:
     lower = message.lower()
     now = datetime.now().astimezone()
     hours = _parse_duration_hours(lower)
-    minutes = int(round((hours if hours is not None else 2.0) * 60))
-    # Also catch "120 minutes" / "90 min"
+    minutes: int | None = None
+    if hours is not None:
+        minutes = int(round(hours * 60))
     m = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower)
     if m and hours is None:
         minutes = int(m.group(1))
@@ -853,25 +1101,38 @@ def _heuristic_free_time_input(message: str) -> str:
     elif "today" in lower:
         start, end = _local_day_bounds_ms(now)
         start = max(start, int(now.timestamp() * 1000))
+    elif "next week" in lower:
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        week_start = now + timedelta(days=days_until_monday)
+        week_end = week_start + timedelta(days=6)
+        start = _local_day_bounds_ms(week_start)[0]
+        end = _local_day_bounds_ms(week_end)[1] - 1
     else:
         start = int(now.timestamp() * 1000)
         end = _end_of_local_week_ms(now)
 
-    return json.dumps(
-        {
-            "duration_minutes": max(minutes, 15),
-            "start": start,
-            "end": end,
-            "limit": 5,
-        }
-    )
+    payload: dict[str, Any] = {
+        "start": start,
+        "end": end,
+        "limit": 5,
+        # Default slot length for open availability questions.
+        "duration_minutes": max(minutes, 15) if minutes is not None else 60,
+    }
+    return json.dumps(payload)
 
 
 def _heuristic_block_time_input(message: str) -> str:
     lower = message.lower()
     now = datetime.now().astimezone()
     hours = _parse_duration_hours(lower)
-    minutes = int(round((hours if hours is not None else 3.0) * 60))
+    minutes: int | None = None
+    if hours is not None:
+        minutes = int(round(hours * 60))
+    m = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower)
+    if m and hours is None:
+        minutes = int(m.group(1))
     title = "Focus"
     if "cod" in lower:
         title = "Coding"
@@ -879,88 +1140,649 @@ def _heuristic_block_time_input(message: str) -> str:
         title = "Writing"
     elif "read" in lower:
         title = "Reading"
-    m = re.search(
+    m_title = re.search(
         r"\bblock\b(?:\s+\d+\s*(?:hours?|hrs?|minutes?|mins?))?\s+(?:for\s+)?(.+)$",
         message.strip(),
         flags=re.IGNORECASE,
     )
-    if m:
+    if m_title:
         raw = re.sub(
             r"\b(?:this week|today|tomorrow|for)\b.*$",
             "",
-            m.group(1),
+            m_title.group(1),
             flags=re.IGNORECASE,
         ).strip(" .,:-")
         if raw and len(raw) < 60:
             title = raw[:1].upper() + raw[1:]
-    return json.dumps(
-        {
-            "title": title,
-            "duration_minutes": max(minutes, 30),
-            "start": int(now.timestamp() * 1000),
-            "end": _end_of_local_week_ms(now),
-            "apply": True,
+    payload: dict[str, Any] = {
+        "title": title,
+        "start": int(now.timestamp() * 1000),
+        "end": _end_of_local_week_ms(now),
+        "apply": False,
+    }
+    if minutes is not None:
+        payload["duration_minutes"] = max(minutes, 30)
+    return json.dumps(payload)
+
+
+def _looks_like_week_plan(message: str) -> bool:
+    """True for 'plan my week' / multi-session week packing requests."""
+    lower = message.lower()
+    if re.search(r"\bplan (?:out )?(?:my )?week\b", lower):
+        return True
+    if re.search(r"\bschedule (?:out )?(?:my )?week\b", lower):
+        return True
+    session_hits = len(re.findall(r"\bsessions?\b", lower))
+    if session_hits >= 2 and re.search(
+        r"\b(?:week|weekend|after work|include)\b", lower
+    ):
+        return True
+    return False
+
+
+def _title_case_activity(raw: str) -> str:
+    title = re.sub(r"\s+", " ", (raw or "").strip(" .,:-")).strip()
+    title = re.sub(
+        r"^(?:go|do|book|for|the|my|a|some|include)\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    ).strip()
+    lower = title.lower()
+    if re.search(r"\bcyber", lower) and re.search(r"\bstudy", lower):
+        return "Cybersecurity study"
+    if re.search(r"\bcyber", lower):
+        return "Cybersecurity study"
+    for key in sorted(_ACTIVITY_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(key)}\b", lower):
+            return _ACTIVITY_ALIASES[key]
+    if not title or lower in _JUNK_TITLES:
+        return "Task"
+    return title[:1].upper() + title[1:80]
+
+
+def _parse_count_token(raw: str) -> int | None:
+    s = (raw or "").strip().lower()
+    if not s:
+        return None
+    if s.isdigit():
+        return min(max(int(s), 1), 14)
+    return _COUNT_WORDS.get(s)
+
+
+def _parse_session_minutes_near(text: str) -> int | None:
+    """Parse duration from a session clause fragment."""
+    hours = _parse_duration_hours(text)
+    if hours is not None:
+        return max(int(round(hours * 60)), 15)
+    # "1:30hr" / "1:30" without requiring the word hours (climbing style).
+    m = re.search(r"\b(\d+)\s*:\s*(\d+)\s*(?:hours?|hrs?|hr)?\b", text, flags=re.IGNORECASE)
+    if m:
+        return max(int(m.group(1)) * 60 + int(m.group(2)), 15)
+    m = re.search(r"\b(\d+)\s*(?:minutes?|mins?|min)\b", text, flags=re.IGNORECASE)
+    if m:
+        return max(int(m.group(1)), 15)
+    return None
+
+
+def _parse_multi_schedule_tasks(message: str) -> list[dict[str, Any]] | None:
+    """2+ distinct schedule items, or None (used as a routing signal)."""
+    items = _extract_schedule_items(message)
+    return items if items and len(items) >= 2 else None
+
+
+def _extract_schedule_items(message: str) -> list[dict[str, Any]] | None:
+    """NL slot fill: N×activity clauses, with or without duration.
+
+    Glue like 'to include' / 'lets plan my week' is ignored. Duration is
+    optional — Core defaults session length.
+    """
+    lower = message.lower()
+    tasks: list[dict[str, Any]] = []
+    seen_spans: list[tuple[int, int]] = []
+
+    def _overlaps(start: int, end: int) -> bool:
+        return any(not (end <= a or start >= b) for a, b in seen_spans)
+
+    def _weekend_near(start: int) -> bool:
+        window = lower[max(0, start - 40) : start + 12]
+        return bool(re.search(r"\bweekend\b", window))
+
+    def _push(title: str, count: int, minutes: int | None, start: int, end: int) -> None:
+        if _overlaps(start, end):
+            return
+        cleaned = _title_case_activity(title)
+        if cleaned.lower() in _JUNK_TITLES or cleaned == "Task":
+            return
+        item: dict[str, Any] = {
+            "title": cleaned,
+            "count": min(max(count, 1), 14),
+            "prefer_spread": True,
         }
-    )
+        if minutes is not None:
+            item["duration_minutes"] = max(minutes, 15)
+        if _weekend_near(start):
+            item["prefer_after_work"] = False
+            item["description"] = "prefer weekend"
+        elif "after work" in lower:
+            item["prefer_after_work"] = True
+        tasks.append(item)
+        seen_spans.append((start, end))
+
+    count_word = "|".join(sorted(_COUNT_WORDS, key=len, reverse=True))
+
+    patterns: list[tuple[re.Pattern[str], str]] = [
+        (
+            re.compile(
+                r"\b(\d+)\s+(\d+)\s*(?:min(?:ute)?s?|mins?)\s+"
+                r"([\w][\w\s]{0,40}?)\s+sessions?"
+                r"(?:\s+for\s+([\w][\w\s]{0,60}))?",
+                flags=re.IGNORECASE,
+            ),
+            "count_min_title",
+        ),
+        (
+            re.compile(
+                r"\b(\d+)\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)\s+"
+                r"([\w][\w\s]{0,40}?)\s+sessions?"
+                r"(?:\s+for\s+([\w][\w\s]{0,60}))?",
+                flags=re.IGNORECASE,
+            ),
+            "count_hour_title",
+        ),
+        (
+            re.compile(
+                rf"\b(\d+|{count_word})\s+([\w][\w\s]{{0,40}}?)\s+sessions?\s+for\s+"
+                r"(\d+\s*:\s*\d+|\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr|minutes?|mins?|min)?",
+                flags=re.IGNORECASE,
+            ),
+            "count_title_for_dur",
+        ),
+        # "2 climbing sessions" / "two gym sessions" — duration optional.
+        (
+            re.compile(
+                rf"\b(\d+|{count_word})\s+([\w][\w-]{{0,40}}?)\s+sessions?\b",
+                flags=re.IGNORECASE,
+            ),
+            "count_title_sessions",
+        ),
+        (
+            re.compile(
+                rf"\b(\d+)\s+times?\b[\w\s]{{0,48}}?\b({_ACTIVITY_ALT})\b",
+                flags=re.IGNORECASE,
+            ),
+            "n_times_then_activity",
+        ),
+        (
+            re.compile(
+                rf"\b({_ACTIVITY_ALT})\b[\w\s]{{0,40}}?\b(\d+)\s+times?\b",
+                flags=re.IGNORECASE,
+            ),
+            "activity_then_n_times",
+        ),
+        (
+            re.compile(
+                rf"\b(twice|thrice|once)\b[\w\s]{{0,40}}?\b({_ACTIVITY_ALT})\b",
+                flags=re.IGNORECASE,
+            ),
+            "word_then_activity",
+        ),
+        (
+            re.compile(
+                rf"\b({_ACTIVITY_ALT})\b[\w\s]{{0,24}}?\b(twice|thrice|once)\b",
+                flags=re.IGNORECASE,
+            ),
+            "activity_then_word",
+        ),
+    ]
+
+    for cre, kind in patterns:
+        for m in cre.finditer(message):
+            minutes: int | None = None
+            if kind == "count_min_title":
+                count = _parse_count_token(m.group(1)) or 1
+                minutes = max(int(m.group(2)), 15)
+                title_raw = m.group(4) or m.group(3)
+            elif kind == "count_hour_title":
+                count = _parse_count_token(m.group(1)) or 1
+                minutes = max(int(round(float(m.group(2)) * 60)), 15)
+                title_raw = m.group(4) or m.group(3)
+            elif kind == "count_title_for_dur":
+                count = _parse_count_token(m.group(1)) or 1
+                minutes = _parse_session_minutes_near(m.group(3)) or _parse_session_minutes_near(
+                    m.group(0)
+                )
+                if minutes is None:
+                    continue
+                title_raw = m.group(2)
+            elif kind == "count_title_sessions":
+                count = _parse_count_token(m.group(1)) or 1
+                title_raw = m.group(2)
+            elif kind == "n_times_then_activity":
+                count = _parse_count_token(m.group(1)) or 1
+                title_raw = m.group(2)
+            elif kind == "activity_then_n_times":
+                title_raw = m.group(1)
+                count = _parse_count_token(m.group(2)) or 1
+            elif kind == "word_then_activity":
+                count = _parse_count_token(m.group(1)) or 1
+                title_raw = m.group(2)
+            else:
+                title_raw = m.group(1)
+                count = _parse_count_token(m.group(2)) or 1
+            _push(title_raw, count, minutes, m.start(), m.end())
+
+    if _looks_like_week_plan(message) or re.search(
+        r"\b(?:with|include|including)\b", lower
+    ):
+        mentioned = {t["title"].lower() for t in tasks}
+        for m in re.finditer(rf"\b({_ACTIVITY_ALT})\b", message, flags=re.IGNORECASE):
+            # "after work" is a constraint, not an activity named Work.
+            prev = lower[max(0, m.start() - 8) : m.start()]
+            if m.group(1).lower() == "work" and prev.rstrip().endswith("after"):
+                continue
+            if _overlaps(m.start(), m.end()):
+                continue
+            title = _title_case_activity(m.group(1))
+            if title.lower() in mentioned or title.lower() in _JUNK_TITLES:
+                continue
+            _push(m.group(1), 1, None, m.start(), m.end())
+            mentioned.add(title.lower())
+
+    return tasks or None
 
 
 def _heuristic_schedule_task_input(message: str) -> str:
     lower = message.lower()
     now = datetime.now().astimezone()
+
+    if "tomorrow" in lower:
+        deadline_day = now + timedelta(days=1)
+        deadline = _local_day_bounds_ms(deadline_day)[1] - 1
+        start = _local_day_bounds_ms(deadline_day)[0]
+    elif "today" in lower:
+        start = max(int(now.timestamp() * 1000), _local_day_bounds_ms(now)[0])
+        deadline = _local_day_bounds_ms(now)[1] - 1
+    elif "next week" in lower:
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        week_start = now + timedelta(days=days_until_monday)
+        start = _local_day_bounds_ms(week_start)[0]
+        next_week_end = week_start + timedelta(days=6)
+        deadline = _local_day_bounds_ms(next_week_end)[1] - 1
+    else:
+        deadline = _end_of_local_week_ms(now)
+        start = int(now.timestamp() * 1000)
+
+    multi = _extract_schedule_items(message)
+    if multi:
+        payload: dict[str, Any] = {
+            "tasks": multi,
+            "deadline": deadline,
+            "priority": "high" if "urgent" in lower or "asap" in lower else "normal",
+            "flexibility": "flexible",
+            "start": start,
+            "end": deadline,
+            "apply": False,
+        }
+        if "after work" in lower:
+            payload["prefer_after_work"] = True
+        return json.dumps(payload)
+
     hours = _parse_duration_hours(lower)
-    minutes = int(round((hours if hours is not None else 2.0) * 60))
+    minutes: int | None = None
+    if hours is not None:
+        minutes = int(round(hours * 60))
     m = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower)
     if m and hours is None:
         minutes = int(m.group(1))
 
     count = _parse_occurrence_count(lower)
-    if count > 1 and hours is None and m is None:
-        # Default session length for repeated activities (climbing, gym, …).
-        minutes = 90
+    # Repeated activities without an explicit duration still need Clarification —
+    # do not invent a session length.
 
-    title = re.sub(
-        r"^(?:please\s+)?(?:finish|schedule|complete|do|i want to(?:\s+go|\s+do|\s+get to)?|make time for|fit in)\s+(?:the\s+|my\s+|a\s+)?",
-        "",
-        message.strip(),
-        flags=re.IGNORECASE,
-    )
-    title = re.sub(
-        r"\b(?:this week|next week|today|tomorrow|,?\s*\d+\s*(?:hours?|hrs?|minutes?|mins?)|\d+\s+times?|once|twice|thrice|prefer_spread).*$",
-        "",
-        title,
-        flags=re.IGNORECASE,
-    ).strip(" .,:-")
-    if not title:
-        title = "Task"
-    # "go climbing" → "climbing"
-    title = re.sub(r"^(?:go|do)\s+", "", title, flags=re.IGNORECASE).strip()
-
-    if "tomorrow" in lower:
-        deadline_day = now + timedelta(days=1)
-        deadline = _local_day_bounds_ms(deadline_day)[1] - 1
-    elif "today" in lower:
-        deadline = _local_day_bounds_ms(now)[1] - 1
-    elif "next week" in lower:
-        # End of next local Sunday.
-        days_until_sunday = (6 - now.weekday()) % 7
-        next_week_end = now + timedelta(days=days_until_sunday + 7)
-        deadline = _local_day_bounds_ms(next_week_end)[1] - 1
+    title_guess, _cat = _infer_title_category(message)
+    if title_guess and title_guess.lower() not in (
+        "book",
+        "new event",
+        "event",
+        "meeting",
+        "work",
+        "include",
+        "task",
+    ):
+        title = title_guess
     else:
-        deadline = _end_of_local_week_ms(now)
+        title = re.sub(
+            r"^(?:please\s+)?(?:finish|schedule|complete|do|book|i want to(?:\s+go|\s+do|\s+get to|\s+book)?|make time for|fit in|plan (?:out )?(?:my )?week|book (?:some |a )?time (?:this week |today |tomorrow )?for)\s+(?:the\s+|my\s+|a\s+|some\s+)?",
+            "",
+            message.strip(),
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r"\b(?:this week|next week|today|tomorrow|,?\s*\d+\s*(?:hours?|hrs?|minutes?|mins?)|\d+\s+times?|once|twice|thrice|prefer_spread|after work).*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip(" .,:-")
+        if not title:
+            title = "Task"
+        title = _title_case_activity(title)
 
-    payload: dict[str, Any] = {
+    payload = {
         "title": title[:80],
-        "duration_minutes": max(minutes, 15),
         "deadline": deadline,
         "priority": "high" if "urgent" in lower or "asap" in lower else "normal",
         "flexibility": "flexible",
-        "start": int(now.timestamp() * 1000),
+        "start": start,
         "end": deadline,
-        "apply": count <= 1,
+        "apply": False,
     }
+    if minutes is not None:
+        payload["duration_minutes"] = max(minutes, 15)
     if count > 1:
         payload["count"] = count
         payload["prefer_spread"] = True
+    if "after work" in lower:
+        payload["prefer_after_work"] = True
+    return json.dumps(payload)
+
+
+def _schedule_payload_to_organize(st: dict[str, Any], message: str) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    if isinstance(st.get("tasks"), list) and st["tasks"]:
+        for t in st["tasks"]:
+            if not isinstance(t, dict):
+                continue
+            item: dict[str, Any] = {"title": t.get("title") or "Task"}
+            if t.get("duration_minutes"):
+                item["duration_minutes"] = t["duration_minutes"]
+            if t.get("count"):
+                item["count"] = t["count"]
+            if t.get("prefer_after_work"):
+                item["when"] = "after_work"
+            if "weekend" in str(t.get("description") or "").lower():
+                item["when"] = "weekend"
+            items.append(item)
+    elif st.get("title"):
+        item = {"title": st["title"]}
+        if st.get("duration_minutes"):
+            item["duration_minutes"] = st["duration_minutes"]
+        if st.get("count"):
+            item["count"] = st["count"]
+        if st.get("prefer_after_work"):
+            item["when"] = "after_work"
+        items.append(item)
+    constraints: list[str] = []
+    if st.get("prefer_after_work") or re.search(r"after work", message, flags=re.I):
+        constraints.append("after_work")
+    lower = message.lower()
+    window = "this_week"
+    parsed_when = _parse_when_label(message)
+    if parsed_when and not re.search(r"\bthis week\b", lower):
+        window = parsed_when
+    elif re.search(r"\btomorrow\b", lower) and not re.search(r"\bthis week\b", lower):
+        window = "tomorrow"
+    elif re.search(r"\btoday\b", lower) and not re.search(r"\bthis week\b", lower):
+        window = "today"
+    elif re.search(r"\bon sunday\b", lower) and not re.search(r"\bthis week\b", lower):
+        window = "sunday"
+    elif re.search(r"\bweekend\b", lower) and not re.search(
+        r"\bthis week\b", lower
+    ):
+        window = "weekend"
+    return {
+        "window": window,
+        "mode": "propose",
+        "constraints": constraints,
+        "items": items,
+    }
+
+
+def _heuristic_organize_input(message: str) -> str:
+    st = json.loads(_heuristic_schedule_task_input(message))
+    # Block-time style: title from block heuristic when schedule title is generic.
+    if _matches_any(message, CALENDAR_BLOCK_TIME) and not st.get("tasks"):
+        try:
+            block = json.loads(_heuristic_block_time_input(message))
+            if block.get("title"):
+                st["title"] = block["title"]
+            if block.get("duration_minutes") and "duration_minutes" not in st:
+                st["duration_minutes"] = block["duration_minutes"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if _matches_any(message, CALENDAR_PLAN_DAY) and not st.get("tasks"):
+        try:
+            day = json.loads(_heuristic_plan_day_input(message))
+            if day.get("tasks"):
+                st["tasks"] = day["tasks"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return json.dumps(_schedule_payload_to_organize(st, message))
+
+
+def _parse_when_label(message: str) -> str | None:
+    lower = message.lower()
+    if "next week" in lower or "next_week" in lower:
+        return "next_week"
+    if "weekend" in lower:
+        return "weekend"
+    if (
+        "this week" in lower
+        or "this_week" in lower
+        or ("the week" in lower and "weekend" not in lower)
+        or "all week" in lower
+        or "whole week" in lower
+        or "entire week" in lower
+    ):
+        return "this_week"
+    if "tomorrow" in lower:
+        return "tomorrow"
+    if (
+        "not today" in lower
+        or "not tonight" in lower
+        or "n't today" in lower
+        or "except today" in lower
+    ):
+        return "not_today"
+    if "today" in lower or "tonight" in lower:
+        return "today"
+    for day in (
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ):
+        if re.search(rf"\b{day}\b", lower):
+            return day
+    return None
+
+
+def _looks_like_docs_format(message: str) -> bool:
+    lower = message.lower()
+    if re.search(r"~/|(?:/users/|/home/)", lower):
+        return False
+    if re.search(
+        r"\b(?:reformat|better format|format better|improve (?:the )?format|cleaner format|tidier format)\b",
+        lower,
+    ):
+        if re.search(r"\b(?:make|create|new)\s+(?:a\s+)?(?:document|doc)\b", lower) and ":" in message:
+            return False
+        return True
+    return False
+
+
+def _heuristic_docs_format_input(message: str) -> str:
+    named = re.search(
+        r"(?i)(?:edit|format|reformat)\s+[\"']?([^\s\"'`,:!]+)",
+        message,
+    )
+    if named:
+        token = named.group(1).strip()
+        if token.lower() not in {"the", "this", "my", "a", "an"}:
+            return json.dumps({"id": token})
+    titled = re.search(
+        r"(?i)(?:document|doc|note)\s+(?:called|named|titled)\s+[\"']?([^\s\"'`,:!]+)",
+        message,
+    )
+    if titled:
+        return json.dumps({"id": titled.group(1).strip()})
+    return "{}"
+
+
+def _looks_like_docs_upsert(message: str) -> bool:
+    lower = message.lower()
+    if re.search(r"~/|(?:/users/|/home/)", lower):
+        return False
+    if re.search(r"\b(?:document|doc|note)\s+(?:called|named|titled)\b", lower):
+        return True
+    if re.search(
+        r"\b(?:make|create|add|save|new)\s+(?:a\s+|an\s+)?(?:document|doc)\b",
+        lower,
+    ):
+        return True
+    return False
+
+
+def _heuristic_docs_upsert_input(message: str) -> str:
+    title = None
+    named = re.search(
+        r"(?i)(?:document|doc|note)\s+(?:called|named|titled)\s+[\"']?([^\s\"'`,:!]+)",
+        message,
+    )
+    if named:
+        title = named.group(1).strip()
+    content = ""
+    after = message
+    if title:
+        idx = message.lower().find(title.lower())
+        if idx >= 0:
+            after = message[idx + len(title) :]
+    for match in re.finditer(r":", after):
+        rest = after[match.end() :].lstrip()
+        if rest.startswith("//"):
+            continue
+        if len(rest) >= 12:
+            content = rest
+            break
+    payload: dict[str, str] = {}
+    if title:
+        payload["title"] = title
+    if content:
+        payload["content"] = content
+    return json.dumps(payload) if payload else "{}"
+
+
+def _looks_like_list_dir(message: str) -> bool:
+    lower = message.lower()
+    if re.search(r"\bcalend", lower):
+        return False
+    if re.search(r"~/|(?:\b(?:downloads|desktop|documents|folder|directory)\b)", lower) and re.search(
+        r"\b(?:show|list|what(?:'s|s| is) in)\b",
+        lower,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:list|show)\b.+\b(?:files?|folder|directory)\b",
+            lower,
+        )
+    )
+
+
+def _heuristic_list_dir_input(message: str) -> str:
+    m = re.search(r"(~/[^\s]+|/(?:Users|home)/[^\s]+)", message)
+    if m:
+        return json.dumps({"path": m.group(1)})
+    lower = message.lower()
+    for name, folder in (
+        ("downloads", "Downloads"),
+        ("desktop", "Desktop"),
+        ("documents", "Documents"),
+    ):
+        if name in lower:
+            return json.dumps({"path": folder})
+    return json.dumps({"path": "."})
+
+
+def _looks_like_calendar_look(message: str) -> bool:
+    if _looks_like_week_plan(message):
+        return False
+    if _looks_like_list_dir(message):
+        return False
+    lower = message.lower()
+    if re.search(r"\bplan (?:out )?(?:my |the )?(?:week|day)\b", lower):
+        return False
+    if re.search(r"\bplanning\b", lower):
+        return False
+    if _matches_any(message, CALENDAR_QUERY_WORK):
+        return True
+    if _matches_any(message, CALENDAR_FREE_TIME):
+        return True
+    if _matches_any(message, CALENDAR_QUERY_TODAY + CALENDAR_QUERY_TOMORROW + CALENDAR_QUERY_WEEK):
+        return True
+    return _matches_any(message, CALENDAR_LOOK_CUES)
+
+
+def _heuristic_look_input(
+    message: str, focus: str | None = None, when: str | None = None
+) -> str:
+    lower = message.lower()
+    work_q = _matches_any(message, CALENDAR_QUERY_WORK)
+    if when is None:
+        when = _parse_when_label(message)
+        if when is None:
+            if work_q or re.search(r"\bplans\b", lower):
+                when = "this_week"
+            else:
+                when = "today"
+    if focus is None:
+        if work_q:
+            focus = "work"
+        else:
+            focus = "free" if _matches_any(message, CALENDAR_FREE_TIME) else "events"
+    payload: dict[str, Any] = {"when": when, "focus": focus}
+    hours = _parse_duration_hours(lower)
+    if hours is not None:
+        payload["duration_minutes"] = max(int(round(hours * 60)), 15)
+    elif focus == "free" and re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower):
+        payload["duration_minutes"] = int(
+            re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", lower).group(1)
+        )
+    elif focus == "free" and not re.search(
+        r"\b(\d+|hour|hr|minute|min)\b", lower
+    ):
+        payload["duration_minutes"] = 60
+    return json.dumps(payload)
+
+
+def _heuristic_pin_input(message: str) -> str:
+    raw = json.loads(_heuristic_create_event_input(message))
+    if isinstance(raw.get("events"), list) and raw["events"]:
+        first = raw["events"][0]
+        payload = {
+            "action": "create",
+            "title": first.get("title") or raw.get("title") or "Event",
+            "start": str(first.get("start_time") or ""),
+            "end": str(first.get("end_time") or ""),
+        }
+        if first.get("category"):
+            payload["category"] = first["category"]
+        return json.dumps(payload)
+    payload = {
+        "action": "create",
+        "title": raw.get("title") or "Event",
+    }
+    if raw.get("start_time") is not None:
+        payload["start"] = str(raw["start_time"])
+    if raw.get("end_time") is not None:
+        payload["end"] = str(raw["end_time"])
+    if raw.get("category"):
+        payload["category"] = raw["category"]
     return json.dumps(payload)
 
 
@@ -1049,7 +1871,6 @@ def _heuristic_plan_day_input(message: str) -> str:
             tasks.append(
                 {
                     "title": f"Spark work {i + 1}" if n > 1 else "Spark work",
-                    "duration_minutes": 60,
                     "flexibility": "flexible",
                     "priority": "normal",
                 }
@@ -1059,7 +1880,6 @@ def _heuristic_plan_day_input(message: str) -> str:
         tasks.append(
             {
                 "title": "Spark work",
-                "duration_minutes": 60,
                 "flexibility": "flexible",
                 "priority": "normal",
             }
@@ -1078,7 +1898,6 @@ def _heuristic_plan_day_input(message: str) -> str:
         ):
             continue
         hours = _parse_duration_hours(name)
-        minutes = int(round((hours if hours is not None else 1.0) * 60))
         clean = re.sub(
             r"\b\d+\s*(?:hours?|hrs?|minutes?|mins?)\b",
             "",
@@ -1090,14 +1909,19 @@ def _heuristic_plan_day_input(message: str) -> str:
             continue
         if re.match(r"^spark\b", clean, flags=re.IGNORECASE):
             continue
-        tasks.append(
-            {
-                "title": clean[:60],
-                "duration_minutes": max(minutes, 30),
-                "flexibility": "flexible",
-                "priority": "normal",
-            }
-        )
+        task: dict[str, Any] = {
+            "title": clean[:60],
+            "flexibility": "flexible",
+            "priority": "normal",
+        }
+        # Only set duration when the user stated a length — Clarification asks otherwise.
+        if hours is not None:
+            task["duration_minutes"] = max(int(round(hours * 60)), 30)
+        else:
+            m_mins = re.search(r"\b(\d+)\s*(?:minutes?|mins?)\b", name, flags=re.IGNORECASE)
+            if m_mins:
+                task["duration_minutes"] = max(int(m_mins.group(1)), 15)
+        tasks.append(task)
 
     return json.dumps(
         {
@@ -1165,6 +1989,22 @@ def _heuristic_plan(message: str) -> PlanResponse:
             reasoning="User requested memory maintenance.",
             response=None,
         )
+    if _looks_like_docs_format(message):
+        return PlanResponse(
+            intent="tool_use",
+            tool="docs.format",
+            tool_input=_heuristic_docs_format_input(message),
+            reasoning="User asked to improve an in-app Document's format.",
+            response=None,
+        )
+    if _looks_like_docs_upsert(message):
+        return PlanResponse(
+            intent="tool_use",
+            tool="docs.upsert",
+            tool_input=_heuristic_docs_upsert_input(message),
+            reasoning="User asked to create or update an in-app Document.",
+            response=None,
+        )
     if lower.startswith("echo "):
         tool_input = message.strip()[5:].strip()
         return PlanResponse(
@@ -1200,24 +2040,41 @@ def _heuristic_plan(message: str) -> PlanResponse:
             reasoning="User asked for code changes (heuristic fallback, MLX unavailable).",
             response=None,
         )
-    # Scheduling intelligence — before agenda queries so "free tomorrow" ≠ get_tomorrow.
+    if _looks_like_list_dir(message):
+        return PlanResponse(
+            intent="tool_use",
+            tool="list_dir",
+            tool_input=_heuristic_list_dir_input(message),
+            reasoning="User asked to list a folder.",
+            response=None,
+        )
+    # Scheduling intelligence — before agenda queries so "free tomorrow" ≠ look today.
     if _matches_any(message, CALENDAR_FREE_TIME):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.find_free_time",
-            tool_input=_heuristic_free_time_input(message),
+            tool="calendar.look",
+            tool_input=_heuristic_look_input(message, focus="free"),
             reasoning="User asked for free/available time.",
+            response=None,
+        )
+    # Week packing / multi-session plans before single-day organize.
+    if _looks_like_week_plan(message) or _extract_schedule_items(message):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
+            reasoning="User asked to plan/schedule multiple sessions across the week.",
             response=None,
         )
     if _matches_any(message, CALENDAR_PLAN_DAY):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.plan_day",
-            tool_input=_heuristic_plan_day_input(message),
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
             reasoning="User asked to plan their day.",
             response=None,
         )
-    # Multi-occurrence ("3 times this week") before create_event.
+    # Multi-occurrence ("3 times this week") before pin.
     if re.search(r"\b(?:\d+\s+times?|twice|thrice)\b", message, flags=re.IGNORECASE) and (
         _matches_any(message, CALENDAR_SCHEDULE_TASK)
         or re.search(r"\b(?:this|next)\s+(?:week|month)\b", message, flags=re.IGNORECASE)
@@ -1225,72 +2082,50 @@ def _heuristic_plan(message: str) -> PlanResponse:
     ):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.schedule_task",
-            tool_input=_heuristic_schedule_task_input(message),
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
             reasoning="User asked to schedule an activity multiple times.",
             response=None,
         )
-    # Create before block_time so "… research block for 2h" inside an event request
-    # is not stolen by focus-block routing.
-    if _matches_any(message, CALENDAR_CREATE):
+    # Clock pin before focus-block organize so "research block at 11" stays a pin.
+    if _matches_any(message, CALENDAR_CREATE) and not _is_soft_slot_booking(message):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.create_event",
-            tool_input=_heuristic_create_event_input(message),
-            reasoning="User asked to schedule a calendar event.",
+            tool="calendar.pin",
+            tool_input=_heuristic_pin_input(message),
+            reasoning="User asked to pin a calendar event at a clock time.",
             response=None,
         )
     if _matches_any(message, CALENDAR_BLOCK_TIME):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.block_time",
-            tool_input=_heuristic_block_time_input(message),
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
             reasoning="User asked to block focus time.",
             response=None,
         )
     if _matches_any(message, CALENDAR_SCHEDULE_TASK):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.schedule_task",
-            tool_input=_heuristic_schedule_task_input(message),
+            tool="calendar.organize",
+            tool_input=_heuristic_organize_input(message),
             reasoning="User asked to schedule a task into free time.",
             response=None,
         )
     if _matches_any(message, CALENDAR_CAPACITY):
-        tool = (
-            "calendar.day_summary"
-            if re.search(r"\bsummar", message, flags=re.IGNORECASE)
-            else "calendar.get_capacity"
-        )
         return PlanResponse(
             intent="tool_use",
-            tool=tool,
-            tool_input=_heuristic_capacity_input(message),
+            tool="calendar.look",
+            tool_input=_heuristic_look_input(message),
             reasoning="User asked about daily capacity or summary.",
             response=None,
         )
-    if _matches_any(message, CALENDAR_QUERY_TODAY):
+    if _matches_any(message, CALENDAR_QUERY_WORK):
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.get_today",
-            tool_input="{}",
-            reasoning="User asked about today's calendar.",
-            response=None,
-        )
-    if _matches_any(message, CALENDAR_QUERY_TOMORROW):
-        return PlanResponse(
-            intent="tool_use",
-            tool="calendar.get_tomorrow",
-            tool_input="{}",
-            reasoning="User asked about tomorrow's calendar.",
-            response=None,
-        )
-    if _matches_any(message, CALENDAR_QUERY_WEEK):
-        return PlanResponse(
-            intent="tool_use",
-            tool="calendar.get_this_week",
-            tool_input="{}",
-            reasoning="User asked about this week's calendar.",
+            tool="calendar.look",
+            tool_input=_heuristic_look_input(message, focus="work"),
+            reasoning="User asked about work hours.",
             response=None,
         )
     if _matches_any(message, CALENDAR_SEARCH):
@@ -1302,17 +2137,36 @@ def _heuristic_plan(message: str) -> PlanResponse:
         )
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.search_events",
-            tool_input=json.dumps({"query": q.strip() or message.strip()}),
+            tool="calendar.look",
+            tool_input=json.dumps(
+                {
+                    "when": "this_week",
+                    "focus": "events",
+                    "query": q.strip() or message.strip(),
+                }
+            ),
             reasoning="User asked to search the calendar.",
             response=None,
         )
     if _matches_any(message, CALENDAR_DELETE):
+        delete_payload = json.loads(_heuristic_delete_event_input(message))
+        if isinstance(delete_payload, dict):
+            delete_payload["action"] = "delete"
+            if "query" in delete_payload and "title" not in delete_payload:
+                delete_payload["title"] = delete_payload.get("query")
         return PlanResponse(
             intent="tool_use",
-            tool="calendar.delete_event",
-            tool_input=_heuristic_delete_event_input(message),
+            tool="calendar.pin",
+            tool_input=json.dumps(delete_payload),
             reasoning="User asked to remove calendar event(s).",
+            response=None,
+        )
+    if _looks_like_calendar_look(message):
+        return PlanResponse(
+            intent="tool_use",
+            tool="calendar.look",
+            tool_input=_heuristic_look_input(message),
+            reasoning="User asked what's on / planned.",
             response=None,
         )
     if _matches_any(message, DREAM_SEARCH):
@@ -1391,8 +2245,8 @@ def _heuristic_chat_response(message: str) -> str:
     if "?" in text:
         if any(greet in lowered for greet in ("how are you", "how's it going", "hows it going")):
             return "Doing well and ready to help. What would you like to focus on?"
-        return f"I got your question: \"{text}\". I can help sketch an answer while MLX reconnects."
-    return f"Noted: \"{text}\". I can help you structure or refine this while full chat is reconnecting."
+        return f"I got your question: \"{text}\". Want to rephrase or add a bit more detail?"
+    return f"Noted: \"{text}\". Want to expand on that, or should I take a next step?"
 
 
 def normalize_plan(plan: PlanResponse) -> PlanResponse:
@@ -1408,6 +2262,7 @@ def normalize_plan(plan: PlanResponse) -> PlanResponse:
     tool = plan.tool.strip() if isinstance(plan.tool, str) else plan.tool
     tool_input = plan.tool_input
     mode_hint = plan.mode_hint
+    next_action = (plan.next or "").strip().lower() or None
 
     # Legacy code intent → Core coder.run tool.
     if intent == "code":
@@ -1430,10 +2285,299 @@ def normalize_plan(plan: PlanResponse) -> PlanResponse:
     if tool and tool_input is None:
         tool_input = "{}"
 
+    if next_action not in ("ask", "tool", "finish"):
+        if intent == "tool_use" and tool:
+            next_action = "tool"
+        elif intent == "chat":
+            next_action = "finish"
+        else:
+            next_action = "finish"
+
     plan.intent = intent
     plan.tool = tool
     plan.tool_input = tool_input
+    plan.next = next_action
     return apply_respond_mode(plan)
+
+
+def heuristic_classify_tool(message: str) -> Optional[str]:
+    """Repair helper: best-effort tool name from heuristics (no arg fill)."""
+    plan = normalize_plan(_heuristic_plan(message))
+    if plan.intent != "tool_use" or not plan.tool:
+        return None
+    if plan.tool in _HEURISTIC_SLOW_TOOLS:
+        return None
+    if plan.tool in ("calendar.create_event", "calendar.pin") and _is_soft_slot_booking(
+        message
+    ):
+        return "calendar.organize"
+    return plan.tool
+
+
+def repair_classified_tool(
+    intent: str,
+    tool: Optional[str],
+    message: str,
+    history: Optional[list] = None,
+) -> tuple[str, Optional[str]]:
+    """Override tool *name* only when classify clearly missed. Never builds args."""
+    tool = TOOL_ALIASES.get(tool, tool) if isinstance(tool, str) and tool else tool
+
+    if intent == "tool_use" and tool in (
+        "calendar.create_event",
+        "calendar.pin",
+    ) and _is_soft_slot_booking(message):
+        return "tool_use", "calendar.organize"
+
+    calendar_family = bool(
+        tool
+        and (
+            tool.startswith("calendar.")
+            or tool.startswith("dream.")
+            or tool.startswith("work.")
+            or tool.startswith("lifestyle.")
+        )
+    )
+    if intent == "tool_use" and calendar_family:
+        return intent, tool
+
+    if _looks_like_docs_format(message) and tool in (
+        None,
+        "docs.upsert",
+        "write_file",
+        "edit_file",
+        "save_spark",
+        "coder.run",
+    ):
+        return "tool_use", "docs.format"
+
+    if _looks_like_docs_upsert(message) and tool in (
+        None,
+        "write_file",
+        "edit_file",
+        "save_spark",
+        "coder.run",
+    ):
+        return "tool_use", "docs.upsert"
+
+    scheduling_patterns = (
+        CALENDAR_FREE_TIME
+        + CALENDAR_PLAN_DAY
+        + CALENDAR_BLOCK_TIME
+        + CALENDAR_SCHEDULE_TASK
+        + CALENDAR_CAPACITY
+    )
+    if _matches_any(message, scheduling_patterns):
+        repaired = heuristic_classify_tool(message)
+        if repaired:
+            return "tool_use", repaired
+
+    if intent == "chat":
+        ask_when = re.search(
+            r"\b(?:ask me|when|what time|how long|which day)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if ask_when and history:
+            for item in reversed(history):
+                role = item.get("role") if isinstance(item, dict) else getattr(item, "role", "")
+                content = (
+                    item.get("content", "")
+                    if isinstance(item, dict)
+                    else getattr(item, "content", "")
+                )
+                if role != "user":
+                    continue
+                prior = (content or "").strip()
+                if _matches_any(prior, CALENDAR_SCHEDULE_TASK) or re.search(
+                    rf"\b(?:{_CAL_ACTIVITY})\b", prior, flags=re.IGNORECASE
+                ):
+                    return "tool_use", "calendar.organize"
+                break
+
+    if _matches_any(message, CALENDAR_CREATE) or _matches_any(message, CALENDAR_DELETE):
+        repaired = heuristic_classify_tool(message)
+        if repaired:
+            return "tool_use", repaired
+
+    lifestyle_patterns = DREAM_LOG + DREAM_SEARCH + WORK_SALES + WORK_SET_HOURS + WORK_STATS
+    if _matches_any(message, lifestyle_patterns):
+        repaired = heuristic_classify_tool(message)
+        if repaired:
+            return "tool_use", repaired
+
+    # Extra repair-only paraphrases (not the primary catalog / product router).
+    if intent != "tool_use" or not tool:
+        lower = message.lower()
+        if _looks_like_week_plan(message) or _parse_multi_schedule_tasks(message):
+            return "tool_use", "calendar.organize"
+        if re.search(
+            rf"\b(?:fit|schedule|book)\b.+\b(?:{_CAL_ACTIVITY}|session)\b",
+            message,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            r"\bneed to schedule\b",
+            message,
+            flags=re.IGNORECASE,
+        ):
+            return "tool_use", "calendar.organize"
+        if re.search(
+            r"\b(?:meeting|appointment|call)\b.+\b(?:\d{1,2}\s*(?:am|pm)|friday|monday|tuesday|wednesday|thursday|saturday|sunday)\b",
+            message,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            r"\b(?:friday|monday|tuesday|wednesday|thursday)\b.+\b\d{1,2}\s*(?:am|pm)\b",
+            message,
+            flags=re.IGNORECASE,
+        ):
+            return "tool_use", "calendar.pin"
+        if _looks_like_docs_upsert(message):
+            return "tool_use", "docs.upsert"
+        if re.search(r"\bread (?:the )?file\b", lower) or re.search(
+            r"\bopen (?:the )?file\b", lower
+        ):
+            return "tool_use", "read_file"
+        if re.search(
+            r"\b(?:list|show)\b.+\b(?:files?|folder|directory|downloads|desktop)\b",
+            lower,
+        ) or re.search(r"\bwhat'?s in\b.+/", lower):
+            return "tool_use", "list_dir"
+        if re.search(
+            r"\b(?:implement|debug|refactor|fix (?:the |a |this )?bug)\b",
+            lower,
+        ) or re.search(r"\bhelp me (?:code|refactor|debug|implement)\b", lower):
+            return "tool_use", "coder.run"
+
+    return intent, tool
+
+
+def heuristic_fill_for_tool(tool: str, message: str) -> str:
+    """Repair fill when MLX fill is unavailable — prefer omit-unknowns shapes."""
+    if tool in ("calendar.create_event", "calendar.pin") and _is_soft_slot_booking(
+        message
+    ):
+        tool = "calendar.organize"
+    plan = normalize_plan(_heuristic_plan(message))
+    if plan.tool == tool and plan.tool_input:
+        return plan.tool_input
+    if tool == "calendar.organize":
+        return _heuristic_organize_input(message)
+    if tool == "calendar.look":
+        return _heuristic_look_input(message)
+    if tool == "calendar.pin":
+        return _heuristic_pin_input(message)
+    if tool == "echo":
+        return message
+    if tool == "docs.format":
+        return _heuristic_docs_format_input(message)
+    if tool == "docs.upsert":
+        return _heuristic_docs_upsert_input(message)
+    if tool == "coder.run":
+        return json.dumps({"prompt": message, "focus": "focused"})
+    return "{}"
+
+
+def repair_schedule_task_title(plan: PlanResponse, message: str) -> PlanResponse:
+    """Ensure schedule_task / organize keeps an activity title / multi-task list when MLX omitted it."""
+    if plan.tool == "calendar.organize":
+        try:
+            data = json.loads(plan.tool_input or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        items = data.get("items") if isinstance(data, dict) else None
+        thin = not items or (
+            isinstance(items, list)
+            and (
+                len(items) < 2
+                or any(not (i.get("title") if isinstance(i, dict) else None) for i in items)
+            )
+        )
+        if thin and (
+            _looks_like_week_plan(message) or _extract_schedule_items(message)
+        ):
+            plan.tool_input = _heuristic_organize_input(message)
+            return plan
+        if (not items) and re.search(rf"\b(?:{_CAL_ACTIVITY})\b", message, flags=re.I):
+            plan.tool_input = _heuristic_organize_input(message)
+        return plan
+    if plan.tool != "calendar.schedule_task":
+        return plan
+    try:
+        data = json.loads(plan.tool_input or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    title = data.get("title")
+    title_ok = isinstance(title, str) and title.strip() and title.strip().lower() not in (
+        "task",
+        "book",
+        "event",
+        "meeting",
+    )
+    has_tasks = isinstance(data.get("tasks"), list) and len(data["tasks"]) > 0
+    multi = _parse_multi_schedule_tasks(message)
+    # Prefer multi-activity tasks[] when the user listed several sessions.
+    if multi and (not has_tasks or len(data.get("tasks") or []) < 2):
+        heuristic = json.loads(_heuristic_schedule_task_input(message))
+        for key in ("tasks", "prefer_after_work", "start", "end", "deadline", "apply"):
+            if key in heuristic:
+                data[key] = heuristic[key]
+        data.pop("title", None)
+        data.pop("duration_minutes", None)
+        data.pop("count", None)
+        plan.tool_input = json.dumps(data)
+        return plan
+    if title_ok or has_tasks:
+        return plan
+    heuristic = json.loads(_heuristic_schedule_task_input(message))
+    ht = heuristic.get("title")
+    if isinstance(ht, str) and ht.strip():
+        data["title"] = ht
+        plan.tool_input = json.dumps(data)
+    return plan
+
+
+def repair_find_free_time_fill(plan: PlanResponse, message: str) -> PlanResponse:
+    """Ensure look/free-time has a search window + default duration when MLX returns {}."""
+    if plan.tool == "calendar.find_free_time":
+        plan.tool = "calendar.look"
+    if plan.tool != "calendar.look":
+        return plan
+    try:
+        data = json.loads(plan.tool_input or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    heuristic = json.loads(_heuristic_free_time_input(message))
+    changed = False
+
+    def _as_int(v) -> int | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str) and v.strip().isdigit():
+            return int(v.strip())
+        return None
+
+    start = _as_int(data.get("start"))
+    end = _as_int(data.get("end"))
+    # MLX sometimes invents start==end (zero-width) — replace with heuristic window.
+    if start is None or end is None or end <= start:
+        data["start"] = heuristic.get("start")
+        data["end"] = heuristic.get("end")
+        changed = True
+    if data.get("duration_minutes") is None and heuristic.get("duration_minutes") is not None:
+        data["duration_minutes"] = heuristic["duration_minutes"]
+        changed = True
+    if data.get("limit") is None:
+        data["limit"] = heuristic.get("limit", 5)
+        changed = True
+    if changed:
+        plan.tool_input = json.dumps(data)
+    return plan
 
 
 def parse_plan(raw: str, message: str) -> PlanResponse:
@@ -1456,6 +2600,7 @@ def parse_plan(raw: str, message: str) -> PlanResponse:
             mode_hint=data.get("mode_hint"),
             preference_detected=PreferenceDetected(**pref) if pref else None,
             decision_detected=DecisionDetected(**dec) if dec else None,
+            next=data.get("next"),
         )
         return normalize_plan(plan)
     except (json.JSONDecodeError, KeyError, TypeError, ValidationError, ValueError):

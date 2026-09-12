@@ -1,6 +1,6 @@
 use chrono::{Local, Timelike, TimeZone};
 
-use crate::models::{EventPriority, Flexibility};
+use crate::models::{EventPriority, Flexibility, ScheduleKind};
 use crate::scheduling::occupancy::{BusyInterval, BusySource};
 use crate::scheduling::SchedulingContext;
 
@@ -11,7 +11,7 @@ pub fn score_slot(
     end: i64,
     occupancy: &[BusyInterval],
 ) -> (f64, Vec<String>) {
-    score_slot_for_activity(ctx, start, end, occupancy, None)
+    score_slot_for_activity(ctx, start, end, occupancy, None, false)
 }
 
 /// Score a slot, optionally biasing toward natural hours for an activity title.
@@ -21,6 +21,7 @@ pub fn score_slot_for_activity(
     end: i64,
     occupancy: &[BusyInterval],
     activity_title: Option<&str>,
+    prefer_after_work: bool,
 ) -> (f64, Vec<String>) {
     let mut score = 100.0_f64;
     let mut reasons = Vec::new();
@@ -108,6 +109,14 @@ pub fn score_slot_for_activity(
         }
     }
 
+    if prefer_after_work {
+        let (adj, reason) = prefer_after_work_adjustment(ctx, start, hour);
+        score += adj;
+        if let Some(r) = reason {
+            reasons.push(r.into());
+        }
+    }
+
     let offset_from_day = (start - day_start) as f64 / 3_600_000.0;
     score -= (offset_from_day * 0.3).min(5.0);
 
@@ -124,6 +133,39 @@ pub fn score_slot_for_activity(
     let _ = Flexibility::Fixed;
 
     (score, reasons)
+}
+
+/// Bias using lifestyle Work end for the candidate's local day.
+fn prefer_after_work_adjustment(
+    ctx: &SchedulingContext,
+    start: i64,
+    hour: u32,
+) -> (f64, Option<&'static str>) {
+    if let Some(work_end) = work_end_for_day(ctx, start) {
+        if start >= work_end {
+            return (120.0, Some("after work hours"));
+        }
+        // Still before Work ends (shouldn't happen if Work is hard-blocked, but
+        // also covers gaps earlier the same day before work starts).
+        return (-80.0, Some("before work ends"));
+    }
+    // No Work block (weekend / day off): light evening preference.
+    match hour {
+        16..=20 => (40.0, Some("evening window")),
+        10..=15 => (-25.0, None),
+        _ => (0.0, None),
+    }
+}
+
+/// Lifestyle Work block end overlapping the local day of `ms`, if any.
+pub fn work_end_for_day(ctx: &SchedulingContext, ms: i64) -> Option<i64> {
+    let (day_start, day_end) = day_bounds(ms);
+    ctx.lifestyle_blocks
+        .iter()
+        .filter(|b| b.kind == ScheduleKind::Work)
+        .filter(|b| b.end_time > day_start && b.start_time < day_end)
+        .map(|b| b.end_time)
+        .max()
 }
 
 /// Bias slots toward natural hours for the activity (dinner ≠ 7:45am).
@@ -164,6 +206,7 @@ pub fn activity_hour_adjustment(title: &str, hour: u32) -> (f64, Option<&'static
         || t.contains("run")
         || t.contains("workout")
         || t.contains("sport")
+        || t.contains("climb")
     {
         return match hour {
             16..=20 => (40.0, Some("after-work activity")),

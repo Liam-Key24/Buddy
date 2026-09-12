@@ -1,0 +1,15 @@
+{"id":"cal_soft_1","message":"wanna book climbing sometime this week","expect_intent":"tool_use","expect_tool_family":"calendar.schedule","forbid_duration":true}
+{"id":"cal_soft_2","message":"can we fit a gym session in","expect_intent":"tool_use","expect_tool_family":"calendar.schedule","forbid_duration":true}
+{"id":"cal_soft_3","message":"I want to make time for yoga this week","expect_intent":"tool_use","expect_tool_family":"calendar.schedule","forbid_duration":true}
+{"id":"cal_soft_4","message":"book some time for a walk tomorrow","expect_intent":"tool_use","expect_tool_family":"calendar.schedule","forbid_duration":true}
+{"id":"cal_week_1","message":"lets plan my week after work i want it to include 3 30min study sessions, 2 climbing sessions for 1:30hr and on the weekend 2 3hour study sessions for cyber secruity","expect_intent":"tool_use","expect_tool":"calendar.organize"}
+{"id":"cal_week_2","message":"plan my week with climbing and study","expect_intent":"tool_use","expect_tool":"calendar.organize"}
+{"id":"cal_clock_1","message":"dentist tomorrow at 2pm","expect_intent":"tool_use","expect_tool":"calendar.pin"}
+{"id":"cal_clock_2","message":"meeting Friday at 10am","expect_intent":"tool_use","expect_tool":"calendar.pin"}
+{"id":"cal_free_1","message":"when am I free for 2 hours tomorrow","expect_intent":"tool_use","expect_tool":"calendar.look"}
+{"id":"cal_plan_1","message":"on Sunday I want gym, dinner, and a bath","expect_intent":"tool_use","expect_tool":"calendar.organize"}
+{"id":"cal_agenda_1","message":"what's on my calendar today","expect_intent":"tool_use","expect_tool":"calendar.look"}
+{"id":"cal_agenda_next_1","message":"give me all week next week","expect_intent":"tool_use","expect_tool":"calendar.look"}
+{"id":"cal_free_next_1","message":"give me free slots next week not today","expect_intent":"tool_use","expect_tool":"calendar.look"}
+{"id":"cal_after_work_1","message":"book climbing this week after work","expect_intent":"tool_use","expect_tool":"calendar.organize","forbid_duration":true}
+{"id":"cal_no_promise","message":"I need to schedule climbing this week somehow","expect_intent":"tool_use","expect_tool_family":"calendar"}

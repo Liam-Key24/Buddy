@@ -4,6 +4,7 @@ import { CodeAgentWindow } from "../components/CodeAgentWindow";
 import { CodeAgentInput } from "../components/CodeAgentInput";
 import { CodeTerminal } from "../components/CodeTerminal";
 import { CodePreview } from "../components/CodePreview";
+import { LifeChatSplit } from "../components/LifeChatSplit";
 import { useCodeAgentStore } from "../stores/useCodeAgentStore";
 
 type Panel = "terminal" | "preview";
@@ -13,15 +14,15 @@ export function CodeAgent() {
   const { workspacePath } = useCodeAgentStore();
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* Chat column */}
-      <div className="flex min-w-0 flex-1 flex-col border-r border-zinc-800">
-        <CodeAgentWindow />
-        <CodeAgentInput />
-      </div>
-
-      {/* Tools column: terminal + live preview */}
-      <div className="flex w-[46%] min-w-[320px] flex-col">
+    <LifeChatSplit
+      chat={
+        <>
+          <CodeAgentWindow />
+          <CodeAgentInput />
+        </>
+      }
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-1 border-b border-zinc-800 px-2 py-1.5">
           <PanelTab
             active={panel === "terminal"}
@@ -37,7 +38,6 @@ export function CodeAgent() {
           />
         </div>
         <div className="min-h-0 flex-1">
-          {/* Keep terminal mounted so its session persists across tab switches */}
           <div className={panel === "terminal" ? "h-full" : "hidden"}>
             <CodeTerminal cwd={workspacePath} />
           </div>
@@ -46,7 +46,7 @@ export function CodeAgent() {
           </div>
         </div>
       </div>
-    </div>
+    </LifeChatSplit>
   );
 }
 

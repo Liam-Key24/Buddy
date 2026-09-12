@@ -3,7 +3,27 @@
 //! Clarification validates Brain plans against these schemas before Core runs.
 //! Schemas describe required/optional fields only — they do not plan or execute.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// How Clarification should ask for a missing field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    #[default]
+    Text,
+    Choice,
+}
+
+/// One selectable option for [`AskKind::Choice`] fields.
+#[derive(Debug, Clone, Copy)]
+pub struct ChoiceSpec {
+    /// Short id shown as A/B/C/D in the UI (`"a"`, `"b"`, …).
+    pub id: &'static str,
+    pub label: &'static str,
+    /// JSON value fragment to merge into tool_input (e.g. `"60"` or `"\"home\""`).
+    pub value: &'static str,
+}
 
 /// One field on a tool's input object.
 #[derive(Debug, Clone, Copy)]
@@ -15,7 +35,33 @@ pub struct FieldSpec {
     pub required: bool,
     /// Preference / memory keys Clarification may consult before asking.
     pub memory_keys: &'static [&'static str],
+    pub ask_kind: AskKind,
+    pub choices: &'static [ChoiceSpec],
 }
+
+/// Common duration presets (30 / 60 / 90 / 120 minutes) for scheduling tools.
+pub const DURATION_MINUTES_CHOICES: &[ChoiceSpec] = &[
+    ChoiceSpec {
+        id: "a",
+        label: "30 minutes",
+        value: "30",
+    },
+    ChoiceSpec {
+        id: "b",
+        label: "1 hour",
+        value: "60",
+    },
+    ChoiceSpec {
+        id: "c",
+        label: "90 minutes",
+        value: "90",
+    },
+    ChoiceSpec {
+        id: "d",
+        label: "2 hours",
+        value: "120",
+    },
+];
 
 /// Schema for one executable tool.
 #[derive(Debug, Clone, Copy)]
