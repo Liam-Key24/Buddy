@@ -10,6 +10,7 @@ import {
   CircleNotch,
   Code,
   Cpu,
+  DotsThree,
   FileText,
   Gear,
   Lightning,
@@ -129,6 +130,7 @@ export function Sidebar() {
     activeConversationId: activeCodeConversationId,
   } = useCodeAgentStore();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const isCodePage = currentPage === "code";
   const isLifePage =
@@ -256,9 +258,19 @@ export function Sidebar() {
             />
           </RailButton>
           <RailButton
+            active={currentPage === "calendar"}
+            onClick={() => setCurrentPage("calendar")}
+            title="Calendar"
+          >
+            <CalendarBlank
+              size={20}
+              weight={currentPage === "calendar" ? "fill" : "regular"}
+            />
+          </RailButton>
+          <RailButton
             active={currentPage === "spark"}
             onClick={() => setCurrentPage("spark")}
-            title="Spark"
+            title="Sparks"
           >
             <span className="relative">
               <Lightning
@@ -272,90 +284,51 @@ export function Sidebar() {
               )}
             </span>
           </RailButton>
-          <RailButton
-            active={currentPage === "code"}
-            onClick={() => {
-              setCurrentPage("code");
-              if (sidebarCollapsed) setSidebarCollapsed(false);
-            }}
-            title="Code Agent"
-          >
-            <Code
-              size={20}
-              weight={currentPage === "code" ? "fill" : "regular"}
-            />
-          </RailButton>
-          <RailButton
-            active={currentPage === "calendar"}
-            onClick={() => setCurrentPage("calendar")}
-            title="Calendar"
-          >
-            <CalendarBlank
-              size={20}
-              weight={currentPage === "calendar" ? "fill" : "regular"}
-            />
-          </RailButton>
-          <div className="my-1 h-px w-6 bg-zinc-800" />
-          <RailButton
-            active={currentPage === "documents"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("documents");
-            }}
-            title="Documents"
-          >
-            <FileText size={20} weight={currentPage === "documents" ? "fill" : "regular"} />
-          </RailButton>
-          <RailButton
-            active={currentPage === "fitness"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("fitness");
-            }}
-            title="Fitness & Tracking"
-          >
-            <Barbell size={20} weight={currentPage === "fitness" ? "fill" : "regular"} />
-          </RailButton>
-          <RailButton
-            active={currentPage === "money"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("money");
-            }}
-            title="Money"
-          >
-            <Wallet size={20} weight={currentPage === "money" ? "fill" : "regular"} />
-          </RailButton>
-          <RailButton
-            active={currentPage === "study"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("study");
-            }}
-            title="Study Planner"
-          >
-            <BookOpen size={20} weight={currentPage === "study" ? "fill" : "regular"} />
-          </RailButton>
-          <RailButton
-            active={currentPage === "todo"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("todo");
-            }}
-            title="To-Do"
-          >
-            <CheckSquare size={20} weight={currentPage === "todo" ? "fill" : "regular"} />
-          </RailButton>
-          <RailButton
-            active={currentPage === "socials"}
-            onClick={() => {
-              ensureBuddyConversation();
-              setCurrentPage("socials");
-            }}
-            title="Socials"
-          >
-            <ShareNetwork size={20} weight={currentPage === "socials" ? "fill" : "regular"} />
-          </RailButton>
+          <div className="relative">
+            <RailButton
+              active={moreOpen || isLifePage || isCodePage}
+              onClick={() => setMoreOpen((open) => !open)}
+              title="More"
+            >
+              <DotsThree size={22} weight={moreOpen || isLifePage || isCodePage ? "bold" : "regular"} />
+            </RailButton>
+            {moreOpen && (
+              <div className="absolute left-12 top-0 z-20 w-44 rounded-xl border border-zinc-800 bg-zinc-900 p-1 shadow-xl">
+                {[
+                  { page: "documents" as const, label: "Documents", icon: FileText },
+                  { page: "fitness" as const, label: "Fitness", icon: Barbell },
+                  { page: "money" as const, label: "Money", icon: Wallet },
+                  { page: "study" as const, label: "Study", icon: BookOpen },
+                  { page: "todo" as const, label: "To-Do", icon: CheckSquare },
+                  { page: "socials" as const, label: "Socials", icon: ShareNetwork },
+                  { page: "code" as const, label: "Code", icon: Code },
+                ].map((item) => (
+                  <button
+                    key={item.page}
+                    type="button"
+                    onClick={() => {
+                      if (item.page === "code") {
+                        setCurrentPage("code");
+                        if (sidebarCollapsed) setSidebarCollapsed(false);
+                      } else {
+                        ensureBuddyConversation();
+                        setCurrentPage(item.page);
+                      }
+                      setMoreOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm ${
+                      currentPage === item.page
+                        ? "bg-blue-500/10 text-blue-400"
+                        : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                    }`}
+                  >
+                    <item.icon size={14} />
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
 
         <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pb-1 pt-1">

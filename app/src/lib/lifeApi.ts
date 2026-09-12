@@ -402,6 +402,23 @@ export interface LifeSnapshot {
   today_events?: SnapshotEvent[];
   open_todo_preview?: SnapshotTodo[];
   social_drafts?: number;
+  goals?: SnapshotGoal[];
+  goals_attention?: SnapshotGoalAttention[];
+}
+
+export interface SnapshotGoal {
+  id: string;
+  title: string;
+  forecast: string;
+  deadline?: string | null;
+  current_value?: number | null;
+  target_value?: number | null;
+  unit?: string | null;
+}
+
+export interface SnapshotGoalAttention {
+  title: string;
+  forecast: string;
 }
 
 export const todoList = (status?: string | null, category?: string | null) =>

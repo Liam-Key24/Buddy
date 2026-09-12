@@ -22,6 +22,7 @@ import {
   lifeDashboardSnapshot,
   lifeDashboardWeek,
   type LifeSnapshot,
+  type SnapshotGoal,
   type StudyFocus,
   type TaskDay,
 } from "../lib/lifeApi";
@@ -94,6 +95,70 @@ export function Dashboard() {
   return (
     <div className="flex-1 overflow-y-auto p-5">
       <div className="dashboard-stagger mx-auto flex max-w-5xl flex-col gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 sm:col-span-7">
+            <p className="text-[10px] font-medium tracking-wider text-zinc-500">TODAY</p>
+            <div className="mt-2 space-y-1.5">
+              {(snap?.today_events ?? []).length === 0 ? (
+                <p className="text-sm text-zinc-600">Nothing on the calendar yet.</p>
+              ) : (
+                (snap?.today_events ?? []).map((event, i) => (
+                  <p key={`${event.title}-${i}`} className="truncate text-sm text-zinc-100">
+                    {event.title}
+                  </p>
+                ))
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setCurrentPage("chat")}
+              className="mt-3 text-left text-[11px] text-zinc-500 transition hover:text-zinc-300"
+            >
+              Tell Buddy what you want to do today
+            </button>
+          </section>
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 sm:col-span-5">
+            <p className="text-[10px] font-medium tracking-wider text-zinc-500">NEEDS ATTENTION</p>
+            <div className="mt-2 space-y-1.5">
+              {(snap?.goals_attention ?? []).length === 0 && (snap?.overdue_todos ?? 0) === 0 ? (
+                <p className="text-sm text-zinc-600">Clear.</p>
+              ) : (
+                <>
+                  {(snap?.goals_attention ?? []).map((item, i) => (
+                    <p key={`${item.title}-${i}`} className="text-sm text-zinc-100">
+                      {item.title}
+                      <span className="ml-2 text-[11px] text-rose-400">{item.forecast.replace("_", " ")}</span>
+                    </p>
+                  ))}
+                  {(snap?.overdue_todos ?? 0) > 0 && (
+                    <p className="text-sm text-rose-400">{snap?.overdue_todos} overdue todos</p>
+                  )}
+                </>
+              )}
+            </div>
+          </section>
+        </div>
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <p className="text-[10px] font-medium tracking-wider text-zinc-500">ACTIVE GOALS</p>
+          <div className="mt-3 space-y-2">
+            {(snap?.goals ?? []).length === 0 ? (
+              <p className="text-sm text-zinc-600">
+                No goals yet. Chat something like “By December I want to…”
+              </p>
+            ) : (
+              (snap?.goals ?? []).map((goal: SnapshotGoal) => (
+                <div key={goal.id} className="flex items-center justify-between gap-3">
+                  <p className="truncate text-sm text-zinc-100">{goal.title}</p>
+                  <span className="shrink-0 text-[11px] capitalize text-zinc-500">
+                    {goal.forecast.replace("_", " ")}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
         <div className="grid grid-cols-3 gap-3">
           <button
             type="button"

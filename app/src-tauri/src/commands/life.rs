@@ -1073,6 +1073,40 @@ pub fn life_dashboard_snapshot(
         .list_social_drafts()
         .map(|d| d.len())
         .unwrap_or(0);
+    let goal_rows = state.db.list_goals(Some("active")).unwrap_or_default();
+    let goals_json: Vec<serde_json::Value> = goal_rows
+        .iter()
+        .take(8)
+        .map(|g| {
+            let forecast = buddy_database::forecast_goal(g, &today);
+            serde_json::json!({
+                "id": g.id,
+                "title": g.title,
+                "forecast": forecast.as_str(),
+                "deadline": g.deadline,
+                "current_value": g.current_value,
+                "target_value": g.target_value,
+                "unit": g.unit,
+            })
+        })
+        .collect();
+    let goals_attention: Vec<serde_json::Value> = goal_rows
+        .iter()
+        .filter(|g| {
+            matches!(
+                buddy_database::forecast_goal(g, &today),
+                buddy_database::GoalForecast::Behind
+                    | buddy_database::GoalForecast::AtRisk
+                    | buddy_database::GoalForecast::Blocked
+            )
+        })
+        .map(|g| {
+            serde_json::json!({
+                "title": g.title,
+                "forecast": buddy_database::forecast_goal(g, &today).as_str(),
+            })
+        })
+        .collect();
     let today_events = day_bounds_ms(&today)
         .and_then(|(start, end)| state.db.list_buddy_calendar_events(start, end).ok())
         .unwrap_or_default();
@@ -1160,6 +1194,8 @@ pub fn life_dashboard_snapshot(
         "today_events": today_events_json,
         "open_todo_preview": open_todo_json,
         "social_drafts": social_drafts,
+        "goals": goals_json,
+        "goals_attention": goals_attention,
     }))
 }
 
