@@ -579,15 +579,15 @@ impl ProcessManager {
         let uvicorn = Self::venv_bin(state, "uvicorn");
         let reload = cfg!(debug_assertions);
 
-        let (program, args): (String, Vec<String>) = if uvicorn.exists() {
-            (
-                uvicorn.to_string_lossy().into_owned(),
-                Self::uvicorn_args(port, reload, false),
-            )
-        } else if venv_python.exists() {
+        let (program, args): (String, Vec<String>) = if venv_python.exists() {
             (
                 venv_python.to_string_lossy().into_owned(),
                 Self::uvicorn_args(port, reload, true),
+            )
+        } else if uvicorn.exists() {
+            (
+                uvicorn.to_string_lossy().into_owned(),
+                Self::uvicorn_args(port, reload, false),
             )
         } else {
             (
@@ -661,10 +661,12 @@ impl ProcessManager {
         let venv_python = Self::venv_bin(state, "python");
         let start_script = brain_dir.join("scripts/start_mlx.sh");
 
-        let (program, args, cwd): (String, Vec<String>, PathBuf) = if server_bin.exists() {
+        let (program, args, cwd): (String, Vec<String>, PathBuf) = if venv_python.exists() {
             (
-                server_bin.to_string_lossy().into_owned(),
+                venv_python.to_string_lossy().into_owned(),
                 vec![
+                    "-m".into(),
+                    "mlx_lm.server".into(),
                     "--model".into(),
                     model.clone(),
                     "--host".into(),
@@ -674,12 +676,10 @@ impl ProcessManager {
                 ],
                 brain_dir.clone(),
             )
-        } else if venv_python.exists() {
+        } else if server_bin.exists() {
             (
-                venv_python.to_string_lossy().into_owned(),
+                server_bin.to_string_lossy().into_owned(),
                 vec![
-                    "-m".into(),
-                    "mlx_lm.server".into(),
                     "--model".into(),
                     model.clone(),
                     "--host".into(),
