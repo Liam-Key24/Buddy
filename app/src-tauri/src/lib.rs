@@ -15,6 +15,7 @@ mod orchestrator;
 mod run_control;
 mod secrets;
 mod services;
+mod skills;
 mod socials_generate;
 mod spark_checker;
 mod state;

@@ -38,23 +38,6 @@ pub enum ChatMode {
     Tool,
 }
 
-const LIFE_KIT_SELECTORS: &[&str] = &[
-    "calendar.",
-    "lifestyle.",
-    "dream.",
-    "work.",
-    "todo.",
-    "study.",
-    "fitness.",
-    "money.",
-    "docs.",
-    "socials.",
-    "research.",
-    "save_spark",
-    "list_sparks",
-    "update_spark",
-];
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NativeTranscript {
     pub goal: String,
@@ -798,7 +781,7 @@ pub fn fast_life_look_intent(text: &str) -> Option<(&'static str, String)> {
     None
 }
 
-fn looks_like_doc_look(lower: &str) -> bool {
+pub(crate) fn looks_like_doc_look(lower: &str) -> bool {
     let noun = has_word(lower, "sheet")
         || has_word(lower, "document")
         || has_word(lower, "documents")
@@ -1845,16 +1828,16 @@ pub fn selectors_for_turn(
     // Keyword hits keep that family. Long/messy dumps get the full kit so Qwen
     // can split multi-intent. Short trivia attaches nothing — that's chat.
     if out.is_empty() && looks_like_dump(text) {
-        for selector in LIFE_KIT_SELECTORS {
-            if !out.contains(selector) {
-                out.push(*selector);
+        for selector in crate::skills::prefixes_for_turn(text, ui_context) {
+            if !out.contains(&selector) {
+                out.push(selector);
             }
         }
     }
     out
 }
 
-fn looks_like_dump(text: &str) -> bool {
+pub(crate) fn looks_like_dump(text: &str) -> bool {
     let t = text.trim();
     t.len() > 100 || t.matches(',').count() >= 2
 }
@@ -1888,184 +1871,10 @@ pub fn is_multi_intent(text: &str, ui_context: Option<&str>) -> bool {
 
 /// Tool name prefixes / exact names to attach. Empty → conversation, no tools.
 pub fn tool_prefixes_for_turn(text: &str, ui_context: Option<&str>) -> Vec<&'static str> {
-    let lower = text.trim().to_ascii_lowercase();
-    if lower.is_empty() {
-        return Vec::new();
-    }
-    let page = ui_context.unwrap_or("").to_ascii_lowercase();
-    let mut out: Vec<&'static str> = Vec::new();
-    let mut push = |s: &'static str| {
-        if !out.contains(&s) {
-            out.push(s);
-        }
-    };
-
-    if parse_when_label(&lower).is_some()
-        || has_look_cue(&lower)
-        || looks_like_organize(&lower)
-        || looks_like_clock_pin(&lower)
-        || has_any(
-            &lower,
-            &[
-                "find a slot",
-                "a slot for",
-                "free slot",
-                "find time for",
-                "find me a slot",
-            ],
-        )
-    {
-        push("calendar.");
-        push("lifestyle.");
-        push("dream.");
-        push("work.");
-    }
-
-    if has_any(
-        &lower,
-        &[
-            "todo",
-            "to-do",
-            "to do",
-            "deadline",
-            "get done",
-            "need to do",
-            "my tasks",
-        ],
-    ) || (page.contains("page: todo") && has_actiony(&lower))
-    {
-        push("todo.");
-    }
-
-    if has_any(
-        &lower,
-        &[
-            "exam",
-            "assignment",
-            "assignments",
-            "flashcard",
-            "revision",
-            "studied",
-            "topic",
-            "topics",
-        ],
-    ) || (has_word(&lower, "study")
-        && has_any(
-            &lower,
-            &[
-                "session", "plan", "log", "schedule", "add", "hours", "what", "event",
-                "subject",
-            ],
-        ))
-        || (page.contains("page: study") && has_actiony(&lower))
-    {
-        push("study.");
-    }
-
-    if has_any(
-        &lower,
-        &[
-            "calorie",
-            "fridge",
-            "workout",
-            "workouts",
-            "i ate",
-            "i eat",
-            "climbed",
-            "climbing",
-            "bouldering",
-            "weigh in",
-            "log weight",
-            "what did i eat",
-            "food log",
-        ],
-    ) || has_word(&lower, "weight")
-        || has_word(&lower, "weigh")
-        || has_word(&lower, "protein")
-        || (has_word(&lower, "eat")
-            && has_any(&lower, &["tonight", "today", "log", "should i", "what should"]))
-        || (page.contains("page: fitness") && has_actiony(&lower))
-    {
-        push("fitness.");
-    }
-
-    if has_any(
-        &lower,
-        &[
-            "spent",
-            "earned",
-            "invoice",
-            "expense",
-            "transactions",
-            "what did i spend",
-            "pots",
-            "savings pot",
-        ],
-    ) || has_word(&lower, "spend")
-        || has_word(&lower, "pot")
-        || has_word(&lower, "paid")
-        || lower.contains('£')
-        || (has_word(&lower, "money") && has_actiony(&lower))
-        || (page.contains("page: money") && has_actiony(&lower))
-    {
-        push("money.");
-    }
-
-    if wants_doc_format(text)
-        || extract_doc_title(text).is_some()
-        || looks_like_doc_look(&lower)
-        || (has_any(&lower, &["document", "documents", "docs", "sheet"]) && has_actiony(&lower))
-        || (page.contains("page: documents") && has_actiony(&lower))
-    {
-        push("docs.");
-    }
-
-    if has_any(
-        &lower,
-        &["linkedin", "twitter", "weekly review", "socials"],
-    ) || (has_word(&lower, "posting") && has_word(&lower, "social"))
-        || (page.contains("page: socials") && has_actiony(&lower))
-    {
-        push("socials.");
-    }
-
-    if (has_word(&lower, "research")
-        && (has_actiony(&lower)
-            || has_any(&lower, &["what", "findings", "session", "sources"])))
-        || (page.contains("page: research") && has_actiony(&lower))
-    {
-        push("research.");
-    }
-
-    if looks_like_code_request(&lower) {
-        push("coder.");
-        push("read_file");
-        push("write_file");
-        push("edit_file");
-        push("delete_file");
-        push("list_dir");
-    }
-
-    if looks_like_spark_save(&lower)
-        || has_word(&lower, "spark")
-        || has_word(&lower, "sparks")
-    {
-        push("save_spark");
-        push("update_spark");
-        push("list_sparks");
-    } else if looks_like_spark_list(&lower) {
-        push("list_sparks");
-    }
-
-    if has_any(&lower, &["send email", "email this", "git push", "push to github"]) {
-        push("send_email");
-        push("git_push");
-    }
-
-    out
+    crate::skills::prefixes_for_turn(text, ui_context)
 }
 
-fn has_any(lower: &str, needles: &[&str]) -> bool {
+pub(crate) fn has_any(lower: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| {
         if n.chars()
             .any(|c| c.is_whitespace() || matches!(c, '.' | '-' | '£' | ':' | '/'))
@@ -2077,13 +1886,13 @@ fn has_any(lower: &str, needles: &[&str]) -> bool {
     })
 }
 
-fn has_word(lower: &str, word: &str) -> bool {
+pub(crate) fn has_word(lower: &str, word: &str) -> bool {
     lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|w| w == word)
 }
 
-fn has_actiony(lower: &str) -> bool {
+pub(crate) fn has_actiony(lower: &str) -> bool {
     has_any(
         lower,
         &[
@@ -2094,7 +1903,7 @@ fn has_actiony(lower: &str) -> bool {
     )
 }
 
-fn looks_like_code_request(lower: &str) -> bool {
+pub(crate) fn looks_like_code_request(lower: &str) -> bool {
     has_any(
         lower,
         &[
@@ -2110,7 +1919,7 @@ fn looks_like_code_request(lower: &str) -> bool {
         && has_any(lower, &["edit", "write", "read", "open file"]))
 }
 
-fn looks_like_spark_save(lower: &str) -> bool {
+pub(crate) fn looks_like_spark_save(lower: &str) -> bool {
     has_any(
         lower,
         &[
@@ -2124,7 +1933,7 @@ fn looks_like_spark_save(lower: &str) -> bool {
         || lower.contains("spark: ")
 }
 
-fn looks_like_spark_list(lower: &str) -> bool {
+pub(crate) fn looks_like_spark_list(lower: &str) -> bool {
     has_any(lower, &["my sparks", "list sparks", "saved sparks", "spark list"])
         || (has_word(lower, "sparks") && has_actiony(lower))
 }
@@ -2180,7 +1989,7 @@ fn mixed_life_intent(lower: &str) -> bool {
     CUES.iter().any(|c| lower.contains(c))
 }
 
-fn looks_like_organize(lower: &str) -> bool {
+pub(crate) fn looks_like_organize(lower: &str) -> bool {
     if     lower.contains("plan my week")
         || lower.contains("plan the week")
         || lower.contains("plan out my week")
@@ -2212,7 +2021,7 @@ fn looks_like_organize(lower: &str) -> bool {
         || (lower.contains("once") && lower.contains("week"))
 }
 
-fn has_look_cue(lower: &str) -> bool {
+pub(crate) fn has_look_cue(lower: &str) -> bool {
     const CUES: &[&str] = &[
         "what's on",
         "whats on",
@@ -2307,7 +2116,7 @@ fn looks_like_look_work(lower: &str) -> bool {
         || lower.contains("when am i at work")
 }
 
-fn looks_like_clock_pin(lower: &str) -> bool {
+pub(crate) fn looks_like_clock_pin(lower: &str) -> bool {
     if !has_clock_token(lower) {
         return false;
     }
@@ -3709,7 +3518,7 @@ fn wants_generated_doc_body(text: &str) -> bool {
             && !lower.contains(':'))
 }
 
-fn extract_doc_title(text: &str) -> Option<String> {
+pub(crate) fn extract_doc_title(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     const MARKERS: &[&str] = &[
         "document called ",
