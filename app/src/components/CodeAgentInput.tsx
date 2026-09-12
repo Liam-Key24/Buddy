@@ -96,7 +96,7 @@ export function CodeAgentInput() {
 
   return (
     <div className="border-t border-zinc-800 p-4">
-      <div className="flex flex-col gap-2 rounded-2xl border border-zinc-800 bg-zinc-800/50 p-2 shadow-sm">
+      <div className="flex flex-col gap-2 rounded-2xl border border-zinc-800 bg-zinc-800/50 p-2">
         <div className="flex items-center gap-2">
           <div className="relative">
             <button

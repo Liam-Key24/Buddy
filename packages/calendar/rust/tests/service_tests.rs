@@ -211,6 +211,32 @@ async fn lifestyle_schedule_and_dreams() {
 }
 
 #[tokio::test]
+async fn lifestyle_set_times_updates_template() {
+    let db = open_db();
+    let svc = CalendarService::with_db(db);
+    let rule = svc
+        .set_schedule_times(buddy_calendar::ScheduleKind::Work, "09:00", "17:30")
+        .await
+        .unwrap();
+    assert_eq!(rule.kind, buddy_calendar::ScheduleKind::Work);
+    assert!(rule.segments.iter().all(|s| s.start_hm == "09:00" && s.end_hm == "17:30"));
+
+    let now = chrono::Local::now();
+    let start = (now - chrono::Duration::days(1)).timestamp_millis();
+    let end = (now + chrono::Duration::days(8)).timestamp_millis();
+    let blocks = svc.list_schedule_blocks(start, end).await.unwrap();
+    let work = blocks
+        .iter()
+        .find(|b| b.kind == buddy_calendar::ScheduleKind::Work)
+        .expect("work block after hours change");
+    let start_hm = chrono::Local
+        .timestamp_millis_opt(work.start_time)
+        .single()
+        .unwrap();
+    assert_eq!(start_hm.format("%H:%M").to_string(), "09:00");
+}
+
+#[tokio::test]
 async fn work_sales_and_hours() {
     let db = open_db();
     let svc = CalendarService::with_db(db);

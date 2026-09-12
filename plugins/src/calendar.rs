@@ -1,44 +1,15 @@
 use std::sync::Arc;
 
-use buddy_core::{AfterExecute, BuddyPlugin, FieldSpec, SettingSeed, Tool, ToolDecl, ToolSchema};
+use buddy_core::{
+    AfterExecute, AskKind, BuddyPlugin, FieldSpec, RespondMode, Safety, SettingSeed, Tool,
+    ToolDecl, ToolSchema, ToolSpec,
+};
 use buddy_database::Database;
+use serde_json::json;
 
 /// Calendar AI tools are registered onto the tool registry from `AppState`
 /// (they need `CalendarService`). This plugin contributes planner decls and settings seeds.
 pub struct CalendarPlugin;
-
-const CREATE_EVENT_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "title",
-        label: "title",
-        required: true,
-        memory_keys: &[],
-    },
-    FieldSpec {
-        name: "start_time",
-        label: "date and time",
-        required: true,
-        memory_keys: &["preferred_meeting_time"],
-    },
-    FieldSpec {
-        name: "end_time",
-        label: "end time",
-        required: true,
-        memory_keys: &[],
-    },
-    FieldSpec {
-        name: "location",
-        label: "location",
-        required: false,
-        memory_keys: &["preferred_meeting_location", "default_meeting_location"],
-    },
-    FieldSpec {
-        name: "description",
-        label: "notes",
-        required: false,
-        memory_keys: &[],
-    },
-];
 
 const DREAM_LOG_FIELDS: &[FieldSpec] = &[
     FieldSpec {
@@ -46,18 +17,24 @@ const DREAM_LOG_FIELDS: &[FieldSpec] = &[
         label: "dream description",
         required: true,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "sleep_date",
         label: "sleep date",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "title",
         label: "title",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
 ];
 
@@ -67,18 +44,24 @@ const WORK_SALES_FIELDS: &[FieldSpec] = &[
         label: "sales amount",
         required: true,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "currency",
         label: "currency",
         required: false,
         memory_keys: &["preferred_currency"],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "work_date",
         label: "work date",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
 ];
 
@@ -88,31 +71,104 @@ const WORK_HOURS_FIELDS: &[FieldSpec] = &[
         label: "finish time",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "start_hm",
         label: "start time",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "actual_end_ms",
         label: "finish time",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
     },
     FieldSpec {
         name: "actual_start_ms",
         label: "start time",
         required: false,
         memory_keys: &[],
+    ask_kind: AskKind::Text,
+    choices: &[],
+    },
+];
+
+const LOOK_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        name: "when",
+        label: "when",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
+    },
+    FieldSpec {
+        name: "focus",
+        label: "focus",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
+    },
+];
+
+const PIN_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        name: "title",
+        label: "title",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
+    },
+    FieldSpec {
+        name: "start",
+        label: "start time",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
+    },
+];
+
+const ORGANIZE_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        name: "window",
+        label: "window",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
+    },
+    FieldSpec {
+        name: "items",
+        label: "items",
+        required: false,
+        memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
     },
 ];
 
 const CALENDAR_SCHEMAS: &[ToolSchema] = &[
     ToolSchema {
-        tool: "calendar.create_event",
-        fields: CREATE_EVENT_FIELDS,
+        tool: "calendar.look",
+        fields: LOOK_FIELDS,
+    },
+    ToolSchema {
+        tool: "calendar.pin",
+        fields: PIN_FIELDS,
+    },
+    ToolSchema {
+        tool: "calendar.organize",
+        fields: ORGANIZE_FIELDS,
     },
     ToolSchema {
         tool: "dream.log",
@@ -126,29 +182,171 @@ const CALENDAR_SCHEMAS: &[ToolSchema] = &[
         tool: "work.set_hours",
         fields: WORK_HOURS_FIELDS,
     },
-    ToolSchema {
-        tool: "calendar.delete_event",
-        fields: &[
-            FieldSpec {
-                name: "id",
-                label: "event",
-                required: false,
-                memory_keys: &[],
-            },
-            FieldSpec {
-                name: "query",
-                label: "event name",
-                required: false,
-                memory_keys: &[],
-            },
-            FieldSpec {
-                name: "all",
-                label: "clear all",
-                required: false,
-                memory_keys: &[],
-            },
-        ],
+];
+
+fn extract_calendar_look(text: &str) -> Option<String> {
+    let t = text.trim().to_ascii_lowercase();
+    if t.is_empty() || t.contains(',') || t.contains(" and ") || t.contains(';') {
+        return None;
+    }
+    let when = if t.contains("tomorrow") {
+        "tomorrow"
+    } else if t.contains("today") || t.contains("tonight") {
+        "today"
+    } else if t.contains("this week") {
+        "this_week"
+    } else if t.contains("next week") {
+        "next_week"
+    } else if t.contains("weekend") {
+        "weekend"
+    } else {
+        return None;
+    };
+    let asks = t.contains("what")
+        || t.contains("when")
+        || t.contains("show")
+        || t.contains("free")
+        || t.contains("on");
+    if !asks {
+        return None;
+    }
+    let focus = if t.contains("free") {
+        "free"
+    } else if t.contains("working") || t.contains("work hours") {
+        "work"
+    } else {
+        "events"
+    };
+    Some(json!({ "when": when, "focus": focus }).to_string())
+}
+
+const LOOK_SPEC: ToolSpec = ToolSpec {
+    name: "calendar.look",
+    description: "what's on / when free / when working",
+    example: r#"calendar.look when=today focus=events"#,
+    schema: ToolSchema {
+        tool: "calendar.look",
+        fields: LOOK_FIELDS,
     },
+    aliases: &["/calendar.look"],
+    rest_field: None,
+    safety: Safety::Immediate,
+    respond: RespondMode::Passthrough,
+    likely: &["what's on", "whats on", "am i free", "when am i"],
+    extract: Some(extract_calendar_look),
+    permission: buddy_core::Permission::None,
+    openai_properties_json: r#"{"when":{"type":"string","description":"today | tomorrow | this_week | next_week | not_today | weekend | YYYY-MM-DD"},"focus":{"type":"string","description":"events | free | work"},"duration_minutes":{"type":"integer"},"query":{"type":"string"}}"#,
+};
+
+const PIN_SPEC: ToolSpec = ToolSpec {
+    name: "calendar.pin",
+    description: "fixed clock event. Use only with an explicit clock time",
+    example: r#"calendar.pin action=create title=Dentist start="tomorrow 14:00""#,
+    schema: ToolSchema {
+        tool: "calendar.pin",
+        fields: PIN_FIELDS,
+    },
+    aliases: &[],
+    rest_field: None,
+    safety: Safety::Immediate,
+    permission: buddy_core::Permission::Confirm,
+    respond: RespondMode::Passthrough,
+    likely: &[],
+    extract: None,
+    openai_properties_json: r#"{"action":{"type":"string","description":"create | update | delete"},"title":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"id":{"type":"string"},"force":{"type":"boolean"}}"#,
+};
+
+const ORGANIZE_SPEC: ToolSpec = ToolSpec {
+    name: "calendar.organize",
+    description: "self-organize flexible time. Always propose first",
+    example: r#"calendar.organize window=this_week mode=propose"#,
+    schema: ToolSchema {
+        tool: "calendar.organize",
+        fields: ORGANIZE_FIELDS,
+    },
+    aliases: &[],
+    rest_field: None,
+    safety: Safety::ProposeFirst,
+    permission: buddy_core::Permission::Confirm,
+    respond: RespondMode::Passthrough,
+    likely: &[],
+    extract: None,
+    openai_properties_json: r#"{"window":{"type":"string"},"mode":{"type":"string","description":"propose | commit"},"constraints":{"type":"array","items":{"type":"string"}},"items":{"type":"array","items":{"type":"object"}}}"#,
+};
+
+const CALENDAR_SPECS: &[ToolSpec] = &[
+    LOOK_SPEC,
+    PIN_SPEC,
+    ORGANIZE_SPEC,
+    ToolSpec::basic(
+        "lifestyle.list_blocks",
+        "list Work/Sleep schedule blocks in a range",
+        r#"lifestyle.list_blocks start=<ms> end=<ms>"#,
+        buddy_core::empty_schema("lifestyle.list_blocks"),
+    ),
+    ToolSpec::basic(
+        "lifestyle.set_schedule",
+        "update permanent Work/Sleep hours",
+        r#"lifestyle.set_schedule kind=work start_hm=09:00 end_hm=17:00"#,
+        buddy_core::empty_schema("lifestyle.set_schedule"),
+    ),
+    ToolSpec::basic(
+        "dream.log",
+        "save a dream to last night's sleep",
+        r#"dream.log body="...""#,
+        ToolSchema {
+            tool: "dream.log",
+            fields: DREAM_LOG_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "dream.list",
+        "list dreams for a sleep night",
+        r#"dream.list sleep_date=2026-09-12"#,
+        buddy_core::empty_schema("dream.list"),
+    ),
+    ToolSpec::basic(
+        "dream.search",
+        "search dreams by text/tags",
+        r#"dream.search query=nightmare"#,
+        buddy_core::empty_schema("dream.search"),
+    ),
+    ToolSpec::basic(
+        "dream.update",
+        "update a dream",
+        r#"dream.update id=<id> body="...""#,
+        buddy_core::empty_schema("dream.update"),
+    ),
+    ToolSpec::basic(
+        "dream.delete",
+        "delete a dream by id",
+        r#"dream.delete id=<id>"#,
+        buddy_core::empty_schema("dream.delete"),
+    ),
+    ToolSpec::basic(
+        "work.log_sales",
+        "record sales for a work day",
+        r#"work.log_sales amount=320"#,
+        ToolSchema {
+            tool: "work.log_sales",
+            fields: WORK_SALES_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "work.set_hours",
+        "override work start/end",
+        r#"work.set_hours end_hm=17:15"#,
+        ToolSchema {
+            tool: "work.set_hours",
+            fields: WORK_HOURS_FIELDS,
+        },
+    ),
+    ToolSpec::basic(
+        "work.get_stats",
+        "hours and sales for today/week/month",
+        r#"work.get_stats"#,
+        buddy_core::empty_schema("work.get_stats"),
+    ),
 ];
 
 impl BuddyPlugin for CalendarPlugin {
@@ -164,48 +362,24 @@ impl BuddyPlugin for CalendarPlugin {
     fn tool_decls(&self) -> &'static [ToolDecl] {
         &[
             ToolDecl {
-                name: "calendar.list_events",
-                planner_line: "calendar.list_events: list BUDDY calendar events in a range. tool_input JSON: {\"start\": <unix_ms>, \"end\": <unix_ms>, \"query\": \"<optional>\", \"categories\": [\"work\"]}",
+                name: "calendar.look",
+                planner_line: "calendar.look: what's on / when free / when working. JSON: {\"when\":\"today|tomorrow|this_week|next_week|weekend|YYYY-MM-DD\", \"focus\":\"events|free|work\", \"duration_minutes\":60 optional}. focus=work for work hours (default this_week). Returns events plus Work/Sleep and off_days.",
             },
             ToolDecl {
-                name: "calendar.get_event",
-                planner_line: "calendar.get_event: get one event by id. tool_input JSON: {\"id\": \"<event id>\"}",
+                name: "calendar.pin",
+                planner_line: "calendar.pin: fixed clock event. JSON: {\"action\":\"create|update|delete\", \"title\":\"Dentist\", \"start\":\"tomorrow 14:00\", \"end\":\"tomorrow 15:00\", \"id\":\"optional\"}. Use only with an explicit clock time.",
             },
             ToolDecl {
-                name: "calendar.create_event",
-                planner_line: "calendar.create_event: create a native BUDDY calendar event. tool_input JSON: {\"title\": \"...\", \"start_time\": <unix_ms>, \"end_time\": <unix_ms>, \"description\": \"optional\", \"location\": \"optional\", \"category\": \"work|personal|birthdays|holidays|general\", \"all_day\": false, \"timezone\": \"optional IANA\", \"reminders\": [{\"minutes_before\":15}], \"recurrence\": {\"frequency\":\"WEEKLY\",\"interval\":1}, \"flexibility\":\"fixed|flexible|optional\", \"force\":false}. Returns status ok or conflict with suggestions.",
-            },
-            ToolDecl {
-                name: "calendar.update_event",
-                planner_line: "calendar.update_event: update an event. tool_input JSON: {\"id\": \"<event id>\", \"title\": \"optional\", \"start_time\": <optional unix_ms>, \"end_time\": <optional>, ...}",
-            },
-            ToolDecl {
-                name: "calendar.delete_event",
-                planner_line: "calendar.delete_event: delete event(s). tool_input JSON: {\"id\": \"<event id>\"} OR {\"query\": \"<title fragment>\"} OR {\"all\": true} to clear the calendar",
-            },
-            ToolDecl {
-                name: "calendar.duplicate_event",
-                planner_line: "calendar.duplicate_event: duplicate an event (shifted +1 day). tool_input JSON: {\"id\": \"<event id>\"}",
-            },
-            ToolDecl {
-                name: "calendar.search_events",
-                planner_line: "calendar.search_events: search events by text. tool_input JSON: {\"query\": \"...\", \"start\": <optional unix_ms>, \"end\": <optional unix_ms>}",
-            },
-            ToolDecl {
-                name: "calendar.get_today",
-                planner_line: "calendar.get_today: list today's events. tool_input may be empty JSON {}.",
-            },
-            ToolDecl {
-                name: "calendar.get_tomorrow",
-                planner_line: "calendar.get_tomorrow: list tomorrow's events. tool_input may be empty JSON {}.",
-            },
-            ToolDecl {
-                name: "calendar.get_this_week",
-                planner_line: "calendar.get_this_week: list this week's events. tool_input may be empty JSON {}.",
+                name: "calendar.organize",
+                planner_line: "calendar.organize: self-organize flexible time. JSON: {\"window\":\"this_week|next_week|today|tomorrow|weekend|sunday\", \"mode\":\"propose|commit\", \"constraints\":[\"after_work\"], \"items\":[{\"title\":\"Climbing\",\"duration\":\"90m\",\"when\":\"after_work\",\"count\":1}], \"lift_event_ids\":[]}. Always propose first. Empty items rebalances flexible events. If _ask tradeoff: move:<id> → re-call with lift_event_ids.",
             },
             ToolDecl {
                 name: "lifestyle.list_blocks",
                 planner_line: "lifestyle.list_blocks: list Work/Sleep schedule blocks in a range. tool_input JSON: {\"start\": <unix_ms>, \"end\": <unix_ms>}",
+            },
+            ToolDecl {
+                name: "lifestyle.set_schedule",
+                planner_line: "lifestyle.set_schedule: update permanent Work/Sleep hours. JSON: {\"kind\":\"work|sleep\",\"start_hm\":\"09:00\",\"end_hm\":\"17:00\"} or segments[].",
             },
             ToolDecl {
                 name: "dream.log",
@@ -239,43 +413,15 @@ impl BuddyPlugin for CalendarPlugin {
                 name: "work.get_stats",
                 planner_line: "work.get_stats: hours and sales for today/week/month. tool_input may be empty JSON {}.",
             },
-            ToolDecl {
-                name: "calendar.find_free_time",
-                planner_line: "calendar.find_free_time: find ranked free slots respecting sleep/work/buffers. tool_input JSON: {\"duration_minutes\":120, \"start\": <unix_ms>, \"end\": <unix_ms>, \"limit\":5}",
-            },
-            ToolDecl {
-                name: "calendar.block_time",
-                planner_line: "calendar.block_time: smart focus time block. tool_input JSON: {\"title\":\"Coding\",\"duration_minutes\":180, \"start\": <optional>, \"end\": <optional>, \"apply\":true}",
-            },
-            ToolDecl {
-                name: "calendar.schedule_task",
-                planner_line: "calendar.schedule_task: auto-schedule a task into free slots over a date range. tool_input JSON: {\"title\":\"Climbing\",\"duration_minutes\":120,\"count\":3,\"prefer_spread\":true,\"deadline\":<unix_ms>,\"start\":<unix_ms>,\"end\":<unix_ms>,\"spark_id\":\"optional\",\"apply\":false} OR {\"tasks\":[{\"title\":\"Gym\",\"duration_minutes\":60},{\"title\":\"Spark work\",\"duration_minutes\":60,\"spark_id\":\"...\"}],\"start\":...,\"end\":...,\"apply\":false}. Use count for N times this week/month; prefer_spread spreads repeats across days. apply defaults false when count>1 or multiple tasks (propose first). Deadline/end \"this week\" = end of local Sunday.",
-            },
-            ToolDecl {
-                name: "calendar.plan_day",
-                planner_line: "calendar.plan_day: pack tasks into one day around protected blocks. tool_input JSON: {\"day\": <unix_ms>, \"tasks\":[{\"title\":\"Gym\",\"duration_minutes\":60},{\"title\":\"Work on spark\",\"duration_minutes\":60,\"spark_id\":\"...\",\"count\":1}], \"include_breaks\":true, \"apply\":false}. Use for \"on Sunday: A, B, C\" / \"I want to do X and Y on Saturday\". Prefer schedule_task with count for \"N times this week\".",
-            },
-            ToolDecl {
-                name: "calendar.detect_conflicts",
-                planner_line: "calendar.detect_conflicts: check a proposed window. tool_input JSON: {\"start\": <unix_ms>, \"end\": <unix_ms>, \"exclude_event_id\":\"optional\"}",
-            },
-            ToolDecl {
-                name: "calendar.resolve_conflict",
-                planner_line: "calendar.resolve_conflict: create event at a chosen resolution slot (force). tool_input JSON: {\"title\":\"...\", \"start\": <unix_ms>, \"end\": <unix_ms>}",
-            },
-            ToolDecl {
-                name: "calendar.get_capacity",
-                planner_line: "calendar.get_capacity: daily workload capacity. tool_input JSON: {\"day\": <unix_ms>} or {}",
-            },
-            ToolDecl {
-                name: "calendar.day_summary",
-                planner_line: "calendar.day_summary: intelligent daily summary + suggestions. tool_input JSON: {\"day\": <unix_ms>} or {}",
-            },
         ]
     }
 
     fn tool_schemas(&self) -> &'static [ToolSchema] {
         CALENDAR_SCHEMAS
+    }
+
+    fn tool_specs(&self) -> &'static [ToolSpec] {
+        CALENDAR_SPECS
     }
 
     fn setting_seeds(&self) -> &'static [SettingSeed] {
@@ -296,6 +442,18 @@ impl BuddyPlugin for CalendarPlugin {
                 key: "calendar_buffer_minutes",
                 value: "10",
             },
+            SettingSeed {
+                key: "preferred_activity_duration",
+                value: "",
+            },
+            SettingSeed {
+                key: "preferred_meeting_time",
+                value: "",
+            },
+            SettingSeed {
+                key: "preferred_meeting_location",
+                value: "",
+            },
         ]
     }
 
@@ -305,19 +463,14 @@ impl BuddyPlugin for CalendarPlugin {
 
     fn after_execute_hint(&self, tool_name: &str) -> AfterExecute {
         match tool_name {
-            "calendar.create_event"
-            | "calendar.update_event"
-            | "calendar.delete_event"
-            | "calendar.duplicate_event"
-            | "calendar.block_time"
-            | "calendar.schedule_task"
-            | "calendar.plan_day"
-            | "calendar.resolve_conflict"
+            "calendar.pin"
+            | "calendar.organize"
             | "dream.log"
             | "dream.update"
             | "dream.delete"
             | "work.log_sales"
-            | "work.set_hours" => AfterExecute::EmitCalendarUpdated,
+            | "work.set_hours"
+            | "lifestyle.set_schedule" => AfterExecute::EmitCalendarUpdated,
             _ => AfterExecute::None,
         }
     }
@@ -330,5 +483,19 @@ impl CalendarPlugin {
         service: Arc<buddy_calendar::CalendarService>,
     ) {
         buddy_calendar::register_calendar_tools(registry, service);
+    }
+}
+
+#[cfg(test)]
+mod extract_tests {
+    use super::extract_calendar_look;
+
+    #[test]
+    fn extract_look_today() {
+        let raw = extract_calendar_look("what's on today?").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["when"], "today");
+        assert_eq!(v["focus"], "events");
+        assert!(extract_calendar_look("tomorrow dentist at 10 and buy milk").is_none());
     }
 }

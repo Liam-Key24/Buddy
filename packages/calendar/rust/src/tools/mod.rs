@@ -6,37 +6,12 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::models::{
-    CreateEventInput, DateRange, EventFilters, EventPriority, Flexibility, RecurrenceRule,
-    Reminder, UpdateEventInput,
+    CreateEventInput, Flexibility, ScheduleKind, ScheduleSegment, UpdateEventInput,
 };
-use crate::scheduling::{ConflictKind, PlanDayRequest, ScheduleItem, WriteEventOutcome};
+use crate::scheduling::{
+    infer_constraint_tokens, parse_local_datetime, OrganizeItemIn, OrganizeMode, ScheduleTradeoff,
+};
 use crate::CalendarService;
-
-fn conflict_only_with_batch(
-    report: &crate::scheduling::ConflictReport,
-    batch_ids: &[String],
-) -> bool {
-    if report.conflicts.is_empty() || batch_ids.is_empty() {
-        return false;
-    }
-    report.conflicts.iter().all(|c| {
-        let soft = matches!(
-            c.kind,
-            ConflictKind::BufferViolation | ConflictKind::Overlap
-        );
-        if !soft {
-            return false;
-        }
-        match &c.conflicting_id {
-            Some(id) => batch_ids.iter().any(|b| {
-                id == b || id.starts_with(&format!("{b}::")) || b.starts_with(&format!("{id}::"))
-            }),
-            // Buffer rows sometimes omit ids after merge; still treat as soft when we
-            // only just wrote sibling events in this batch.
-            None => matches!(c.kind, ConflictKind::BufferViolation),
-        }
-    })
-}
 
 /// Accept unix ms (number/string) or common ISO-8601 datetime strings.
 fn parse_millis_value(value: &serde_json::Value) -> Option<i64> {
@@ -46,6 +21,9 @@ fn parse_millis_value(value: &serde_json::Value) -> Option<i64> {
             let trimmed = s.trim();
             if let Ok(n) = trimmed.parse::<i64>() {
                 return Some(n);
+            }
+            if let Some(ms) = parse_local_datetime(trimmed) {
+                return Some(ms);
             }
             if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
                 return Some(dt.timestamp_millis());
@@ -78,19 +56,6 @@ where
     })
 }
 
-fn deserialize_opt_millis<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => parse_millis_value(&v)
-            .map(Some)
-            .ok_or_else(|| serde::de::Error::custom(format!("invalid datetime: {v}"))),
-    }
-}
-
 fn block_on<F, T>(fut: F) -> Result<T, ToolError>
 where
     F: std::future::Future<Output = Result<T, crate::CalendarError>>,
@@ -110,6 +75,48 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<ToolResult, ToolError> 
     Ok(ToolResult { output })
 }
 
+fn tradeoff_ask_value(tradeoff: &ScheduleTradeoff) -> serde_json::Value {
+    json!({
+        "field": "tradeoff",
+        "prompt": tradeoff.prompt,
+        "options": [
+            {
+                "id": "move",
+                "label": format!(
+                    "Move \"{}\", do \"{}\" in that slot",
+                    tradeoff.blocking_title, tradeoff.new_title
+                ),
+                "value": format!("move:{}", tradeoff.blocking_event_id),
+            },
+            {
+                "id": "keep",
+                "label": format!(
+                    "Keep \"{}\", find another time for \"{}\"",
+                    tradeoff.blocking_title, tradeoff.new_title
+                ),
+                "value": "keep",
+            },
+            {
+                "id": "later",
+                "label": format!("Do \"{}\" later / another day", tradeoff.new_title),
+                "value": "later",
+            },
+        ],
+    })
+}
+
+fn attach_tradeoff_ask(
+    mut value: serde_json::Value,
+    tradeoff: Option<&ScheduleTradeoff>,
+) -> serde_json::Value {
+    if let Some(t) = tradeoff {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("_ask".into(), tradeoff_ask_value(t));
+        }
+    }
+    value
+}
+
 pub fn register_calendar_tools(registry: &mut ToolRegistry, service: Arc<CalendarService>) {
     for tool in make_calendar_tools(service) {
         registry.register(tool);
@@ -118,37 +125,10 @@ pub fn register_calendar_tools(registry: &mut ToolRegistry, service: Arc<Calenda
 
 pub fn make_calendar_tools(service: Arc<CalendarService>) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(ListEventsTool {
-            service: service.clone(),
-        }),
-        Arc::new(GetEventTool {
-            service: service.clone(),
-        }),
-        Arc::new(CreateEventTool {
-            service: service.clone(),
-        }),
-        Arc::new(UpdateEventTool {
-            service: service.clone(),
-        }),
-        Arc::new(DeleteEventTool {
-            service: service.clone(),
-        }),
-        Arc::new(DuplicateEventTool {
-            service: service.clone(),
-        }),
-        Arc::new(SearchEventsTool {
-            service: service.clone(),
-        }),
-        Arc::new(GetTodayTool {
-            service: service.clone(),
-        }),
-        Arc::new(GetTomorrowTool {
-            service: service.clone(),
-        }),
-        Arc::new(GetThisWeekTool {
-            service: service.clone(),
-        }),
         Arc::new(ListBlocksTool {
+            service: service.clone(),
+        }),
+        Arc::new(SetScheduleTool {
             service: service.clone(),
         }),
         Arc::new(DreamLogTool {
@@ -175,143 +155,14 @@ pub fn make_calendar_tools(service: Arc<CalendarService>) -> Vec<Arc<dyn Tool>> 
         Arc::new(WorkGetStatsTool {
             service: service.clone(),
         }),
-        Arc::new(FindFreeTimeTool {
+        Arc::new(LookTool {
             service: service.clone(),
         }),
-        Arc::new(BlockTimeTool {
+        Arc::new(PinTool {
             service: service.clone(),
         }),
-        Arc::new(ScheduleTaskTool {
-            service: service.clone(),
-        }),
-        Arc::new(PlanDayTool {
-            service: service.clone(),
-        }),
-        Arc::new(DetectConflictsTool {
-            service: service.clone(),
-        }),
-        Arc::new(ResolveConflictTool {
-            service: service.clone(),
-        }),
-        Arc::new(GetCapacityTool {
-            service: service.clone(),
-        }),
-        Arc::new(DaySummaryTool { service }),
+        Arc::new(OrganizeTool { service }),
     ]
-}
-
-struct ListEventsTool {
-    service: Arc<CalendarService>,
-}
-struct GetEventTool {
-    service: Arc<CalendarService>,
-}
-struct CreateEventTool {
-    service: Arc<CalendarService>,
-}
-struct UpdateEventTool {
-    service: Arc<CalendarService>,
-}
-struct DeleteEventTool {
-    service: Arc<CalendarService>,
-}
-struct DuplicateEventTool {
-    service: Arc<CalendarService>,
-}
-struct SearchEventsTool {
-    service: Arc<CalendarService>,
-}
-struct GetTodayTool {
-    service: Arc<CalendarService>,
-}
-struct GetTomorrowTool {
-    service: Arc<CalendarService>,
-}
-struct GetThisWeekTool {
-    service: Arc<CalendarService>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListEventsInput {
-    #[serde(alias = "start_time", deserialize_with = "deserialize_millis")]
-    start: i64,
-    #[serde(alias = "end_time", deserialize_with = "deserialize_millis")]
-    end: i64,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    categories: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GetEventInput {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateInput {
-    title: String,
-    #[serde(alias = "start", deserialize_with = "deserialize_millis")]
-    start_time: i64,
-    #[serde(alias = "end", deserialize_with = "deserialize_millis")]
-    end_time: i64,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    location: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default)]
-    all_day: bool,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    recurrence: Option<RecurrenceRule>,
-    #[serde(default)]
-    reminders: Vec<Reminder>,
-    #[serde(default)]
-    flexibility: Option<Flexibility>,
-    #[serde(default)]
-    priority: Option<EventPriority>,
-    #[serde(default)]
-    force: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateInput {
-    id: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    location: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default, alias = "start", deserialize_with = "deserialize_opt_millis")]
-    start_time: Option<i64>,
-    #[serde(default, alias = "end", deserialize_with = "deserialize_opt_millis")]
-    end_time: Option<i64>,
-    #[serde(default)]
-    all_day: Option<bool>,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    recurrence: Option<RecurrenceRule>,
-    #[serde(default)]
-    clear_recurrence: bool,
-    #[serde(default)]
-    reminders: Option<Vec<Reminder>>,
-    #[serde(default)]
-    flexibility: Option<Flexibility>,
-    #[serde(default)]
-    priority: Option<EventPriority>,
-    #[serde(default)]
-    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,267 +170,10 @@ struct IdInput {
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct DeleteInput {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    all: bool,
-    #[serde(default, alias = "title")]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SearchInput {
-    query: String,
-    #[serde(default, alias = "start_time", deserialize_with = "deserialize_opt_millis")]
-    start: Option<i64>,
-    #[serde(default, alias = "end_time", deserialize_with = "deserialize_opt_millis")]
-    end: Option<i64>,
-}
-
-impl Tool for ListEventsTool {
-    fn name(&self) -> &str {
-        "calendar.list_events"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: ListEventsInput = parse_tool_json(input, "calendar.list_events")?;
-        let events = block_on(self.service.list_events(
-            DateRange {
-                start: parsed.start,
-                end: parsed.end,
-            },
-            EventFilters {
-                query: parsed.query,
-                categories: parsed.categories,
-            },
-        ))?;
-        json_result(&events)
-    }
-}
-
-impl Tool for GetEventTool {
-    fn name(&self) -> &str {
-        "calendar.get_event"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: GetEventInput = parse_tool_json(input, "calendar.get_event")?;
-        let event = block_on(self.service.get_event(&parsed.id))?;
-        json_result(&event)
-    }
-}
-
-impl Tool for CreateEventTool {
-    fn name(&self) -> &str {
-        "calendar.create_event"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        // Support batch: {"events":[...]} from multi-activity schedule parses.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
-            if let Some(arr) = value.get("events").and_then(|e| e.as_array()) {
-                let mut outcomes = Vec::new();
-                let mut batch_ids: Vec<String> = Vec::new();
-                for item in arr {
-                    let parsed: CreateInput = serde_json::from_value(item.clone())
-                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-                    let mut outcome =
-                        block_on(self.service.create_event_checked(CreateEventInput {
-                            title: parsed.title.clone(),
-                            description: parsed.description.clone(),
-                            location: parsed.location.clone(),
-                            category: parsed.category.clone(),
-                            color: parsed.color.clone(),
-                            start_time: parsed.start_time,
-                            end_time: parsed.end_time,
-                            all_day: parsed.all_day,
-                            timezone: parsed.timezone.clone(),
-                            recurrence: parsed.recurrence.clone(),
-                            reminders: parsed.reminders.clone(),
-                            flexibility: parsed.flexibility,
-                            priority: parsed.priority,
-                            force: parsed.force,
-                        }))?;
-                    if let WriteEventOutcome::Conflict { report } = &outcome {
-                        // "Followed by" chains sit back-to-back; the default buffer
-                        // after the prior sibling must not block the next event.
-                        if conflict_only_with_batch(report, &batch_ids) {
-                            outcome =
-                                block_on(self.service.create_event_checked(CreateEventInput {
-                                    title: parsed.title,
-                                    description: parsed.description,
-                                    location: parsed.location,
-                                    category: parsed.category,
-                                    color: parsed.color,
-                                    start_time: parsed.start_time,
-                                    end_time: parsed.end_time,
-                                    all_day: parsed.all_day,
-                                    timezone: parsed.timezone,
-                                    recurrence: parsed.recurrence,
-                                    reminders: parsed.reminders,
-                                    flexibility: parsed.flexibility,
-                                    priority: parsed.priority,
-                                    force: true,
-                                }))?;
-                        }
-                    }
-                    if let WriteEventOutcome::Ok { event } = &outcome {
-                        batch_ids.push(event.id.clone());
-                    }
-                    outcomes.push(outcome);
-                }
-                return json_result(&outcomes);
-            }
-        }
-
-        let parsed: CreateInput = parse_tool_json(input, "calendar.create_event")?;
-        let outcome = block_on(self.service.create_event_checked(CreateEventInput {
-            title: parsed.title,
-            description: parsed.description,
-            location: parsed.location,
-            category: parsed.category,
-            color: parsed.color,
-            start_time: parsed.start_time,
-            end_time: parsed.end_time,
-            all_day: parsed.all_day,
-            timezone: parsed.timezone,
-            recurrence: parsed.recurrence,
-            reminders: parsed.reminders,
-            flexibility: parsed.flexibility,
-            priority: parsed.priority,
-            force: parsed.force,
-        }))?;
-        json_result(&outcome)
-    }
-}
-
-impl Tool for UpdateEventTool {
-    fn name(&self) -> &str {
-        "calendar.update_event"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: UpdateInput = parse_tool_json(input, "calendar.update_event")?;
-        let outcome = block_on(self.service.update_event_checked(
-            &parsed.id,
-            UpdateEventInput {
-                title: parsed.title,
-                description: parsed.description,
-                location: parsed.location,
-                category: parsed.category,
-                color: parsed.color,
-                start_time: parsed.start_time,
-                end_time: parsed.end_time,
-                all_day: parsed.all_day,
-                timezone: parsed.timezone,
-                recurrence: parsed.recurrence,
-                clear_recurrence: parsed.clear_recurrence,
-                reminders: parsed.reminders,
-                flexibility: parsed.flexibility,
-                priority: parsed.priority,
-                force: parsed.force,
-            },
-        ))?;
-        json_result(&outcome)
-    }
-}
-
-impl Tool for DeleteEventTool {
-    fn name(&self) -> &str {
-        "calendar.delete_event"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: DeleteInput = parse_tool_json(input, "calendar.delete_event")?;
-        if parsed.all {
-            let count = block_on(self.service.delete_all_events())?;
-            return Ok(ToolResult {
-                output: json!({"deleted": true, "all": true, "count": count}).to_string(),
-            });
-        }
-        if let Some(id) = parsed.id.filter(|s| !s.trim().is_empty()) {
-            block_on(self.service.delete_event(&id))?;
-            return Ok(ToolResult {
-                output: json!({"deleted": true, "id": id}).to_string(),
-            });
-        }
-        if let Some(query) = parsed.query.filter(|s| !s.trim().is_empty()) {
-            let deleted_ids = block_on(self.service.delete_events_matching(&query))?;
-            if deleted_ids.is_empty() {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "no events matched query '{query}'"
-                )));
-            }
-            return Ok(ToolResult {
-                output: json!({
-                    "deleted": true,
-                    "query": query,
-                    "ids": deleted_ids,
-                    "count": deleted_ids.len()
-                })
-                .to_string(),
-            });
-        }
-        Err(ToolError::ExecutionFailed(
-            "calendar.delete_event needs id, query/title, or all=true".into(),
-        ))
-    }
-}
-
-impl Tool for DuplicateEventTool {
-    fn name(&self) -> &str {
-        "calendar.duplicate_event"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: IdInput = parse_tool_json(input, "calendar.duplicate_event")?;
-        let event = block_on(self.service.duplicate_event(&parsed.id))?;
-        json_result(&event)
-    }
-}
-
-impl Tool for SearchEventsTool {
-    fn name(&self) -> &str {
-        "calendar.search_events"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: SearchInput = parse_tool_json(input, "calendar.search_events")?;
-        let range = match (parsed.start, parsed.end) {
-            (Some(start), Some(end)) => Some(DateRange { start, end }),
-            _ => None,
-        };
-        let events = block_on(self.service.search_events(&parsed.query, range))?;
-        json_result(&events)
-    }
-}
-
-impl Tool for GetTodayTool {
-    fn name(&self) -> &str {
-        "calendar.get_today"
-    }
-    fn execute(&self, _input: &str) -> Result<ToolResult, ToolError> {
-        let events = block_on(self.service.get_today())?;
-        json_result(&events)
-    }
-}
-
-impl Tool for GetTomorrowTool {
-    fn name(&self) -> &str {
-        "calendar.get_tomorrow"
-    }
-    fn execute(&self, _input: &str) -> Result<ToolResult, ToolError> {
-        let events = block_on(self.service.get_tomorrow())?;
-        json_result(&events)
-    }
-}
-
-impl Tool for GetThisWeekTool {
-    fn name(&self) -> &str {
-        "calendar.get_this_week"
-    }
-    fn execute(&self, _input: &str) -> Result<ToolResult, ToolError> {
-        let events = block_on(self.service.get_this_week())?;
-        json_result(&events)
-    }
-}
-
 struct ListBlocksTool {
+    service: Arc<CalendarService>,
+}
+struct SetScheduleTool {
     service: Arc<CalendarService>,
 }
 struct DreamLogTool {
@@ -719,6 +313,39 @@ impl Tool for ListBlocksTool {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SetScheduleInput {
+    kind: String,
+    #[serde(default)]
+    segments: Option<Vec<ScheduleSegment>>,
+    #[serde(default)]
+    start_hm: Option<String>,
+    #[serde(default)]
+    end_hm: Option<String>,
+}
+
+impl Tool for SetScheduleTool {
+    fn name(&self) -> &str {
+        "lifestyle.set_schedule"
+    }
+    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let parsed: SetScheduleInput = parse_tool_json(input, "lifestyle.set_schedule")?;
+        let kind = ScheduleKind::parse(&parsed.kind).ok_or_else(|| {
+            ToolError::ExecutionFailed(format!("kind must be work or sleep, got {}", parsed.kind))
+        })?;
+        let rule = if let Some(segments) = parsed.segments.filter(|s| !s.is_empty()) {
+            block_on(self.service.set_schedule_rule(kind, segments))?
+        } else if let (Some(start), Some(end)) = (parsed.start_hm, parsed.end_hm) {
+            block_on(self.service.set_schedule_times(kind, &start, &end))?
+        } else {
+            return Err(ToolError::ExecutionFailed(
+                "provide segments or start_hm+end_hm".into(),
+            ));
+        };
+        json_result(&rule)
+    }
+}
+
 impl Tool for DreamLogTool {
     fn name(&self) -> &str {
         "dream.log"
@@ -841,319 +468,230 @@ impl Tool for WorkGetStatsTool {
     }
 }
 
-// --- AI scheduling tools ---
-
-struct FindFreeTimeTool {
+struct LookTool {
     service: Arc<CalendarService>,
 }
-struct BlockTimeTool {
+struct PinTool {
     service: Arc<CalendarService>,
 }
-struct ScheduleTaskTool {
-    service: Arc<CalendarService>,
-}
-struct PlanDayTool {
-    service: Arc<CalendarService>,
-}
-struct DetectConflictsTool {
-    service: Arc<CalendarService>,
-}
-struct ResolveConflictTool {
-    service: Arc<CalendarService>,
-}
-struct GetCapacityTool {
-    service: Arc<CalendarService>,
-}
-struct DaySummaryTool {
+struct OrganizeTool {
     service: Arc<CalendarService>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FindFreeTimeInput {
-    duration_minutes: u32,
-    #[serde(alias = "start_time", deserialize_with = "deserialize_millis")]
-    start: i64,
-    #[serde(alias = "end_time", deserialize_with = "deserialize_millis")]
-    end: i64,
+struct LookInput {
     #[serde(default)]
-    limit: Option<usize>,
+    when: Option<String>,
     #[serde(default)]
-    allow_reduce_buffer: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlockTimeInput {
-    title: String,
-    duration_minutes: u32,
-    #[serde(default, alias = "start_time", deserialize_with = "deserialize_opt_millis")]
-    start: Option<i64>,
-    #[serde(default, alias = "end_time", deserialize_with = "deserialize_opt_millis")]
-    end: Option<i64>,
+    focus: Option<String>,
     #[serde(default)]
-    apply: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleTaskInput {
-    #[serde(default)]
-    title: Option<String>,
+    query: Option<String>,
     #[serde(default)]
     duration_minutes: Option<u32>,
+}
+
+fn opt_instant<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match v {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(other) => Some(other.to_string()),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct PinInput {
     #[serde(default)]
-    deadline: Option<i64>,
+    action: Option<String>,
     #[serde(default)]
-    priority: Option<EventPriority>,
+    id: Option<String>,
     #[serde(default)]
-    flexibility: Option<Flexibility>,
-    #[serde(default)]
-    category: Option<String>,
+    title: Option<String>,
+    #[serde(default, deserialize_with = "opt_instant")]
+    start: Option<String>,
+    #[serde(default, deserialize_with = "opt_instant")]
+    end: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    count: Option<u32>,
-    #[serde(default)]
-    prefer_spread: Option<bool>,
-    #[serde(default)]
-    spark_id: Option<String>,
-    #[serde(default)]
-    tasks: Option<Vec<ScheduleItem>>,
-    #[serde(default, alias = "start_time", deserialize_with = "deserialize_opt_millis")]
-    start: Option<i64>,
-    #[serde(default, alias = "end_time", deserialize_with = "deserialize_opt_millis")]
-    end: Option<i64>,
-    #[serde(default)]
-    apply: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PlanDayInput {
-    #[serde(default, deserialize_with = "deserialize_opt_millis")]
-    day: Option<i64>,
-    #[serde(default)]
-    tasks: Vec<ScheduleItem>,
-    #[serde(default)]
-    include_breaks: Option<bool>,
-    #[serde(default)]
-    apply: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DetectConflictsInput {
-    #[serde(alias = "start_time", deserialize_with = "deserialize_millis")]
-    start: i64,
-    #[serde(alias = "end_time", deserialize_with = "deserialize_millis")]
-    end: i64,
-    #[serde(default)]
-    exclude_event_id: Option<String>,
-    #[serde(default)]
-    allow_reduce_buffer: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResolveConflictInput {
-    title: String,
-    #[serde(alias = "start_time", deserialize_with = "deserialize_millis")]
-    start: i64,
-    #[serde(alias = "end_time", deserialize_with = "deserialize_millis")]
-    end: i64,
-    #[serde(default)]
-    flexibility: Option<Flexibility>,
-    #[serde(default)]
-    priority: Option<EventPriority>,
+    location: Option<String>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
-    description: Option<String>,
+    force: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct DayMsInput {
-    #[serde(default, deserialize_with = "deserialize_opt_millis")]
-    day: Option<i64>,
-    #[serde(default, alias = "date", deserialize_with = "deserialize_opt_millis")]
-    start: Option<i64>,
+#[derive(Debug, Deserialize, Default)]
+struct OrganizeInput {
+    #[serde(default)]
+    window: Option<String>,
+    #[serde(default)]
+    items: Vec<OrganizeItemIn>,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    previous_items: Option<Vec<OrganizeItemIn>>,
+    #[serde(default)]
+    lift_event_ids: Option<Vec<String>>,
 }
 
-impl Tool for FindFreeTimeTool {
+impl Tool for LookTool {
     fn name(&self) -> &str {
-        "calendar.find_free_time"
+        "calendar.look"
     }
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: FindFreeTimeInput = parse_tool_json(input, "calendar.find_free_time")?;
-        let slots = block_on(self.service.find_free_time(
-            parsed.duration_minutes,
-            DateRange {
-                start: parsed.start,
-                end: parsed.end,
-            },
-            parsed.limit,
-            parsed.allow_reduce_buffer,
-        ))?;
-        json_result(&slots)
-    }
-}
-
-impl Tool for BlockTimeTool {
-    fn name(&self) -> &str {
-        "calendar.block_time"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: BlockTimeInput = parse_tool_json(input, "calendar.block_time")?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let range = DateRange {
-            start: parsed.start.unwrap_or(now),
-            end: parsed.end.unwrap_or(now + 7 * 86_400_000),
+        let parsed: LookInput = if input.trim().is_empty() {
+            LookInput {
+                when: None,
+                focus: None,
+                query: None,
+                duration_minutes: None,
+            }
+        } else {
+            parse_tool_json(input, "calendar.look")?
         };
-        let apply = parsed.apply.unwrap_or(true);
-        let result = block_on(self.service.block_time(
-            parsed.title,
+        let snap = block_on(self.service.look(
+            parsed.when,
+            parsed.focus,
+            parsed.query,
             parsed.duration_minutes,
-            range,
-            apply,
         ))?;
-        json_result(&result)
+        json_result(&snap)
     }
 }
 
-impl Tool for ScheduleTaskTool {
+impl Tool for PinTool {
     fn name(&self) -> &str {
-        "calendar.schedule_task"
+        "calendar.pin"
     }
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: ScheduleTaskInput = parse_tool_json(input, "calendar.schedule_task")?;
-        let mut items = parsed.tasks.unwrap_or_default();
-        if let (Some(title), Some(duration)) = (parsed.title, parsed.duration_minutes) {
-            items.push(ScheduleItem {
-                title,
-                duration_minutes: duration,
-                deadline: parsed.deadline,
-                priority: parsed.priority,
-                flexibility: parsed.flexibility,
-                category: parsed.category,
-                description: parsed.description,
-                count: parsed.count,
-                prefer_spread: parsed.prefer_spread,
-                spark_id: parsed.spark_id,
-            });
+        let parsed: PinInput = parse_tool_json(input, "calendar.pin")?;
+        let action = parsed
+            .action
+            .unwrap_or_else(|| "create".into())
+            .to_ascii_lowercase();
+        match action.as_str() {
+            "delete" => {
+                if let Some(id) = parsed.id {
+                    block_on(self.service.delete_event(&id))?;
+                    return json_result(&json!({ "deleted": id }));
+                }
+                if let Some(title) = parsed.title {
+                    let ids = block_on(self.service.delete_events_matching(&title))?;
+                    return json_result(&json!({ "deleted": ids }));
+                }
+                Err(ToolError::ExecutionFailed(
+                    "pin delete needs id or title".into(),
+                ))
+            }
+            "update" => {
+                let id = parsed
+                    .id
+                    .ok_or_else(|| ToolError::ExecutionFailed("pin update needs id".into()))?;
+                let start = parsed.start.as_deref().and_then(parse_local_datetime);
+                let end = parsed.end.as_deref().and_then(parse_local_datetime);
+                let outcome = block_on(self.service.update_event_checked(
+                    &id,
+                    UpdateEventInput {
+                        title: parsed.title,
+                        description: parsed.description,
+                        location: parsed.location,
+                        category: parsed.category,
+                        color: None,
+                        start_time: start,
+                        end_time: end,
+                        all_day: None,
+                        timezone: None,
+                        recurrence: None,
+                        clear_recurrence: false,
+                        reminders: None,
+                        flexibility: Some(Flexibility::Fixed),
+                        priority: None,
+                        force: parsed.force,
+                    },
+                ))?;
+                json_result(&outcome)
+            }
+            _ => {
+                let title = parsed.title.unwrap_or_else(|| "Event".into());
+                let start = parsed
+                    .start
+                    .as_deref()
+                    .and_then(parse_local_datetime)
+                    .ok_or_else(|| {
+                        ToolError::ExecutionFailed("pin create needs start (e.g. tomorrow 14:00)".into())
+                    })?;
+                let end = parsed
+                    .end
+                    .as_deref()
+                    .and_then(parse_local_datetime)
+                    .unwrap_or(start + 60 * 60 * 1000);
+                let outcome = block_on(self.service.create_event_checked(CreateEventInput {
+                    title,
+                    description: parsed.description,
+                    location: parsed.location,
+                    category: parsed.category,
+                    color: None,
+                    start_time: start,
+                    end_time: end,
+                    all_day: false,
+                    timezone: None,
+                    recurrence: None,
+                    reminders: vec![],
+                    flexibility: Some(Flexibility::Fixed),
+                    priority: None,
+                    force: parsed.force,
+                }))?;
+                json_result(&outcome)
+            }
         }
-        if items.is_empty() {
-            return Err(ToolError::ExecutionFailed(
-                "provide title+duration_minutes or tasks[]".into(),
-            ));
-        }
-        // Multi-occurrence / multi-task plans default to propose-only.
-        let total_blocks: u32 = items
-            .iter()
-            .map(|i| i.count.unwrap_or(1).clamp(1, 14))
-            .sum();
-        let apply = parsed.apply.unwrap_or(total_blocks <= 1);
-        let now = chrono::Utc::now().timestamp_millis();
-        let mut range = DateRange {
-            start: parsed.start.unwrap_or(now),
-            end: parsed
-                .end
-                .or(parsed.deadline)
-                .unwrap_or(now + 7 * 86_400_000),
+    }
+}
+
+impl Tool for OrganizeTool {
+    fn name(&self) -> &str {
+        "calendar.organize"
+    }
+    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let parsed: OrganizeInput = if input.trim().is_empty() {
+            OrganizeInput::default()
+        } else {
+            parse_tool_json(input, "calendar.organize")?
         };
-        // Defence: "this week" must not collapse to ~now — ensure room for the longest task.
-        let min_span = items
-            .iter()
-            .map(|i| i.duration_minutes as i64 * 60_000 * i.count.unwrap_or(1).clamp(1, 14) as i64)
-            .max()
-            .unwrap_or(60_000)
-            + 60 * 60_000;
-        if range.end <= range.start + min_span {
-            range.end = now + 7 * 86_400_000;
+        let mut constraints = parsed.constraints;
+        for token in infer_constraint_tokens(
+            &format!(
+                "{} {}",
+                parsed.window.clone().unwrap_or_default(),
+                constraints.join(" ")
+            ),
+        ) {
+            if !constraints.iter().any(|c| c == &token) {
+                constraints.push(token);
+            }
         }
-        if range.end <= range.start {
-            range.end = range.start + 7 * 86_400_000;
-        }
-        let result = block_on(self.service.schedule_task_items(items, range, apply))?;
-        json_result(&result)
-    }
-}
-
-impl Tool for PlanDayTool {
-    fn name(&self) -> &str {
-        "calendar.plan_day"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: PlanDayInput = parse_tool_json(input, "calendar.plan_day")?;
-        let day = parsed
-            .day
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let result = block_on(self.service.plan_my_day(PlanDayRequest {
-            day,
-            tasks: parsed.tasks,
-            include_breaks: parsed.include_breaks.unwrap_or(true),
-            apply: parsed.apply.unwrap_or(false),
-        }))?;
-        json_result(&result)
-    }
-}
-
-impl Tool for DetectConflictsTool {
-    fn name(&self) -> &str {
-        "calendar.detect_conflicts"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: DetectConflictsInput = parse_tool_json(input, "calendar.detect_conflicts")?;
-        let report = block_on(self.service.detect_event_conflicts(
-            parsed.start,
-            parsed.end,
-            parsed.exclude_event_id,
-            parsed.allow_reduce_buffer,
+        let mode = match parsed.mode.as_deref().unwrap_or("propose") {
+            "commit" | "apply" | "save" => OrganizeMode::Commit,
+            _ => OrganizeMode::Propose,
+        };
+        let result = block_on(self.service.organize(
+            parsed.window,
+            parsed.items,
+            constraints,
+            mode,
+            parsed.previous_items,
+            parsed.lift_event_ids,
         ))?;
-        json_result(&report)
-    }
-}
-
-impl Tool for ResolveConflictTool {
-    fn name(&self) -> &str {
-        "calendar.resolve_conflict"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: ResolveConflictInput = parse_tool_json(input, "calendar.resolve_conflict")?;
-        let event = block_on(self.service.resolve_conflict(
-            parsed.title,
-            parsed.start,
-            parsed.end,
-            parsed.flexibility,
-            parsed.priority,
-            parsed.category,
-            parsed.description,
-        ))?;
-        json_result(&event)
-    }
-}
-
-impl Tool for GetCapacityTool {
-    fn name(&self) -> &str {
-        "calendar.get_capacity"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: DayMsInput = parse_tool_json(input, "calendar.get_capacity")?;
-        let day = parsed
-            .day
-            .or(parsed.start)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let cap = block_on(self.service.get_capacity(day))?;
-        json_result(&cap)
-    }
-}
-
-impl Tool for DaySummaryTool {
-    fn name(&self) -> &str {
-        "calendar.day_summary"
-    }
-    fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
-        let parsed: DayMsInput = parse_tool_json(input, "calendar.day_summary")?;
-        let day = parsed
-            .day
-            .or(parsed.start)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let summary = block_on(self.service.day_summary(day))?;
-        json_result(&summary)
+        let tradeoff = result.tradeoff.clone();
+        let value = serde_json::to_value(&result)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        json_result(&attach_tradeoff_ask(value, tradeoff.as_ref()))
     }
 }
 

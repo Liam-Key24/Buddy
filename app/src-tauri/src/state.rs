@@ -13,6 +13,7 @@ use crate::calendar_bridge::DbSettings;
 use crate::coder_tool::{self, CoderRunTool};
 use crate::memory_api::MemoryApi;
 use crate::memory_tools::{self, MemoryHandoverTool, MemoryMaintainTool, StateSlot};
+use crate::run_control::RunControl;
 
 const DEFAULT_BRAIN_URL: &str = "http://127.0.0.1:8002";
 const DEFAULT_MLX_URL: &str = "http://127.0.0.1:8001";
@@ -26,6 +27,7 @@ pub struct AppState {
     pub project_root: PathBuf,
     /// Kept for memory_extraction / checkers that still need the manager handle.
     pub memory_manager: Arc<MemoryManager>,
+    pub runs: RunControl,
 }
 
 impl AppState {
@@ -59,6 +61,7 @@ impl AppState {
             project_root.display().to_string(),
         );
         plugins.install_calendar(calendar.clone());
+        plugins.install_socials(db.clone(), calendar.clone());
         plugins.register_extra(shell_extra_tools(db.clone(), slot.clone()));
 
         let (registry, surface) = plugins.finish();
@@ -72,6 +75,7 @@ impl AppState {
             calendar,
             project_root,
             memory_manager,
+            runs: RunControl::default(),
         });
         let _ = slot.set(state.clone());
         state
@@ -107,25 +111,36 @@ fn shell_extra_tools(db: Arc<Database>, slot: StateSlot) -> Vec<ExtraTool> {
         tool: Arc::new(CoderRunTool::new(db)),
         decl: coder_tool::coder_tool_decl(),
         schema: Some(&coder_tool::CODER_RUN_SCHEMA),
+        spec: Some(&coder_tool::CODER_RUN_SPEC),
     }];
     let decls = memory_tools::memory_tool_decls();
     extras.push(ExtraTool {
         tool: Arc::new(MemoryHandoverTool::new(slot.clone())),
         decl: decls[0],
         schema: Some(&memory_tools::MEMORY_SCHEMAS[0]),
+        spec: Some(&memory_tools::MEMORY_SPECS[0]),
     });
     extras.push(ExtraTool {
         tool: Arc::new(MemoryMaintainTool::new(slot)),
         decl: decls[1],
         schema: Some(&memory_tools::MEMORY_SCHEMAS[1]),
+        spec: Some(&memory_tools::MEMORY_SPECS[1]),
     });
     extras
 }
 
+const DEFAULT_MODEL: &str = "mlx-community/Qwen3-14B-4bit";
+pub const LLAMA_CHAT_MODEL: &str = "mlx-community/Llama-3.2-3B-Instruct-4bit";
+const LEGACY_LLAMA_3B: &str = LLAMA_CHAT_MODEL;
+
 const SHELL_SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("brain_url", DEFAULT_BRAIN_URL),
     ("mlx_url", DEFAULT_MLX_URL),
-    ("auto_start_mlx", "true"),
+    ("model_name", DEFAULT_MODEL),
+    ("model_name_chat", LLAMA_CHAT_MODEL),
+    ("model_name_code", DEFAULT_MODEL),
+    ("llm_profile_router", DEFAULT_MODEL),
+    ("auto_start_mlx", "false"),
     ("codex_model", "gpt-5.5"),
     ("code_agent_backend", "cursor"),
     ("code_model", "auto"),
@@ -142,12 +157,71 @@ fn seed_default_settings(db: &Database) {
             let _ = db.set_setting(key, value);
         }
     }
+    migrate_legacy_llama_model(db);
+    migrate_mlx_chat_only(db);
+    migrate_talk_uses_llama(db);
+    migrate_qwen8_to_14b(db);
     seed_plugin_settings(db);
 }
 
+/// Old default auto-started Qwen at launch and pegged CPU. Chat-only now.
+fn migrate_mlx_chat_only(db: &Database) {
+    if db.get_setting("mlx_chat_only").ok().flatten().as_deref() == Some("true") {
+        return;
+    }
+    let _ = db.set_setting("auto_start_mlx", "false");
+    let _ = db.set_setting("mlx_chat_only", "true");
+}
+
+fn migrate_legacy_llama_model(db: &Database) {
+    for key in ["model_name", "model_name_code", "llm_profile_router"] {
+        if db.get_setting(key).ok().flatten().as_deref() == Some(LEGACY_LLAMA_3B) {
+            let _ = db.set_setting(key, DEFAULT_MODEL);
+        }
+    }
+}
+
+const LEGACY_QWEN_8B: &str = "mlx-community/Qwen3-8B-4bit";
+
+/// Tool loop needs more than 8B; bump default Qwen to 14B-4bit (fits 16 GB).
+fn migrate_qwen8_to_14b(db: &Database) {
+    if db
+        .get_setting("qwen14_tool_model")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
+    {
+        return;
+    }
+    for key in ["model_name", "model_name_code", "llm_profile_router"] {
+        match db.get_setting(key).ok().flatten().as_deref() {
+            None | Some(LEGACY_QWEN_8B) => {
+                let _ = db.set_setting(key, DEFAULT_MODEL);
+            }
+            _ => {}
+        }
+    }
+    let _ = db.set_setting("qwen14_tool_model", "true");
+}
+
+/// Talk stays on Llama 3.2 3B — Qwen 8B is too slow for simple chat.
+fn migrate_talk_uses_llama(db: &Database) {
+    if db
+        .get_setting("talk_uses_llama_3b")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
+    {
+        return;
+    }
+    let _ = db.set_setting("model_name_chat", LLAMA_CHAT_MODEL);
+    let _ = db.set_setting("talk_uses_llama_3b", "true");
+}
+
 fn looks_like_project_root(dir: &std::path::Path) -> bool {
-    dir.join("brain").is_dir()
-        && (dir.join("app").is_dir() || dir.join("Cargo.toml").is_file())
+    dir.join("brain").is_dir() && (dir.join("app").is_dir() || dir.join("Cargo.toml").is_file())
 }
 
 fn walk_up_for_root(start: PathBuf) -> Option<PathBuf> {
@@ -169,6 +243,7 @@ fn candidate_home_roots() -> Vec<PathBuf> {
         return out;
     };
     for rel in [
+        "Desktop/File_Organisation/03_PROJECTS/BUDDY",
         "Desktop/BUDDY",
         "Desktop/Buddy",
         "Documents/BUDDY",

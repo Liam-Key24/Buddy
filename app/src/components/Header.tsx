@@ -3,12 +3,19 @@ import { useAppStore } from "../stores/useAppStore";
 export function Header() {
   const { currentPage } = useAppStore();
 
+  if (currentPage === "spark") return null;
+
   const titles: Record<string, string> = {
     dashboard: "Dashboard",
     chat: "Chat",
-    spark: "Spark",
     code: "Code Agent",
     calendar: "Calendar",
+    documents: "Documents",
+    fitness: "Fitness & Tracking",
+    money: "Money",
+    study: "Study Planner",
+    todo: "To-Do",
+    socials: "Socials",
     settings: "Settings",
   };
 

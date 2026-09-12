@@ -3,6 +3,7 @@ target/
 node_modules/
 dist/
 brain/venv/
+brain/models/
 .env
 *.db
 *.db-journal

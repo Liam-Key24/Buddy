@@ -35,11 +35,7 @@ pub fn merge_session_into_input(tool_input: &str, session: &SessionContext) -> S
     value.to_string()
 }
 
-fn insert_if_absent(
-    obj: &mut serde_json::Map<String, Value>,
-    key: &str,
-    value: &str,
-) {
+fn insert_if_absent(obj: &mut serde_json::Map<String, Value>, key: &str, value: &str) {
     let empty = match obj.get(key) {
         None => true,
         Some(Value::Null) => true,

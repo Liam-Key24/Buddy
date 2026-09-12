@@ -97,6 +97,7 @@ export function TimeGridView({
   days,
   events,
   scheduleBlocks = [],
+  ghostEvents = [],
   selectedEventId,
   selectedBlockId,
   onSelectEvent,
@@ -106,6 +107,7 @@ export function TimeGridView({
   days: Date[];
   events: CalendarEvent[];
   scheduleBlocks?: ScheduleBlock[];
+  ghostEvents?: CalendarEvent[];
   selectedEventId: string | null;
   selectedBlockId?: string | null;
   onSelectEvent: (id: string) => void;
@@ -165,6 +167,9 @@ export function TimeGridView({
           {days.map((day) => {
             const dayEvents = eventsOnDay(events, day).filter((e) => !e.all_day);
             const timedLayout = layoutTimedEvents(dayEvents);
+            const dayGhosts = layoutTimedEvents(
+              eventsOnDay(ghostEvents, day).filter((e) => !e.all_day),
+            );
             const allDay = eventsOnDay(events, day).filter((e) => e.all_day);
             return (
               <div
@@ -249,6 +254,39 @@ export function TimeGridView({
                     >
                       {ev.title}
                     </button>
+                  );
+                })}
+                {dayGhosts.map(({ event: ev, column, columnCount }) => {
+                  const start = new Date(ev.start_time);
+                  const end = new Date(ev.end_time);
+                  const top =
+                    start.getHours() * PX_PER_HOUR +
+                    (start.getMinutes() / 60) * PX_PER_HOUR;
+                  const height = Math.max(
+                    24,
+                    ((end.getTime() - start.getTime()) / 3_600_000) * PX_PER_HOUR,
+                  );
+                  const widthPct = 100 / columnCount;
+                  const leftPct = column * widthPct;
+                  return (
+                    <div
+                      key={ev.id}
+                      className="pointer-events-none absolute overflow-hidden rounded-lg border border-dashed border-sky-400/70 px-1.5 py-1 text-left text-[11px] font-medium text-sky-100"
+                      style={{
+                        top,
+                        height,
+                        left: `calc(${leftPct}% + ${EVENT_EDGE_PX}px)`,
+                        width: `calc(${widthPct}% - ${EVENT_EDGE_PX * 2}px - ${EVENT_GAP_PX}px)`,
+                        backgroundColor: "rgba(56, 189, 248, 0.18)",
+                        zIndex: 4 + column,
+                      }}
+                      title={`Proposed · not saved · ${ev.title}`}
+                    >
+                      <div className="truncate">{ev.title}</div>
+                      <div className="truncate text-[10px] uppercase tracking-wide text-sky-300/90">
+                        Proposed · not saved
+                      </div>
+                    </div>
                   );
                 })}
                 {timedLayout.map(({ event: ev, column, columnCount }) => {

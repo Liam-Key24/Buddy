@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import {
   Copy,
   MapPin,
@@ -13,6 +13,7 @@ import {
   formatDayHeader,
   formatTimeRange,
 } from "@buddy/calendar/utils";
+import { socialsGetByEvent, socialsMarkPublished, type SocialPost } from "../../lib/lifeApi";
 
 export function EventDetailsDrawer({
   event,
@@ -29,6 +30,19 @@ export function EventDetailsDrawer({
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
+  const [socialPost, setSocialPost] = useState<SocialPost | null>(null);
+  const [publishing, setPublishing] = useState(false);
+
+  useEffect(() => {
+    if (!event || event.category !== "social") {
+      setSocialPost(null);
+      return;
+    }
+    socialsGetByEvent(event.id)
+      .then((p) => setSocialPost(p))
+      .catch(() => setSocialPost(null));
+  }, [event?.id, event?.category]);
+
   if (!event) return null;
 
   const category =
@@ -122,6 +136,27 @@ export function EventDetailsDrawer({
             <dd className="text-zinc-300">{event.timezone}</dd>
           </div>
         </dl>
+        {socialPost && socialPost.status !== "published" && (
+          <button
+            type="button"
+            disabled={publishing}
+            onClick={async () => {
+              setPublishing(true);
+              try {
+                const next = await socialsMarkPublished(socialPost.id);
+                setSocialPost(next);
+              } finally {
+                setPublishing(false);
+              }
+            }}
+            className="mt-4 w-full rounded-xl border border-emerald-500/30 py-2 text-xs font-medium text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-50"
+          >
+            {publishing ? "Saving…" : "Mark published"}
+          </button>
+        )}
+        {socialPost?.status === "published" && (
+          <p className="mt-4 text-xs text-emerald-400">Published</p>
+        )}
       </div>
       <div className="flex gap-2 border-t border-zinc-800 p-4">
         <button

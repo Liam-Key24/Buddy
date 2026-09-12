@@ -1,12 +1,24 @@
-import { useEffect, useState } from "react";
-import { Lightning, Plus, X } from "@phosphor-icons/react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import {
+  AirplaneTilt,
+  Archive,
+  ChatCircle,
+  Clock,
+  Cube,
+  House,
+  Lightning,
+  Plus,
+  Trash,
+  Tree,
+  Van,
+} from "@phosphor-icons/react";
 import { useAppStore } from "../stores/useAppStore";
 import { useChatStore } from "../stores/useChatStore";
 import { createConversation } from "../lib/api";
 import {
   SPARK_CATEGORIES,
   type Spark,
-  SparkTagId,
+  type SparkTagId,
   categoryConfig,
   filterSparksByTag,
   formatSparkDate,
@@ -14,89 +26,16 @@ import {
   useSparkStore,
 } from "../stores/useSparkStore";
 
-function ActionBtn({
-  label,
-  onClick,
-  primary,
-  danger,
-}: {
-  label: string;
-  onClick: () => void;
-  primary?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-        danger
-          ? "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25"
-          : primary
-            ? "bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
-            : "bg-zinc-700/60 text-zinc-300 hover:bg-zinc-700"
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function TagChip({ tag }: { tag: string }) {
-  const cfg = categoryConfig(tag);
-  return (
-    <span
-      className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${cfg?.chip ?? "bg-zinc-700/60 text-zinc-400"}`}
-    >
-      {tagLabel(tag)}
-    </span>
-  );
-}
-
-function SparkRow({
-  spark,
-  stale,
-  onRespark,
-  onArchive,
-  onDelete,
-  onChat,
-}: {
-  spark: Spark;
-  stale: boolean;
-  onRespark: () => void;
-  onArchive: () => void;
-  onDelete: () => void;
-  onChat: () => void;
-}) {
-  return (
-    <div
-      className={`group grid grid-cols-[1fr_7rem_11rem] items-center gap-4 px-4 py-3.5 ${
-        stale ? "border-l-2 border-amber-500/50 bg-amber-500/5" : ""
-      }`}
-    >
-      <div className="min-w-0">
-        <p className="line-clamp-2 text-sm text-zinc-200">{spark.content}</p>
-        {stale && (
-          <span className="mt-0.5 text-[10px] text-amber-400">Needs attention</span>
-        )}
-      </div>
-      <p className="text-xs text-zinc-500">{formatSparkDate(spark.created_at)}</p>
-      <div className="flex items-center justify-end gap-2">
-        <div className="flex flex-wrap justify-end gap-1 group-hover:hidden">
-          {spark.tags.map((t) => (
-            <TagChip key={t} tag={t} />
-          ))}
-        </div>
-        <div className="hidden shrink-0 flex-wrap justify-end gap-1 group-hover:flex">
-          <ActionBtn label="Re-spark" onClick={onRespark} />
-          <ActionBtn label="Archive" onClick={onArchive} />
-          <ActionBtn label="Chat" primary onClick={onChat} />
-          <ActionBtn label="Delete" danger onClick={onDelete} />
-        </div>
-      </div>
-    </div>
-  );
-}
+const CAT_ICONS: Record<
+  SparkTagId,
+  ComponentType<{ size?: number; weight?: "fill" | "regular"; className?: string }>
+> = {
+  projects: Cube,
+  the_land: Tree,
+  the_van: Van,
+  general_life: House,
+  travelling: AirplaneTilt,
+};
 
 export function Spark() {
   const {
@@ -114,7 +53,7 @@ export function Spark() {
   const { setActiveConversationId, setMessages } = useChatStore();
 
   const [tagFilter, setTagFilter] = useState<SparkTagId | null>(null);
-  const [showAdd, setShowAdd] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [newContent, setNewContent] = useState("");
   const [newTags, setNewTags] = useState<SparkTagId[]>(["general_life"]);
 
@@ -137,7 +76,7 @@ export function Spark() {
     await addSpark(trimmed, newTags);
     setNewContent("");
     setNewTags(["general_life"]);
-    setShowAdd(false);
+    setAdding(false);
   }
 
   async function openInChat(content: string) {
@@ -149,128 +88,228 @@ export function Spark() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto max-w-5xl space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Lightning size={18} weight="duotone" className="text-amber-400" />
-            <p className="text-sm text-zinc-400">
-              Sparks ({sparks.length})
-              {staleCount > 0 && (
-                <span className="ml-2 text-amber-400">
-                  · {staleCount} need attention
-                </span>
-              )}
-            </p>
+        <div className="flex items-center gap-2">
+          <Lightning size={18} weight="fill" className="text-amber-400" />
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-medium text-zinc-200">Sparks</h3>
+            {staleCount > 0 && (
+              <p className="text-xs text-amber-400">{staleCount} need attention</p>
+            )}
           </div>
           <button
             type="button"
-            onClick={() => setShowAdd(!showAdd)}
-            className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-zinc-700"
+            title="Add spark"
+            aria-label="Add spark"
+            onClick={() => setAdding((v) => !v)}
+            className="rounded-md p-1 text-blue-400 hover:bg-zinc-800"
           >
-            {showAdd ? <X size={14} /> : <Plus size={14} weight="bold" />}
-            {showAdd ? "Cancel" : "Add spark"}
+            <Plus size={16} weight="bold" />
           </button>
         </div>
 
-        {showAdd && (
-          <div className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+        <div className="flex items-center gap-0.5" role="group" aria-label="Filter">
+          <button
+            type="button"
+            title="All"
+            aria-label="All"
+            aria-pressed={tagFilter === null}
+            onClick={() => setTagFilter(null)}
+            className={`rounded-md p-1.5 ${
+              tagFilter === null ? "text-blue-400" : "text-zinc-600 hover:text-zinc-300"
+            }`}
+          >
+            <Lightning size={16} weight={tagFilter === null ? "fill" : "regular"} />
+          </button>
+          {SPARK_CATEGORIES.map((cat) => {
+            const Icon = CAT_ICONS[cat.id];
+            const selected = tagFilter === cat.id;
+            return (
+              <button
+                key={cat.id}
+                type="button"
+                title={cat.label}
+                aria-label={cat.label}
+                aria-pressed={selected}
+                onClick={() => setTagFilter(selected ? null : cat.id)}
+                className={`rounded-md p-1.5 ${
+                  selected ? cat.iconColor : "text-zinc-600 hover:text-zinc-300"
+                }`}
+              >
+                <Icon size={16} weight={selected ? "fill" : "regular"} />
+              </button>
+            );
+          })}
+        </div>
+
+        {adding && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
             <textarea
               value={newContent}
               onChange={(e) => setNewContent(e.target.value)}
               placeholder="What's the idea?"
               rows={2}
-              className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-800/50 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-600"
+              className="w-full resize-none bg-transparent text-sm text-zinc-100 outline-none"
             />
-            <div className="flex flex-wrap gap-1.5">
-              {SPARK_CATEGORIES.map((cat) => (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => toggleTag(cat.id)}
-                  className={`rounded-full px-2.5 py-1 text-xs transition ${
-                    newTags.includes(cat.id)
-                      ? cat.chip
-                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-                  }`}
-                >
-                  {cat.label}
-                </button>
-              ))}
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-0.5">
+                {SPARK_CATEGORIES.map((cat) => {
+                  const Icon = CAT_ICONS[cat.id];
+                  const selected = newTags.includes(cat.id);
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      title={cat.label}
+                      aria-label={cat.label}
+                      aria-pressed={selected}
+                      onClick={() => toggleTag(cat.id)}
+                      className={`rounded-md p-1 ${
+                        selected ? cat.iconColor : "text-zinc-600 hover:text-zinc-300"
+                      }`}
+                    >
+                      <Icon size={15} weight={selected ? "fill" : "regular"} />
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleAdd()}
+                disabled={!newContent.trim() || newTags.length === 0}
+                className="rounded-lg bg-blue-500 px-2.5 py-1 text-xs text-white disabled:opacity-40"
+              >
+                Save
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={handleAdd}
-              disabled={!newContent.trim() || newTags.length === 0}
-              className="rounded-lg bg-blue-500 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-600 disabled:opacity-40"
-            >
-              Save
-            </button>
           </div>
         )}
 
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => setTagFilter(null)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-              tagFilter === null
-                ? "bg-blue-500/20 text-blue-400"
-                : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-            }`}
-          >
-            All
-          </button>
-          {SPARK_CATEGORIES.map((cat) => (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => setTagFilter(cat.id)}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                tagFilter === cat.id
-                  ? "bg-blue-500/20 text-blue-400"
-                  : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-              }`}
-            >
-              {cat.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
-          <div className="grid grid-cols-[1fr_7rem_11rem] gap-4 border-b border-zinc-800 px-4 py-2.5">
-            <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-              Idea
-            </p>
-            <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-              Date created
-            </p>
-            <p className="text-right text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-              Tags
-            </p>
+        {loading ? (
+          <p className="px-1 text-xs text-zinc-600">Loading…</p>
+        ) : filtered.length === 0 ? (
+          <p className="px-1 text-xs text-zinc-600">No sparks yet</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {filtered.map((spark) => (
+              <SparkCard
+                key={spark.id}
+                spark={spark}
+                stale={staleIds.has(spark.id)}
+                onRespark={() => respark(spark.id)}
+                onArchive={() => archiveSpark(spark.id)}
+                onDelete={() => deleteSpark(spark.id)}
+                onChat={() => openInChat(spark.content)}
+              />
+            ))}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-          {loading ? (
-            <p className="py-12 text-center text-sm text-zinc-500">Loading…</p>
-          ) : filtered.length === 0 ? (
-            <p className="py-12 text-center text-sm text-zinc-500">No sparks yet</p>
-          ) : (
-            <div className="divide-y divide-zinc-800">
-              {filtered.map((spark) => (
-                <SparkRow
-                  key={spark.id}
-                  spark={spark}
-                  stale={staleIds.has(spark.id)}
-                  onRespark={() => respark(spark.id)}
-                  onArchive={() => archiveSpark(spark.id)}
-                  onDelete={() => deleteSpark(spark.id)}
-                  onChat={() => openInChat(spark.content)}
-                />
-              ))}
-            </div>
+function SparkCard({
+  spark,
+  stale,
+  onRespark,
+  onArchive,
+  onDelete,
+  onChat,
+}: {
+  spark: Spark;
+  stale: boolean;
+  onRespark: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+  onChat: () => void;
+}) {
+  const primary = (spark.tags[0] as SparkTagId | undefined) ?? "general_life";
+  const cfg = categoryConfig(primary);
+  const Icon = CAT_ICONS[primary] ?? House;
+
+  return (
+    <div
+      className={`flex items-start gap-2.5 rounded-xl border bg-zinc-950/40 px-3 py-2.5 ${
+        stale ? "border-amber-500/40" : "border-zinc-800"
+      }`}
+    >
+      <span
+        title={tagLabel(primary)}
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+          cfg ? `${cfg.chip}` : "bg-zinc-800 text-zinc-400"
+        }`}
+      >
+        <Icon size={16} weight="fill" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm text-zinc-100">{spark.content}</p>
+        <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-500">
+          <span className="flex items-center gap-1">
+            <Clock size={12} />
+            {formatSparkDate(spark.created_at)}
+          </span>
+          {stale && <span className="text-amber-400">Needs attention</span>}
+          {spark.tags.length > 1 && (
+            <span className="flex items-center gap-0.5">
+              {spark.tags.slice(1).map((t) => {
+                const Extra = CAT_ICONS[t as SparkTagId] ?? House;
+                return (
+                  <Extra
+                    key={t}
+                    size={11}
+                    weight="fill"
+                    className={categoryConfig(t)?.iconColor ?? "text-zinc-500"}
+                  />
+                );
+              })}
+            </span>
           )}
         </div>
       </div>
+      <div className="flex shrink-0 items-center gap-0.5">
+        <IconBtn title="Re-spark" onClick={onRespark}>
+          <Lightning size={14} />
+        </IconBtn>
+        <IconBtn title="Chat" onClick={onChat}>
+          <ChatCircle size={14} />
+        </IconBtn>
+        <IconBtn title="Archive" onClick={onArchive}>
+          <Archive size={14} />
+        </IconBtn>
+        <IconBtn title="Delete" danger onClick={onDelete}>
+          <Trash size={14} />
+        </IconBtn>
+      </div>
     </div>
+  );
+}
+
+function IconBtn({
+  title,
+  onClick,
+  danger,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  danger?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      className={`rounded-md p-1 ${
+        danger
+          ? "text-zinc-600 hover:bg-zinc-800 hover:text-rose-400"
+          : "text-zinc-600 hover:bg-zinc-800 hover:text-zinc-200"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

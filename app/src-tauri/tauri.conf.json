@@ -15,8 +15,8 @@
         "title": "",
         "width": 1200,
         "height": 800,
-        "minWidth": 800,
-        "minHeight": 600
+        "minWidth": 1080,
+        "minHeight": 640
       }
     ],
     "security": {
@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

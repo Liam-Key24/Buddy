@@ -21,13 +21,15 @@ class MemoryContextPayload(BaseModel):
     active_sparks: str | None = None
 
 
-def format_history(history: list) -> list[dict]:
+def format_history(history: list, limit: int = 16) -> list[dict]:
     formatted = []
     for msg in history:
         role = msg.role if hasattr(msg, "role") else msg["role"]
         content = msg.content if hasattr(msg, "content") else msg["content"]
         if role in ("user", "assistant"):
             formatted.append({"role": role, "content": content})
+    if limit > 0 and len(formatted) > limit:
+        return formatted[-limit:]
     return formatted
 
 
@@ -59,7 +61,7 @@ def build_memory_block(memory: MemoryContextPayload | None) -> str:
         sections.append(
             f"## Active Sparks (available to schedule)\n{memory.active_sparks}\n"
             "When the user wants to work on sparks, pick from these by id/title for "
-            "calendar.plan_day / calendar.schedule_task (set spark_id). "
+            "calendar.organize items (set spark_id when known). "
             "If they say \"two sparks\" and more than two are listed, ask which ones."
         )
     if memory.stale_sparks:
@@ -76,11 +78,15 @@ def build_messages(
     memory: MemoryContextPayload | None,
     history: list,
     message: str,
+    *,
+    include_memory: bool = True,
+    history_limit: int = 16,
 ) -> list[dict]:
-    messages = format_history(history)
-    memory_block = build_memory_block(memory)
+    messages = format_history(history, limit=history_limit)
     user_content = message
-    if memory_block:
-        user_content = f"{memory_block}\n\n---\n\nUser message: {message}"
+    if include_memory:
+        memory_block = build_memory_block(memory)
+        if memory_block:
+            user_content = f"{memory_block}\n\n---\n\nUser message: {message}"
     messages.append({"role": "user", "content": user_content})
     return messages

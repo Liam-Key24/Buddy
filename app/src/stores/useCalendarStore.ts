@@ -10,11 +10,14 @@ import { mergeEvents } from "@buddy/calendar/services";
 import { colorForEvent } from "@buddy/calendar/utils";
 import { visibleRangeForView } from "@buddy/calendar/utils";
 import {
+  calendarCommitProposal,
   calendarCreateEvent,
   calendarDeleteEvent,
+  calendarDismissProposal,
   calendarDuplicateEvent,
   calendarListEvents,
   calendarUpdateEvent,
+  type CalendarProposalBlock,
 } from "../lib/api";
 
 export { colorForEvent };
@@ -32,6 +35,15 @@ interface CalendarState {
   searchQuery: string;
   enabledCategories: string[];
   deleteConfirmId: string | null;
+  proposalBlocks: CalendarProposalBlock[];
+  proposalConversationId: string | null;
+  setProposal: (
+    blocks: CalendarProposalBlock[],
+    conversationId?: string | null,
+  ) => void;
+  clearProposal: () => void;
+  acceptProposal: () => Promise<void>;
+  dismissProposal: () => Promise<void>;
   setView: (view: CalendarView) => void;
   setCursorDate: (date: Date) => void;
   selectEvent: (id: string | null) => void;
@@ -82,14 +94,33 @@ export const useCalendarStore = create<CalendarState>((set, get) => ({
   searchQuery: "",
   enabledCategories: CATEGORIES.map((c) => c.id),
   deleteConfirmId: null,
+  proposalBlocks: [],
+  proposalConversationId: null,
+
+  setProposal: (blocks, conversationId = null) =>
+    set({
+      proposalBlocks: blocks,
+      proposalConversationId: conversationId ?? null,
+    }),
+  clearProposal: () =>
+    set({ proposalBlocks: [], proposalConversationId: null }),
+  acceptProposal: async () => {
+    const { proposalConversationId } = get();
+    await calendarCommitProposal(proposalConversationId);
+    set({ proposalBlocks: [], proposalConversationId: null });
+    await get().loadRange();
+  },
+  dismissProposal: async () => {
+    const { proposalConversationId } = get();
+    await calendarDismissProposal(proposalConversationId);
+    set({ proposalBlocks: [], proposalConversationId: null });
+  },
 
   setView: (view) => {
     set({ view });
-    void get().loadRange();
   },
   setCursorDate: (date) => {
     set({ cursorDate: date });
-    void get().loadRange();
   },
   selectEvent: (id) => set({ selectedEventId: id }),
   setFormOpen: (open, mode = "create", draft = null) =>

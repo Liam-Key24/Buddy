@@ -1,17 +1,25 @@
 import {
+  Barbell,
+  BookOpen,
   Brain,
   CaretDoubleLeft,
   CaretDoubleRight,
   CalendarBlank,
+  CheckSquare,
   ChatsCircle,
   CircleNotch,
   Code,
   Cpu,
+  DotsThree,
+  FileText,
   Gear,
   Lightning,
+  MagnifyingGlass,
   Plus,
+  ShareNetwork,
   SquaresFour,
   Trash,
+  Wallet,
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
@@ -27,16 +35,21 @@ import {
   createCodexConversation,
   deleteConversation,
   loadCodexMessages,
+  loadMessages,
+  restartBrain,
+  restartMlx,
 } from "../lib/api";
 
 function StatusIcon({
   icon,
   status,
   title,
+  onClick,
 }: {
   icon: React.ReactNode;
   status: string;
   title: string;
+  onClick?: () => void;
 }) {
   const online = status === "online";
   const checking = status === "checking";
@@ -45,7 +58,9 @@ function StatusIcon({
     <button
       type="button"
       title={title}
-      className="relative flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300"
+      disabled={checking || !onClick}
+      onClick={onClick}
+      className="relative flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-60"
     >
       {icon}
       <span
@@ -115,17 +130,42 @@ export function Sidebar() {
     activeConversationId: activeCodeConversationId,
   } = useCodeAgentStore();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const isCodePage = currentPage === "code";
-  const visibleConversations = conversations.filter((c) =>
-    isCodePage ? c.kind === "codex" : c.kind !== "codex",
-  );
+  const isLifePage =
+    currentPage === "documents" ||
+    currentPage === "fitness" ||
+    currentPage === "money" ||
+    currentPage === "study" ||
+    currentPage === "todo" ||
+    currentPage === "socials";
+  const isBuddyChatSurface = currentPage === "chat" || isLifePage;
+
+  function ensureBuddyConversation() {
+    const active = useConversationStore
+      .getState()
+      .conversations.find((c) => c.id === activeConversationId);
+    if (active?.kind === "research" || active?.kind === "codex") {
+      const buddy = useConversationStore
+        .getState()
+        .conversations.find((c) => c.kind !== "research" && c.kind !== "codex");
+      setActiveConversationId(buddy?.id ?? null);
+      setMessages([]);
+      if (buddy) loadMessages(buddy.id).catch(console.error);
+    }
+  }
+
+  const visibleConversations = conversations.filter((c) => {
+    if (isCodePage) return c.kind === "codex";
+    return c.kind !== "codex";
+  });
 
   async function handleNewChat() {
     const conv = await createConversation();
     setActiveConversationId(conv.id);
     setMessages([]);
-    setCurrentPage("chat");
+    if (!isLifePage) setCurrentPage("chat");
     setSidebarCollapsed(false);
   }
 
@@ -186,7 +226,7 @@ export function Sidebar() {
           className="h-9 w-9 rounded-xl object-cover"
         />
 
-        <nav className="mt-4 flex flex-col items-center gap-1">
+        <nav className="mt-4 flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">
           <RailButton
             active={currentPage === "dashboard"}
             onClick={() => setCurrentPage("dashboard")}
@@ -202,22 +242,11 @@ export function Sidebar() {
               <CaretDoubleRight size={18} />
             </RailButton>
           )}
-        </nav>
-
-        <div className="mt-auto flex flex-col items-center gap-1 pb-1">
-          <StatusIcon
-            icon={<Cpu size={18} weight="duotone" />}
-            status={mlxStatus}
-            title={`MLX ${mlxStatus}`}
-          />
-          <StatusIcon
-            icon={<Brain size={18} weight="duotone" />}
-            status={brainStatus}
-            title={`Brain ${brainStatus}`}
-          />
+          <div className="my-1 h-px w-6 bg-zinc-800" />
           <RailButton
             active={currentPage === "chat"}
             onClick={() => {
+              ensureBuddyConversation();
               setCurrentPage("chat");
               if (sidebarCollapsed) setSidebarCollapsed(false);
             }}
@@ -229,9 +258,19 @@ export function Sidebar() {
             />
           </RailButton>
           <RailButton
+            active={currentPage === "calendar"}
+            onClick={() => setCurrentPage("calendar")}
+            title="Calendar"
+          >
+            <CalendarBlank
+              size={20}
+              weight={currentPage === "calendar" ? "fill" : "regular"}
+            />
+          </RailButton>
+          <RailButton
             active={currentPage === "spark"}
             onClick={() => setCurrentPage("spark")}
-            title="Spark"
+            title="Sparks"
           >
             <span className="relative">
               <Lightning
@@ -245,29 +284,78 @@ export function Sidebar() {
               )}
             </span>
           </RailButton>
-          <RailButton
-            active={currentPage === "code"}
+          <div className="relative">
+            <RailButton
+              active={moreOpen || isLifePage || isCodePage}
+              onClick={() => setMoreOpen((open) => !open)}
+              title="More"
+            >
+              <DotsThree size={22} weight={moreOpen || isLifePage || isCodePage ? "bold" : "regular"} />
+            </RailButton>
+            {moreOpen && (
+              <div className="absolute left-12 top-0 z-20 w-44 rounded-xl border border-zinc-800 bg-zinc-900 p-1 shadow-xl">
+                {[
+                  { page: "documents" as const, label: "Documents", icon: FileText },
+                  { page: "fitness" as const, label: "Fitness", icon: Barbell },
+                  { page: "money" as const, label: "Money", icon: Wallet },
+                  { page: "study" as const, label: "Study", icon: BookOpen },
+                  { page: "todo" as const, label: "To-Do", icon: CheckSquare },
+                  { page: "socials" as const, label: "Socials", icon: ShareNetwork },
+                  { page: "code" as const, label: "Code", icon: Code },
+                ].map((item) => (
+                  <button
+                    key={item.page}
+                    type="button"
+                    onClick={() => {
+                      if (item.page === "code") {
+                        setCurrentPage("code");
+                        if (sidebarCollapsed) setSidebarCollapsed(false);
+                      } else {
+                        ensureBuddyConversation();
+                        setCurrentPage(item.page);
+                      }
+                      setMoreOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm ${
+                      currentPage === item.page
+                        ? "bg-blue-500/10 text-blue-400"
+                        : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                    }`}
+                  >
+                    <item.icon size={14} />
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </nav>
+
+        <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pb-1 pt-1">
+          <StatusIcon
+            icon={<Cpu size={18} weight="duotone" />}
+            status={mlxStatus}
+            title={
+              mlxStatus === "checking"
+                ? "Model restarting…"
+                : `Model ${mlxStatus} — click to restart`
+            }
             onClick={() => {
-              setCurrentPage("code");
-              if (sidebarCollapsed) setSidebarCollapsed(false);
+              restartMlx().catch(console.error);
             }}
-            title="Code Agent"
-          >
-            <Code
-              size={20}
-              weight={currentPage === "code" ? "fill" : "regular"}
-            />
-          </RailButton>
-          <RailButton
-            active={currentPage === "calendar"}
-            onClick={() => setCurrentPage("calendar")}
-            title="Calendar"
-          >
-            <CalendarBlank
-              size={20}
-              weight={currentPage === "calendar" ? "fill" : "regular"}
-            />
-          </RailButton>
+          />
+          <StatusIcon
+            icon={<Brain size={18} weight="duotone" />}
+            status={brainStatus}
+            title={
+              brainStatus === "checking"
+                ? "Brain restarting…"
+                : `Brain ${brainStatus} — click to restart`
+            }
+            onClick={() => {
+              restartBrain().catch(console.error);
+            }}
+          />
           <RailButton
             active={currentPage === "settings"}
             onClick={() => setCurrentPage("settings")}
@@ -321,7 +409,7 @@ export function Sidebar() {
             {visibleConversations.map((conv) => {
               const isActive = isCodePage
                 ? activeCodeConversationId === conv.id
-                : activeConversationId === conv.id && currentPage === "chat";
+                : activeConversationId === conv.id && isBuddyChatSurface;
               const deleteBlocked =
                 !isCodePage && isStreaming && activeConversationId === conv.id;
               const showDelete =
@@ -350,12 +438,15 @@ export function Sidebar() {
                         );
                       } else {
                         setActiveConversationId(conv.id);
-                        setCurrentPage("chat");
+                        if (conv.kind === "research" || !isLifePage) setCurrentPage("chat");
                       }
                     }}
-                    className="min-w-0 flex-1 truncate px-2.5 py-2 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2.5 py-2 text-left"
                   >
-                    {conv.title}
+                    {conv.kind === "research" && (
+                      <MagnifyingGlass size={12} className="shrink-0 text-zinc-500" />
+                    )}
+                    <span className="truncate">{conv.title}</span>
                   </button>
                   <button
                     type="button"

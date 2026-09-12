@@ -112,6 +112,7 @@ export interface CategoryDef {
 export const CATEGORIES: CategoryDef[] = [
   { id: "work", label: "Work", color: "#3B82F6" },
   { id: "personal", label: "Personal", color: "#8B5CF6" },
+  { id: "social", label: "Socials", color: "#EC4899" },
   { id: "birthdays", label: "Birthdays", color: "#10B981" },
   { id: "holidays", label: "Holidays", color: "#F59E0B" },
   { id: "general", label: "General", color: "#64748B" },

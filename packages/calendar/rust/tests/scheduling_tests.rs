@@ -3,14 +3,15 @@ use std::sync::Arc;
 use buddy_calendar::{
     scheduling::{
         block_focus_time, build_occupancy, compute_day_capacity, compose_day_summary,
-        detect_conflicts, find_free_slots, plan_day, reschedule_flexible, schedule_items,
-        BusySource, PlanDayRequest, ScheduleItem, SchedulingContext, SchedulingPolicy,
+        detect_conflicts, find_free_slots, plan_day, punch_work_for_off_days, reschedule_flexible,
+        schedule_items, BusySource, PlanDayRequest, ScheduleItem, SchedulingContext,
+        SchedulingPolicy,
     },
     CreateEventInput, DateRange, Event, EventPriority, Flexibility, ScheduleBlock, ScheduleKind,
     CalendarService, WriteEventOutcome,
 };
 use buddy_database::Database;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{Duration, Local, TimeZone, Utc};
 use tempfile::tempdir;
 
 fn open_db() -> Arc<Database> {
@@ -264,6 +265,7 @@ fn plan_day_creates_non_overlapping_schedule() {
                     description: None,
                     count: None,
                     prefer_spread: None,
+                    prefer_after_work: None,
                     spark_id: None,
                 },
                 ScheduleItem {
@@ -276,6 +278,7 @@ fn plan_day_creates_non_overlapping_schedule() {
                     description: None,
                     count: None,
                     prefer_spread: None,
+                    prefer_after_work: None,
                     spark_id: None,
                 },
             ],
@@ -318,6 +321,7 @@ fn auto_schedule_never_overlaps() {
                 description: None,
                 count: None,
                 prefer_spread: None,
+                prefer_after_work: None,
                 spark_id: None,
             },
             ScheduleItem {
@@ -330,6 +334,7 @@ fn auto_schedule_never_overlaps() {
                 description: None,
                 count: None,
                 prefer_spread: None,
+                prefer_after_work: None,
                 spark_id: None,
             },
         ],
@@ -420,6 +425,7 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 description: None,
                 count: None,
                 prefer_spread: None,
+                prefer_after_work: None,
                 spark_id: None,
             },
             ScheduleItem {
@@ -432,6 +438,7 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 description: None,
                 count: None,
                 prefer_spread: None,
+                prefer_after_work: None,
                 spark_id: None,
             },
             ScheduleItem {
@@ -444,6 +451,7 @@ fn cooking_dinner_prefers_evening_not_morning() {
                 description: None,
                 count: None,
                 prefer_spread: None,
+                prefer_after_work: None,
                 spark_id: None,
             },
         ],
@@ -465,6 +473,68 @@ fn cooking_dinner_prefers_evening_not_morning() {
     assert!(
         (16..=21).contains(&hour),
         "cooking dinner should be evening, got hour {hour} ({dinner:?})"
+    );
+}
+
+#[test]
+fn prefer_after_work_places_after_lifestyle_work_end() {
+    let day = monday_noon();
+    let ctx = ctx_with(vec![], day);
+    let work_end = ctx
+        .lifestyle_blocks
+        .iter()
+        .find(|b| b.kind == ScheduleKind::Work)
+        .map(|b| b.end_time)
+        .expect("work block");
+    let result = schedule_items(
+        &ctx,
+        &[ScheduleItem {
+            title: "Climbing".into(),
+            duration_minutes: 120,
+            prefer_after_work: Some(true),
+            flexibility: Some(Flexibility::Flexible),
+            ..Default::default()
+        }],
+    );
+    assert_eq!(result.scheduled.len(), 1, "{result:?}");
+    let block = &result.scheduled[0];
+    assert!(
+        block.start >= work_end,
+        "expected after work end {work_end}, got start {} ({block:?})",
+        block.start
+    );
+}
+
+#[test]
+fn climbing_title_prefers_evening_over_morning_gap() {
+    let day = monday_noon();
+    let ctx = ctx_with(vec![], day);
+    let result = schedule_items(
+        &ctx,
+        &[ScheduleItem {
+            title: "Climbing".into(),
+            duration_minutes: 90,
+            flexibility: Some(Flexibility::Flexible),
+            ..Default::default()
+        }],
+    );
+    assert_eq!(result.scheduled.len(), 1, "{result:?}");
+    let hour = {
+        use chrono::{Local, TimeZone, Timelike};
+        Local
+            .timestamp_millis_opt(result.scheduled[0].start)
+            .single()
+            .map(|d| d.hour())
+            .unwrap_or(0)
+    };
+    assert!(
+        hour >= 16 || hour < 10,
+        "climbing should prefer after-work/evening (or early morning), got hour {hour}"
+    );
+    // Midday focus window should lose to climb bias / work hard blocks.
+    assert!(
+        !(10..=15).contains(&hour),
+        "climbing should not land mid-workday hours, got {hour}"
     );
 }
 
@@ -572,4 +642,98 @@ async fn force_create_writes_despite_conflict() {
         .await
         .unwrap();
     assert_eq!(created.title, "Forced");
+}
+
+#[test]
+fn all_day_holiday_punches_work_and_is_not_busy() {
+    let day = monday_noon();
+    let range = day_range(day);
+    let mut holiday = make_event("Bank Holiday", range.start, range.end, Flexibility::Fixed);
+    holiday.all_day = true;
+    holiday.category = "holidays".into();
+    holiday.id = "e-holiday".into();
+
+    let blocks = punch_work_for_off_days(&[holiday.clone()], sleep_work_blocks(day));
+    assert!(
+        !blocks.iter().any(|b| b.kind == ScheduleKind::Work),
+        "work should be off on holiday"
+    );
+    assert!(blocks.iter().any(|b| b.kind == ScheduleKind::Sleep));
+
+    let ctx = SchedulingContext::new(
+        vec![holiday],
+        blocks,
+        SchedulingPolicy::default(),
+        range,
+    );
+    let occ = build_occupancy(&ctx);
+    assert!(!occ.iter().any(|b| b.source == BusySource::Work));
+    assert!(!occ.iter().any(|b| b.source == BusySource::Event));
+
+    let slots = find_free_slots(&ctx, 60 * 60_000, 20, None);
+    let work_start = range.start
+        + Duration::hours(8).num_milliseconds()
+        + Duration::minutes(45).num_milliseconds();
+    let work_end = range.start
+        + Duration::hours(16).num_milliseconds()
+        + Duration::minutes(45).num_milliseconds();
+    assert!(
+        slots
+            .iter()
+            .any(|s| s.start >= work_start && s.start < work_end),
+        "former work hours should be free on holiday, slots={slots:?}"
+    );
+}
+
+#[test]
+fn high_priority_deadline_offers_tradeoff_vs_flexible_climbing() {
+    let day = monday_noon();
+    let range = day_range(day);
+    let climb_start = range.start + Duration::hours(17).num_milliseconds();
+    let climb_end = range.start + Duration::hours(22).num_milliseconds();
+    let climbing = make_event("Climbing", climb_start, climb_end, Flexibility::Flexible);
+    let ctx = ctx_with(vec![climbing], day);
+
+    let result = schedule_items(
+        &ctx,
+        &[ScheduleItem {
+            title: "Deadline X".into(),
+            duration_minutes: 90,
+            deadline: Some(range.end),
+            priority: Some(EventPriority::High),
+            flexibility: Some(Flexibility::Flexible),
+            prefer_after_work: Some(true),
+            ..Default::default()
+        }],
+    );
+    assert!(
+        result.scheduled.is_empty(),
+        "should not silently place over climbing"
+    );
+    let tradeoff = result.tradeoff.expect("expected tradeoff ask");
+    assert_eq!(tradeoff.blocking_title, "Climbing");
+    assert_eq!(tradeoff.new_title, "Deadline X");
+    assert!(tradeoff.prompt.contains("Climbing"));
+}
+
+#[test]
+fn free_slots_skip_past_when_window_includes_now() {
+    let now = Local::now().timestamp_millis();
+    let range = DateRange {
+        start: now - 3 * 86_400_000,
+        end: now + 3 * 86_400_000,
+    };
+    let ctx = SchedulingContext::new(
+        vec![],
+        vec![],
+        SchedulingPolicy::default(),
+        range,
+    );
+    let slots = find_free_slots(&ctx, 60 * 60_000, 8, None);
+    assert!(!slots.is_empty());
+    assert!(
+        slots.iter().all(|s| s.start >= now - 60_000),
+        "placed in the past: {:?}",
+        slots.iter().map(|s| s.start).collect::<Vec<_>>()
+    );
 }

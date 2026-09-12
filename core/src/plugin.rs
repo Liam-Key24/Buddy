@@ -3,6 +3,7 @@ use std::sync::Arc;
 use buddy_database::Database;
 
 use crate::schema::ToolSchema;
+use crate::spec::ToolSpec;
 use crate::tool::Tool;
 
 /// One planner-facing entry describing a tool a plugin contributes. Used to
@@ -34,6 +35,13 @@ pub enum AfterExecute {
     EmitSparksUpdated,
     /// Re-emit `calendar-updated` so the Calendar UI reloads (calendar tools).
     EmitCalendarUpdated,
+    EmitTodosUpdated,
+    EmitDocsUpdated,
+    EmitResearchUpdated,
+    EmitStudyUpdated,
+    EmitSocialsUpdated,
+    EmitFitnessUpdated,
+    EmitMoneyUpdated,
 }
 
 /// A self-contained capability bundle: the tools it exposes to the chat
@@ -53,6 +61,13 @@ pub trait BuddyPlugin: Send + Sync {
 
     /// Clarification schemas for tools this plugin contributes. Empty by default.
     fn tool_schemas(&self) -> &'static [ToolSchema] {
+        &[]
+    }
+
+    /// Canonical syntax + extractors. Empty by default — decls/schemas are
+    /// synthesized into [`crate::ResolvedSpec`] so every tool still gets a
+    /// `name key=value` fast path.
+    fn tool_specs(&self) -> &'static [ToolSpec] {
         &[]
     }
 

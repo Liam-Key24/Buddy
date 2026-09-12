@@ -22,18 +22,20 @@ interface SettingsState {
   calendarNotificationsEnabled: boolean;
   calendarDefaultTimezone: string;
   calendarDefaultRemindersJson: string;
+  fitnessCalorieTarget: string;
+  moneyCurrency: string;
   setSettings: (settings: Partial<Omit<SettingsState, "setSettings">>) => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
   mlxUrl: "http://127.0.0.1:8001",
   brainUrl: "http://127.0.0.1:8002",
-  modelName: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  modelName: "mlx-community/Qwen3-14B-4bit",
   logLevel: "info",
-  autoStartMlx: true,
+  autoStartMlx: false,
   modelNameChat: "mlx-community/Llama-3.2-3B-Instruct-4bit",
-  modelNameCode: "mlx-community/Llama-3.2-3B-Instruct-4bit",
-  llmProfileRouter: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  modelNameCode: "mlx-community/Qwen3-14B-4bit",
+  llmProfileRouter: "mlx-community/Qwen3-14B-4bit",
   codexModel: "gpt-5.5",
   codexWorkspace: "",
   codeAgentBackend: "cursor",
@@ -50,5 +52,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   calendarDefaultRemindersJson: JSON.stringify([
     { minutes_before: 15, method: "popup" },
   ]),
+  fitnessCalorieTarget: "2500",
+  moneyCurrency: "GBP",
   setSettings: (settings) => set(settings),
 }));

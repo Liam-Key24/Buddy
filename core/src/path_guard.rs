@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -25,8 +26,18 @@ impl From<GuardError> for ToolError {
 /// Default excluded subpaths used when the `fs_excluded_paths` setting is
 /// missing or unparseable. Shared by any tool/feature that resolves paths
 /// against the user's home directory.
-pub const DEFAULT_EXCLUSIONS: &[&str] =
-    &["Library", ".Trash", ".ssh", ".gnupg", ".cache", "Pictures"];
+pub const DEFAULT_EXCLUSIONS: &[&str] = &[
+    "Library",
+    ".Trash",
+    ".ssh",
+    ".gnupg",
+    ".cache",
+    "Pictures",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".config/gcloud",
+];
 
 /// Parses the `fs_excluded_paths` setting (a JSON array of strings), falling
 /// back to [`DEFAULT_EXCLUSIONS`] when absent or invalid.
@@ -76,6 +87,8 @@ impl PathGuard {
     ///
     /// For paths that do not yet exist (e.g. new files) the parent chain is used
     /// for resolution so that create operations are still guarded.
+    /// Existing components are canonicalized so symlink escapes cannot leave
+    /// the root or enter an excluded tree.
     pub fn check(&self, requested: &str) -> Result<PathBuf, GuardError> {
         if requested.trim().is_empty() {
             return Err(GuardError::Invalid("empty path".into()));
@@ -88,14 +101,23 @@ impl PathGuard {
             self.root.join(raw)
         };
 
-        let resolved = resolve_lexical(&joined);
+        let lexical = resolve_lexical(&joined);
 
-        if !resolved.starts_with(&self.root) {
+        if !lexical.starts_with(&self.root) {
+            return Err(GuardError::OutsideRoot(lexical.display().to_string()));
+        }
+
+        let resolved = resolve_against_root(&lexical, &self.root)?;
+        let root_cmp =
+            existing_canonical(&self.root).unwrap_or_else(|| resolve_lexical(&self.root));
+
+        if !resolved.starts_with(&root_cmp) && !resolved.starts_with(&self.root) {
             return Err(GuardError::OutsideRoot(resolved.display().to_string()));
         }
 
         for ex in &self.excluded {
-            if resolved == *ex || resolved.starts_with(ex) {
+            let ex_cmp = existing_canonical(ex).unwrap_or_else(|| resolve_lexical(ex));
+            if resolved == ex_cmp || resolved.starts_with(&ex_cmp) {
                 return Err(GuardError::Excluded(resolved.display().to_string()));
             }
         }
@@ -122,6 +144,56 @@ fn resolve_lexical(path: &Path) -> PathBuf {
     out
 }
 
+fn existing_canonical(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        std::fs::canonicalize(path).ok()
+    } else {
+        None
+    }
+}
+
+/// Canonicalize the deepest existing ancestor *at or under `root*`* and
+/// re-append missing suffix components. Does not walk above `root`, so fake
+/// test roots and non-existent homes stay lexical.
+fn resolve_against_root(path: &Path, root: &Path) -> Result<PathBuf, GuardError> {
+    let lexical = resolve_lexical(path);
+    if !root.exists() {
+        return Ok(lexical);
+    }
+
+    let mut current = lexical.clone();
+    let mut suffix: Vec<OsString> = Vec::new();
+
+    loop {
+        if current.exists() {
+            let mut canon = std::fs::canonicalize(&current).map_err(|e| {
+                GuardError::Invalid(format!("cannot resolve {}: {e}", current.display()))
+            })?;
+            for part in suffix.into_iter().rev() {
+                canon.push(part);
+            }
+            return Ok(canon);
+        }
+        if current == root {
+            break;
+        }
+        match current.file_name() {
+            Some(name) => {
+                suffix.push(name.to_os_string());
+                if !current.pop() {
+                    break;
+                }
+            }
+            None => break,
+        }
+        if !current.starts_with(root) {
+            break;
+        }
+    }
+
+    Ok(lexical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +203,19 @@ mod tests {
             PathBuf::from("/home/user"),
             vec!["Library".into(), ".ssh".into()],
         )
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-pathguard-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -158,7 +243,10 @@ mod tests {
             g.check("Library/Keychains/x"),
             Err(GuardError::Excluded(_))
         ));
-        assert!(matches!(g.check(".ssh/id_rsa"), Err(GuardError::Excluded(_))));
+        assert!(matches!(
+            g.check(".ssh/id_rsa"),
+            Err(GuardError::Excluded(_))
+        ));
     }
 
     #[test]
@@ -168,5 +256,57 @@ mod tests {
             g.check("/home/user/notes.txt").unwrap(),
             PathBuf::from("/home/user/notes.txt")
         );
+    }
+
+    #[test]
+    fn default_exclusions_include_credential_dirs() {
+        for name in [".aws", ".kube", ".docker", ".config/gcloud"] {
+            assert!(DEFAULT_EXCLUSIONS.contains(&name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn rejects_symlink_escape_outside_root() {
+        let root = temp_root("escape");
+        let outside = temp_root("outside");
+        std::fs::write(outside.join("secret.txt"), "nope").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+            let g = PathGuard::new(root.clone(), vec![]);
+            assert!(matches!(
+                g.check("link/secret.txt"),
+                Err(GuardError::OutsideRoot(_))
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn rejects_symlink_into_excluded() {
+        let root = temp_root("excl");
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/id_rsa"), "key").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join(".ssh"), root.join("sneaky")).unwrap();
+            let g = PathGuard::new(root.clone(), vec![".ssh".into()]);
+            assert!(matches!(
+                g.check("sneaky/id_rsa"),
+                Err(GuardError::Excluded(_))
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn allows_real_file_inside_temp_root() {
+        let root = temp_root("ok");
+        std::fs::write(root.join("notes.txt"), "hi").unwrap();
+        let g = PathGuard::new(root.clone(), vec![]);
+        let got = g.check("notes.txt").unwrap();
+        assert_eq!(got, std::fs::canonicalize(root.join("notes.txt")).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

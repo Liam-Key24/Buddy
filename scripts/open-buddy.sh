@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export BUDDY_PROJECT_ROOT="$ROOT"
 
-APP="${BUDDY_APP:-$ROOT/app/src-tauri/target/release/bundle/macos/Buddy.app}"
+APP="${BUDDY_APP:-$ROOT/target/release/bundle/macos/Buddy.app}"
 
 if [[ ! -d "$APP" ]]; then
   echo "Buddy.app not found at: $APP"

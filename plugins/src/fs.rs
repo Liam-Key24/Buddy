@@ -5,6 +5,18 @@ use buddy_database::Database;
 use serde::Deserialize;
 
 const MAX_READ_BYTES: u64 = 512 * 1024;
+const MAX_WRITE_BYTES: usize = 512 * 1024;
+const MAX_LIST_ENTRIES: usize = 500;
+
+fn reject_oversize(content: &str, op: &str) -> Result<(), ToolError> {
+    if content.len() > MAX_WRITE_BYTES {
+        return Err(ToolError::ExecutionFailed(format!(
+            "{op} content too large ({} bytes, limit {MAX_WRITE_BYTES})",
+            content.len()
+        )));
+    }
+    Ok(())
+}
 
 fn build_guard(db: &Database) -> Result<PathGuard, ToolError> {
     let excluded = excluded_paths_from_setting(db.get_setting("fs_excluded_paths").ok().flatten());
@@ -124,6 +136,7 @@ impl Tool for WriteFileTool {
 
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
         let parsed: WriteInput = parse(input, "write_file")?;
+        reject_oversize(&parsed.content, "write_file")?;
         let guard = build_guard(&self.db)?;
         let path = guard
             .check(&parsed.path)?;
@@ -158,6 +171,7 @@ impl Tool for EditFileTool {
             .check(&parsed.path)?;
 
         let (new_content, summary) = if let Some(full) = parsed.content {
+            reject_oversize(&full, "edit_file")?;
             (full, "replaced file contents".to_string())
         } else {
             let old = parsed.old.ok_or_else(|| {
@@ -177,6 +191,7 @@ impl Tool for EditFileTool {
             let count = existing.matches(&old).count();
             (existing.replacen(&old, &new, 1), format!("{count} match(es) found, replaced first"))
         };
+        reject_oversize(&new_content, "edit_file")?;
 
         std::fs::write(&path, &new_content).map_err(|e| {
             ToolError::ExecutionFailed(format!("cannot write {}: {e}", path.display()))
@@ -238,7 +253,9 @@ impl Tool for ListDirTool {
 
         let mut lines = Vec::new();
         list_recursive(&guard, &root, depth, &mut lines);
-        if lines.is_empty() {
+        if lines.len() >= MAX_LIST_ENTRIES {
+            lines.push(format!("(truncated at {MAX_LIST_ENTRIES} entries)"));
+        } else if lines.is_empty() {
             lines.push("(empty)".to_string());
         }
         Ok(ToolResult {
@@ -248,7 +265,7 @@ impl Tool for ListDirTool {
 }
 
 fn list_recursive(guard: &PathGuard, dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-    if depth == 0 {
+    if depth == 0 || out.len() >= MAX_LIST_ENTRIES {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -257,6 +274,9 @@ fn list_recursive(guard: &PathGuard, dir: &std::path::Path, depth: usize, out: &
     let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     items.sort_by_key(|e| e.file_name());
     for entry in items {
+        if out.len() >= MAX_LIST_ENTRIES {
+            return;
+        }
         let path = entry.path();
         // Skip anything the guard would reject (e.g. excluded subtrees).
         if guard.check(&path.display().to_string()).is_err() {
@@ -272,5 +292,38 @@ fn list_recursive(guard: &PathGuard, dir: &std::path::Path, depth: usize, out: &
         if is_dir {
             list_recursive(guard, &path, depth - 1, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_rejects_oversize_content() {
+        let big = "x".repeat(MAX_WRITE_BYTES + 1);
+        assert!(reject_oversize(&big, "write_file").is_err());
+        assert!(reject_oversize("ok", "write_file").is_ok());
+    }
+
+    #[test]
+    fn list_recursive_respects_entry_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-fs-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..(MAX_LIST_ENTRIES + 20) {
+            std::fs::write(dir.join(format!("f{i:04}.txt")), "x").unwrap();
+        }
+        let guard = PathGuard::new(dir.clone(), vec![]);
+        let mut out = Vec::new();
+        list_recursive(&guard, &dir, 1, &mut out);
+        assert_eq!(out.len(), MAX_LIST_ENTRIES);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,4 @@
+{"id":"spark_1","message":"Note to self: look into compost bins for the land","expect_intent":"tool_use","expect_tool":"save_spark"}
+{"id":"spark_2","message":"spark: solar panel mount for the van","expect_intent":"tool_use","expect_tool":"save_spark"}
+{"id":"spark_3","message":"brain dump — fruit trees along the north fence","expect_intent":"tool_use","expect_tool":"save_spark"}
+{"id":"spark_4","message":"save this idea: Scotland road trip in the van","expect_intent":"tool_use","expect_tool":"save_spark"}

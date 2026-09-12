@@ -1,5 +1,6 @@
 import {
   Bell,
+  CalendarBlank,
   CaretLeft,
   CaretRight,
 } from "@phosphor-icons/react";
@@ -17,6 +18,8 @@ export function CalendarHeader({
   cursorDate,
   view,
   notificationCount,
+  sidebarOpen,
+  onToggleSidebar,
   onPrev,
   onNext,
   onToday,
@@ -26,6 +29,8 @@ export function CalendarHeader({
   cursorDate: Date;
   view: CalendarView;
   notificationCount: number;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
   onPrev: () => void;
   onNext: () => void;
   onToday: () => void;
@@ -45,11 +50,23 @@ export function CalendarHeader({
         : formatMonthYear(cursorDate);
 
   return (
-    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold tracking-tight text-zinc-100">
-          {title}
-        </h2>
+        <button
+          type="button"
+          title={sidebarOpen ? "Hide calendar panel" : "Show calendar panel"}
+          aria-label={sidebarOpen ? "Hide calendar panel" : "Show calendar panel"}
+          aria-pressed={sidebarOpen}
+          onClick={onToggleSidebar}
+          className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
+            sidebarOpen
+              ? "bg-blue-500/15 text-blue-400"
+              : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          }`}
+        >
+          <CalendarBlank size={18} weight={sidebarOpen ? "fill" : "regular"} />
+        </button>
+        <h2 className="text-lg font-semibold tracking-tight text-zinc-100">Calendar</h2>
         <button
           type="button"
           onClick={onToday}
@@ -57,27 +74,31 @@ export function CalendarHeader({
         >
           Today
         </button>
-        <div className="flex items-center gap-0.5">
-          <button
-            type="button"
-            onClick={onPrev}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
-            aria-label="Previous"
-          >
-            <CaretLeft size={18} />
-          </button>
-          <button
-            type="button"
-            onClick={onNext}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
-            aria-label="Next"
-          >
-            <CaretRight size={18} />
-          </button>
-        </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onPrev}
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
+          aria-label="Previous"
+        >
+          <CaretLeft size={18} />
+        </button>
+        <p className="min-w-[12rem] text-center text-sm font-medium text-zinc-100">
+          {title}
+        </p>
+        <button
+          type="button"
+          onClick={onNext}
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
+          aria-label="Next"
+        >
+          <CaretRight size={18} />
+        </button>
+      </div>
+
+      <div className="flex items-center justify-end gap-2">
         <div className="flex rounded-xl border border-zinc-800 bg-zinc-950/60 p-0.5">
           {VIEWS.map((v) => (
             <button

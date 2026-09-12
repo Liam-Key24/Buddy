@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use buddy_core::{parse_tool_json, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema};
+use buddy_core::{
+    parse_tool_json, AskKind, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema, ToolSpec,
+};
 use serde::Deserialize;
 use tokio::runtime::Handle;
 
@@ -102,6 +104,8 @@ pub const MEMORY_SCHEMAS: &[ToolSchema] = &[
             label: "conversation",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         }],
     },
     ToolSchema {
@@ -111,8 +115,25 @@ pub const MEMORY_SCHEMAS: &[ToolSchema] = &[
             label: "conversation",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         }],
     },
+];
+
+pub const MEMORY_SPECS: &[ToolSpec] = &[
+    ToolSpec::basic(
+        "memory.handover",
+        "generate and save a conversation handover",
+        r#"memory.handover conversation_id=<id>"#,
+        MEMORY_SCHEMAS[0],
+    ),
+    ToolSpec::basic(
+        "memory.maintain",
+        "run memory maintenance (dedup/archive)",
+        r#"memory.maintain conversation_id=<id>"#,
+        MEMORY_SCHEMAS[1],
+    ),
 ];
 
 pub fn memory_tool_decls() -> &'static [ToolDecl] {

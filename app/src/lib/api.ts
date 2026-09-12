@@ -4,6 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { useChatStore } from "../stores/useChatStore";
 import { useCodeAgentStore } from "../stores/useCodeAgentStore";
 import { useConversationStore } from "../stores/useConversationStore";
+import { useAppStore } from "../stores/useAppStore";
+import { useLifeChatContext } from "../stores/useLifeChatContext";
+import type { WorkspaceFocusPayload } from "./workspaceFocus";
 import type {
   CalendarEvent,
   CreateEventInput,
@@ -13,6 +16,7 @@ import type {
   UpdateEventInput,
   CreateDreamInput,
   DreamEntry,
+  LifestyleScheduleRule,
   ScheduleBlock,
   UpdateDreamInput,
   WorkDayLog,
@@ -28,8 +32,38 @@ export async function fetchServiceStatus(): Promise<ServiceStatusResponse> {
   return invoke("get_service_status");
 }
 
+export async function refreshServiceStatus(): Promise<ServiceStatusResponse> {
+  const status = await fetchServiceStatus();
+  const store = useAppStore.getState();
+  store.setMlxStatus(status.mlx ? "online" : "offline");
+  store.setBrainStatus(status.brain ? "online" : "offline");
+  return status;
+}
+
 export async function startBrain(): Promise<void> {
   return invoke("start_brain");
+}
+
+export async function restartBrain(): Promise<void> {
+  useAppStore.getState().setBrainStatus("checking");
+  try {
+    await invoke("restart_brain");
+  } finally {
+    await refreshServiceStatus().catch(() => {
+      useAppStore.getState().setBrainStatus("offline");
+    });
+  }
+}
+
+export async function restartMlx(): Promise<void> {
+  useAppStore.getState().setMlxStatus("checking");
+  try {
+    await invoke("restart_mlx");
+  } finally {
+    await refreshServiceStatus().catch(() => {
+      useAppStore.getState().setMlxStatus("offline");
+    });
+  }
 }
 
 interface ConversationDto {
@@ -95,6 +129,65 @@ export async function loadMessages(
   );
 }
 
+export async function stopRun(conversationId: string) {
+  await invoke("stop_run", { conversationId });
+}
+
+async function withChatStreamListeners(
+  conversationId: string,
+  run: () => Promise<void>,
+) {
+  const chat = useChatStore.getState();
+  const unlistenChunk = await listen<string>("chat-chunk", (event) => {
+    useChatStore.getState().appendStreaming(event.payload);
+  });
+  const unlistenTrace = await listen<{ step: string; detail: string }>(
+    "chat-trace",
+    (event) => {
+      useChatStore
+        .getState()
+        .appendTrace(event.payload.step, event.payload.detail);
+    },
+  );
+  const unlistenAsk = await listen<{
+    tool: string;
+    question: string;
+    field: string;
+    ask_kind: "text" | "choice";
+    options: { id: string; label: string; value: string }[];
+  }>("chat-ask", (event) => {
+    useChatStore.getState().setActiveAsk({
+      tool: event.payload.tool,
+      question: event.payload.question,
+      field: event.payload.field,
+      ask_kind: event.payload.ask_kind,
+      options: event.payload.options ?? [],
+    });
+  });
+  const teardown = () => {
+    unlistenChunk();
+    unlistenTrace();
+    unlistenAsk();
+    unlistenDone();
+  };
+  const unlistenDone = await listen("chat-done", async () => {
+    await loadMessages(conversationId, { force: true });
+    const store = useChatStore.getState();
+    store.clearStreaming();
+    store.clearTrace();
+    teardown();
+  });
+
+  try {
+    await run();
+  } catch (error) {
+    chat.clearStreaming();
+    chat.clearTrace();
+    teardown();
+    throw error;
+  }
+}
+
 export async function sendMessage(
   conversationId: string,
   text: string,
@@ -105,25 +198,34 @@ export async function sendMessage(
     chat.beginSend(text);
   }
 
-  const unlistenChunk = await listen<string>("chat-chunk", (event) => {
-    useChatStore.getState().appendStreaming(event.payload);
-  });
-  const unlistenDone = await listen("chat-done", async () => {
-    await loadMessages(conversationId, { force: true });
-    useChatStore.getState().clearStreaming();
-    unlistenChunk();
-    unlistenDone();
-  });
-
-  try {
-    await invoke("send_message", { conversationId, text });
+  await withChatStreamListeners(conversationId, async () => {
+    const uiContext = useLifeChatContext.getState().summary.trim();
+    await invoke("send_message", {
+      conversationId,
+      text,
+      uiContext: uiContext || null,
+    });
     await loadConversations();
-  } catch (error) {
-    chat.clearStreaming();
-    unlistenChunk();
-    unlistenDone();
-    throw error;
-  }
+  });
+}
+
+export async function resolveClarification(
+  conversationId: string,
+  field: string,
+  value: string,
+) {
+  const chat = useChatStore.getState();
+  chat.setIsStreaming(true);
+  chat.clearTrace();
+  chat.appendTrace("clarifying", `Answered ${field}`);
+
+  await withChatStreamListeners(conversationId, async () => {
+    await invoke("resolve_clarification", {
+      conversationId,
+      field,
+      value,
+    });
+  });
 }
 
 export interface FullSettings {
@@ -148,6 +250,8 @@ export interface FullSettings {
   calendar_notifications_enabled: boolean;
   calendar_default_timezone: string;
   calendar_default_reminders_json: string;
+  fitness_calorie_target?: string;
+  money_currency?: string;
 }
 
 export async function loadSettings() {
@@ -465,6 +569,18 @@ export async function lifestyleListBlocks(
   return invoke<ScheduleBlock[]>("lifestyle_list_blocks", { start, end });
 }
 
+export async function lifestyleListRules(): Promise<LifestyleScheduleRule[]> {
+  return invoke("lifestyle_list_rules");
+}
+
+export async function lifestyleSetTimes(
+  kind: "work" | "sleep",
+  startHm: string,
+  endHm: string,
+): Promise<LifestyleScheduleRule> {
+  return invoke("lifestyle_set_times", { kind, startHm, endHm });
+}
+
 export async function lifestyleLastSleepDate(): Promise<string> {
   return invoke<string>("lifestyle_last_sleep_date");
 }
@@ -524,10 +640,59 @@ export async function workGetDayLog(workDate: string): Promise<WorkDayLog> {
   return invoke<WorkDayLog>("work_get_day_log", { workDate });
 }
 
+export interface CalendarProposalBlock {
+  title: string;
+  start: number;
+  end: number;
+  score?: number;
+  reasons?: string[];
+}
+
+export interface CalendarProposalPayload {
+  conversation_id?: string;
+  blocks: CalendarProposalBlock[];
+  cleared?: boolean;
+}
+
+export async function calendarCommitProposal(
+  conversationId?: string | null,
+): Promise<string> {
+  return invoke<string>("calendar_commit_proposal", {
+    conversationId: conversationId ?? null,
+  });
+}
+
+export async function calendarDismissProposal(
+  conversationId?: string | null,
+): Promise<void> {
+  return invoke("calendar_dismiss_proposal", {
+    conversationId: conversationId ?? null,
+  });
+}
+
 export async function subscribeCalendarEvents(
   onUpdated: () => void,
 ): Promise<() => void> {
   const unsub = await listen("calendar-updated", () => onUpdated());
+  return () => unsub();
+}
+
+export async function subscribeWorkspaceFocus(
+  onFocus: (payload: WorkspaceFocusPayload) => void,
+): Promise<() => void> {
+  const unsub = await listen<WorkspaceFocusPayload>("workspace-focus", (e) =>
+    onFocus(e.payload),
+  );
+  return () => unsub();
+}
+
+export async function subscribeCalendarProposal(
+  onProposal: (payload: CalendarProposalPayload) => void,
+): Promise<() => void> {
+  const unsub = await listen<CalendarProposalPayload>(
+    "calendar-proposal",
+    (e) => onProposal(e.payload),
+  );
   return () => unsub();
 }
 

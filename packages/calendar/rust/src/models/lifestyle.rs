@@ -33,6 +33,14 @@ pub struct ScheduleSegment {
     pub crosses_midnight: bool,
 }
 
+/// Editable Work / Sleep template (expanded into blocks per day).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifestyleScheduleRule {
+    pub kind: ScheduleKind,
+    pub segments: Vec<ScheduleSegment>,
+    pub updated_at: i64,
+}
+
 /// Expanded lifestyle block for a visible range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleBlock {

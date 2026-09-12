@@ -1,0 +1,5 @@
+{"id":"chat_1","message":"how are you today?","expect_intent":"chat"}
+{"id":"chat_2","message":"what do you think about van life in general?","expect_intent":"chat"}
+{"id":"chat_3","message":"thanks, that helps","expect_intent":"chat"}
+{"id":"chat_4","message":"tell me a short joke","expect_intent":"chat"}
+{"id":"chat_5","message":"whats the capital of the uk","expect_intent":"chat"}

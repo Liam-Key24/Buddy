@@ -21,6 +21,11 @@ pub struct BrainMemoryContext {
     pub learned_patterns: Option<String>,
     pub stale_sparks: Option<String>,
     pub active_sparks: Option<String>,
+    pub open_todos: Option<String>,
+    pub fitness: Option<String>,
+    pub study: Option<String>,
+    pub money: Option<String>,
+    pub socials: Option<String>,
 }
 
 impl From<&MergedContext> for BrainMemoryContext {
@@ -39,6 +44,11 @@ impl From<&MergedContext> for BrainMemoryContext {
             learned_patterns: payload.learned_patterns,
             stale_sparks: None,
             active_sparks: None,
+            open_todos: None,
+            fitness: None,
+            study: None,
+            money: None,
+            socials: None,
         }
     }
 }

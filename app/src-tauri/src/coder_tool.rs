@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use buddy_coder::{run_code_turn, CodeEmit};
-use buddy_core::{parse_tool_json, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema};
+use buddy_core::{
+    parse_tool_json, AskKind, FieldSpec, Tool, ToolDecl, ToolError, ToolResult, ToolSchema, ToolSpec,
+};
 use buddy_database::Database;
 use serde::Deserialize;
 use tokio::runtime::Handle;
@@ -130,21 +132,34 @@ pub const CODER_RUN_SCHEMA: ToolSchema = ToolSchema {
             label: "conversation",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         },
         FieldSpec {
             name: "prompt",
             label: "coding request",
             required: true,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         },
         FieldSpec {
             name: "focus",
             label: "focus mode",
             required: false,
             memory_keys: &[],
+        ask_kind: AskKind::Text,
+        choices: &[],
         },
     ],
 };
+
+pub const CODER_RUN_SPEC: ToolSpec = ToolSpec::basic(
+    "coder.run",
+    "run the Code Agent in the conversation workspace",
+    r#"coder.run conversation_id=<id> prompt="...""#,
+    CODER_RUN_SCHEMA,
+);
 
 pub fn coder_tool_decl() -> ToolDecl {
     ToolDecl {
