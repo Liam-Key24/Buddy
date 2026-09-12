@@ -19,6 +19,29 @@ pub enum Route {
     Miss,
 }
 
+/// How `route` produced a hit. Used for Phase 0 turn tracing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteKind {
+    Canonical,
+    Extract,
+    Miss,
+}
+
+/// Classify without executing. Canonical syntax wins over extract.
+pub fn route_kind(text: &str, specs: &[ResolvedSpec]) -> RouteKind {
+    if parse_canonical(text, specs).is_some() {
+        return RouteKind::Canonical;
+    }
+    for spec in specs {
+        if let Some(extract) = spec.extract {
+            if extract(text).is_some() {
+                return RouteKind::Extract;
+            }
+        }
+    }
+    RouteKind::Miss
+}
+
 pub fn route(text: &str, specs: &[ResolvedSpec]) -> Route {
     if let Some(hit) = parse_canonical(text, specs) {
         return Route::Tools(vec![job_from_hit(hit, specs)]);
@@ -141,6 +164,23 @@ mod tests {
             Route::Miss => panic!("expected hit"),
         }
         assert_eq!(route("whats the capital of the uk", &specs), Route::Miss);
+    }
+
+    #[test]
+    fn route_kind_distinguishes_canonical_extract_miss() {
+        let specs = specs();
+        assert_eq!(
+            route_kind(r#"todo.add title="Milk""#, &specs),
+            RouteKind::Canonical
+        );
+        assert_eq!(
+            route_kind("remind me to buy oat milk", &specs),
+            RouteKind::Extract
+        );
+        assert_eq!(
+            route_kind("whats the capital of the uk", &specs),
+            RouteKind::Miss
+        );
     }
 
     #[test]

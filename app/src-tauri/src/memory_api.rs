@@ -217,6 +217,24 @@ impl MemoryApi {
             .delete_runtime_state(&Self::agent_turn_key(conversation_id));
     }
 
+    fn turn_trace_key(conversation_id: &str) -> String {
+        format!("turn_trace:{conversation_id}")
+    }
+
+    pub fn get_turn_trace(&self, conversation_id: &str) -> Option<String> {
+        self.db
+            .get_runtime_state(&Self::turn_trace_key(conversation_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn set_turn_trace(&self, conversation_id: &str, raw: &str) {
+        let _ = self
+            .db
+            .set_runtime_state(&Self::turn_trace_key(conversation_id), raw);
+    }
+
     fn last_look_key(conversation_id: &str) -> String {
         format!("last_look:{conversation_id}")
     }

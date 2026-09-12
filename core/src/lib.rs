@@ -16,7 +16,7 @@ pub use json::parse_tool_json;
 pub use path_guard::{excluded_paths_from_setting, GuardError, PathGuard, DEFAULT_EXCLUSIONS};
 pub use plugin::{AfterExecute, BuddyPlugin, SettingSeed, ToolDecl};
 pub use registry::ToolRegistry;
-pub use router::{route, Route, ToolJob};
+pub use router::{route, route_kind, Route, RouteKind, ToolJob};
 pub use runner::TaskRunner;
 pub use schema::{AskKind, ChoiceSpec, FieldSpec, ToolSchema, DURATION_MINUTES_CHOICES};
 pub use session::{merge_session_into_input, SessionContext};

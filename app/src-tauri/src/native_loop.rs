@@ -24,6 +24,7 @@ use crate::orchestrator::{
 };
 use crate::run_control::RunGuard;
 use crate::state::AppState;
+use crate::turn_trace::TurnTrace;
 
 const MAX_NATIVE_STEPS: usize = 8;
 /// Tool-calling can stall on a huge kit; fail faster than a silent 90s hang.
@@ -268,6 +269,7 @@ pub async fn run_native_turn(
     resume: bool,
     run: &RunGuard,
     chat_mode: ChatMode,
+    trace: &mut TurnTrace,
 ) -> Result<NativeOutcome, String> {
     let conv_kind = state
         .db
@@ -276,6 +278,8 @@ pub async fn run_native_turn(
         .map(|c| c.kind)
         .unwrap_or_default();
     let tools = tools_for_turn(state, text, ui_context, &conv_kind, chat_mode);
+    trace.attached_tool_count = tools.len() as u32;
+    trace.model = Some("qwen".into());
     let mut transcript = if resume {
         load_transcript(state, conversation_id).unwrap_or_else(|| NativeTranscript {
             goal: text.to_string(),
@@ -371,7 +375,10 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
         )
         .await
         {
-            Ok(c) => c,
+            Ok(c) => {
+                trace.model_call_count += 1;
+                c
+            }
             Err(err) => {
                 warn!(error = %err, step, "native complete failed");
                 if run.is_cancelled() || err == "stopped" {
@@ -466,6 +473,8 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 {
                     ToolStepOutcome::NeedsUser(content) => {
                         used_tools.push(tool_name.clone());
+                        trace.tool_steps += 1;
+                        trace.clarification_count += 1;
                         transcript.messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call.id,
@@ -497,6 +506,7 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                 last_tool = tool_name.clone();
                 last_output = output.clone();
                 used_tools.push(tool_name.clone());
+                trace.tool_steps += 1;
                 if tool_name.starts_with("docs.") {
                     last_doc_output = Some(output.clone());
                 }

@@ -89,3 +89,42 @@ fn synthesized_calendar_look_kv() {
         Route::Miss => panic!("expected synthesized look"),
     }
 }
+
+#[test]
+fn nl_calendar_look_extracts_without_model() {
+    let (_dir, surface) = surface();
+    match surface.route("what's on today?") {
+        Route::Tools(jobs) => {
+            assert_eq!(jobs[0].tool, "calendar.look");
+            let v: Value = serde_json::from_str(&jobs[0].input).unwrap();
+            assert_eq!(v["when"], "today");
+        }
+        Route::Miss => panic!("expected calendar.look extract"),
+    }
+}
+
+#[test]
+fn organize_canonical_defaults_to_propose() {
+    let (_dir, surface) = surface();
+    match surface.route(r#"calendar.organize window=this_week"#) {
+        Route::Tools(jobs) => {
+            assert_eq!(jobs[0].tool, "calendar.organize");
+            let v: Value = serde_json::from_str(&jobs[0].input).unwrap();
+            assert_eq!(v["mode"], "propose");
+        }
+        Route::Miss => panic!("expected organize"),
+    }
+}
+
+#[test]
+fn spark_and_chat_do_not_extract() {
+    let (_dir, surface) = surface();
+    assert!(matches!(
+        surface.route("spark: climbing tracker app"),
+        Route::Miss
+    ));
+    assert!(matches!(
+        surface.route("how are you today?"),
+        Route::Miss
+    ));
+}

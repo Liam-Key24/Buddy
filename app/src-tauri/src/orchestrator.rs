@@ -10,7 +10,7 @@ use buddy_clarification::{
     AskChoice, ClarifyResult, ClarificationConfig, JobPhase, MissingField, PendingClarification,
     PreferenceLookup,
 };
-use buddy_core::{merge_session_into_input, AskKind, Route, SessionContext};
+use buddy_core::{merge_session_into_input, AskKind, Route, RouteKind, SessionContext};
 use buddy_memory::{HistoryMessage, MemoryContext, MemoryEvent};
 use buddy_personality::{
     phrase_clarification, phrase_tool_result, style_response, ClarificationAsk,
@@ -31,6 +31,7 @@ use crate::native_loop::{self, load_transcript, NativeOutcome};
 use crate::run_control::{RunGuard, RunScope};
 use crate::services::{talk_recovery, ProcessManager, TalkRecovery};
 use crate::state::AppState;
+use crate::turn_trace::{self, TurnPath, TurnTrace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScratchStep {
@@ -65,6 +66,9 @@ pub async fn send_message(
     info!(text = %text, "user request");
     emit_trace(&app, "planning", "Reading context");
     let _ = chat_mode; // UI no longer selects a model; kept for invoke compatibility.
+
+    let started = Instant::now();
+    let mut trace = TurnTrace::new(&conversation_id);
 
     let _scope = RunScope::start(&state.runs, &conversation_id);
     let run = &_scope.guard;
@@ -144,6 +148,8 @@ pub async fn send_message(
                 content: content.clone(),
             },
         );
+        trace.tool_steps = 1;
+        seal_trace(&app, state, &mut trace, TurnPath::ForceConfirm, started);
         let _ = app.emit("chat-done", ());
         return Ok(());
     }
@@ -190,6 +196,8 @@ pub async fn send_message(
                             content: content.clone(),
                         },
                     );
+                    trace.tool_steps = 1;
+                    seal_trace(&app, state, &mut trace, TurnPath::ProposalCommit, started);
                     let _ = app.emit("chat-done", ());
                     return Ok(());
                 }
@@ -211,6 +219,7 @@ pub async fn send_message(
                 .db
                 .add_message(&conversation_id, "assistant", &content)
                 .map_err(|e| e.to_string())?;
+            seal_trace(&app, state, &mut trace, TurnPath::ProposalCancel, started);
             let _ = app.emit("chat-done", ());
             return Ok(());
         }
@@ -231,9 +240,15 @@ pub async fn send_message(
             &conversation_id,
             &text,
             &personality,
+            &mut trace,
         )
         .await?
         {
+            let path = match state.plugins.route_kind(&text) {
+                RouteKind::Extract => TurnPath::Extract,
+                _ => TurnPath::Canonical,
+            };
+            seal_trace(&app, state, &mut trace, path, started);
             persist_assistant_turn(
                 &app,
                 state,
@@ -247,6 +262,7 @@ pub async fn send_message(
         if let Some(content) =
             calendar_look::try_resolve(&app, state, &conversation_id, &personality, &text)
         {
+            seal_trace(&app, state, &mut trace, TurnPath::LastLook, started);
             persist_assistant_turn(
                 &app,
                 state,
@@ -276,10 +292,12 @@ pub async fn send_message(
             true,
             run,
             native_loop::ChatMode::Tool,
+            &mut trace,
         )
         .await?
         {
             NativeOutcome::Stopped(content) => {
+                seal_trace(&app, state, &mut trace, TurnPath::ResumeNative, started);
                 persist_assistant_turn(
                     &app,
                     state,
@@ -307,6 +325,7 @@ pub async fn send_message(
                         content: content.clone(),
                     },
                 );
+                seal_trace(&app, state, &mut trace, TurnPath::ResumeNative, started);
                 let _ = app.emit("chat-done", ());
                 return Ok(());
             }
@@ -354,6 +373,7 @@ pub async fn send_message(
                 content: content.clone(),
             },
         );
+        seal_trace(&app, state, &mut trace, TurnPath::OpenJob, started);
         let _ = app.emit("chat-done", ());
         return Ok(());
     }
@@ -379,10 +399,12 @@ pub async fn send_message(
             &memory,
             &personality,
             run,
+            &mut trace,
         )
         .await
         {
             Ok(content) => {
+                seal_trace(&app, state, &mut trace, TurnPath::TalkLlama, started);
                 persist_assistant_turn(
                     &app,
                     state,
@@ -414,10 +436,12 @@ pub async fn send_message(
         false,
         run,
         chat_mode,
+        &mut trace,
     )
     .await?
     {
         NativeOutcome::Stopped(content) => {
+            seal_trace(&app, state, &mut trace, TurnPath::CompleteQwen, started);
             persist_assistant_turn(
                 &app,
                 state,
@@ -445,6 +469,7 @@ pub async fn send_message(
                     content: content.clone(),
                 },
             );
+            seal_trace(&app, state, &mut trace, TurnPath::CompleteQwen, started);
             let _ = app.emit("chat-done", ());
             return Ok(());
         }
@@ -454,6 +479,7 @@ pub async fn send_message(
                 &personality,
                 "I couldn't reach the local model. Try again in a moment.",
             );
+            seal_trace(&app, state, &mut trace, TurnPath::ModelError, started);
             persist_assistant_turn(
                 &app,
                 state,
@@ -660,6 +686,7 @@ async fn try_canonical_route(
     conversation_id: &str,
     text: &str,
     personality: &PersonalityProfile,
+    trace: &mut TurnTrace,
 ) -> Result<Option<String>, String> {
     let Route::Tools(jobs) = state.plugins.route(text) else {
         return Ok(None);
@@ -690,7 +717,10 @@ async fn try_canonical_route(
         )
         .await?
         {
-            ToolStepOutcome::NeedsUser(content) => return Ok(Some(content)),
+            ToolStepOutcome::NeedsUser(content) => {
+                trace.clarification_count += 1;
+                return Ok(Some(content));
+            }
             ToolStepOutcome::Done { output, content }
             | ToolStepOutcome::Failed { output, content } => {
                 turn.scratchpad.push(ScratchStep {
@@ -698,6 +728,7 @@ async fn try_canonical_route(
                     summary: compact_tool_summary(&job.tool, &output),
                 });
                 used_tools.push(job.tool.clone());
+                trace.tool_steps += 1;
                 if job.tool.starts_with("docs.") {
                     last_doc = Some(output);
                 }
@@ -930,6 +961,10 @@ pub async fn resolve_clarification(
         return Err("No pending clarification to resolve.".into());
     };
 
+    let started = Instant::now();
+    let mut trace = TurnTrace::new(&conversation_id);
+    trace.clarification_count = 1;
+
     let _scope = RunScope::start(&state.runs, &conversation_id);
 
     emit_trace(&app, "clarifying", &format!("Resolved {field}"));
@@ -1010,6 +1045,8 @@ pub async fn resolve_clarification(
                 {
                     state.memory.clear_agent_turn(&conversation_id);
                 }
+                trace.tool_steps += 1;
+                seal_trace(&app, state, &mut trace, TurnPath::OpenJob, started);
                 let _ = app.emit("chat-done", ());
                 return Ok(());
             }
@@ -1091,6 +1128,8 @@ pub async fn resolve_clarification(
     {
         state.memory.clear_agent_turn(&conversation_id);
     }
+    trace.tool_steps += 1;
+    seal_trace(&app, state, &mut trace, TurnPath::OpenJob, started);
     let _ = app.emit("chat-done", ());
     Ok(())
 }
@@ -1104,6 +1143,7 @@ async fn stream_talk_reply(
     memory: &BrainMemoryContext,
     personality: &PersonalityProfile,
     run: &RunGuard,
+    trace: &mut TurnTrace,
 ) -> Result<String, String> {
     if let Some(pm) = app.try_state::<Arc<ProcessManager>>() {
         emit_trace(app, "planning", "Checking Brain");
@@ -1118,7 +1158,12 @@ async fn stream_talk_reply(
     loop {
         emit_trace(app, "responding", "Llama chat");
         match try_stream_talk(app, state, client, text, history, personality, run).await {
-            Ok(content) => return Ok(content),
+            Ok(content) => {
+                trace.set_path(TurnPath::TalkLlama);
+                trace.model = Some("llama".into());
+                trace.model_call_count += 1;
+                return Ok(content);
+            }
             Err(err) => {
                 warn!(error = %err, recycled, "talk stream failed");
                 match talk_recovery(&err, recycled) {
@@ -1133,6 +1178,9 @@ async fn stream_talk_reply(
                     }
                     TalkRecovery::FallbackRespond => {
                         emit_trace(app, "responding", "Talk fallback");
+                        trace.set_path(TurnPath::TalkRespond);
+                        trace.model = Some("qwen".into());
+                        trace.model_call_count += 1;
                         return stream_chat_reply(
                             app,
                             state,
@@ -1398,6 +1446,17 @@ async fn cancellable_json<T: serde::de::DeserializeOwned>(
         _ = run.cancelled() => Err("stopped".into()),
         res = http => res,
     }
+}
+
+fn seal_trace(
+    app: &AppHandle,
+    state: &AppState,
+    trace: &mut TurnTrace,
+    path: TurnPath,
+    started: Instant,
+) {
+    trace.set_path(path);
+    turn_trace::finish_turn_trace(app, state, trace, started);
 }
 
 pub(crate) fn emit_trace(app: &AppHandle, step: &str, detail: &str) {

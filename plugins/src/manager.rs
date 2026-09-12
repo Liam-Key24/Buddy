@@ -164,6 +164,10 @@ impl PluginSurface {
     pub fn route(&self, text: &str) -> buddy_core::Route {
         buddy_core::route(text, &self.specs)
     }
+
+    pub fn route_kind(&self, text: &str) -> buddy_core::RouteKind {
+        buddy_core::route_kind(text, &self.specs)
+    }
 }
 
 fn collect_resolved_specs(
