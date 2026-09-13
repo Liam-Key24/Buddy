@@ -23,6 +23,27 @@ Intent = Literal[
     "spark_dismiss",
 ]
 
+AnswerType = Literal[
+    "short_text",
+    "number",
+    "date",
+    "time",
+    "single_choice",
+    "multiple_choice",
+    "yes_no",
+]
+
+
+class ClarificationQuestion(BaseModel):
+    id: str
+    label: str
+    help_text: str | None = None
+    answer_type: AnswerType = "short_text"
+    required: bool = True
+    options: list[str] = Field(default_factory=list)
+    suggested_answer: str | None = None
+    reason: str | None = None
+
 
 class Goal(BaseModel):
     id: str
@@ -100,6 +121,7 @@ class BuddyTurn(BaseModel):
     intents: list[Intent] = Field(default_factory=lambda: ["chat"])
     goal_updates: list[GoalUpdate] = Field(default_factory=list)
     clarification: str | None = None
+    clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
     requested_action: RequestedAction | None = None
     confidence: float = 0.5
 
@@ -120,6 +142,10 @@ class ChatResponse(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
     ai_available: bool = True
     proposal_summary: dict[str, Any] | None = None
+    clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
+    activity: list[dict[str, Any]] = Field(default_factory=list)
+    undo_batch_id: str | None = None
+    request_id: str | None = None
 
 
 class TodayResponse(BaseModel):
@@ -133,8 +159,9 @@ class TodayResponse(BaseModel):
 
 class ProposalDecision(BaseModel):
     batch_id: str
-    decision: Literal["approve", "reject", "adjust"]
+    decision: Literal["approve", "reject", "adjust", "undo"]
     note: str | None = None
+    conversation_id: str | None = None
 
 
 class OutcomeRequest(BaseModel):

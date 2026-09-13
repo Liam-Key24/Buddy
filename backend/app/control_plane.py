@@ -16,9 +16,12 @@ from .db import get_connection, init_db
 from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
 from .planning import propose_for_goal
+from .conversations import ConversationStore
+from .usage import UsageStore
 from .schemas import (
     BuddyTurn,
     ChatResponse,
+    ClarificationQuestion,
     Goal,
     GoalUpdate,
     RequestedAction,
@@ -61,9 +64,12 @@ class ControlPlane:
         self.goals = GoalStore(self.conn)
         self.calendar = CalendarService(self.conn)
         self.sparks = SparkService(self.conn)
+        self.conversations = ConversationStore(self.conn)
+        self.usage = UsageStore(self.conn)
         self._ai = ai
         self._ai_owned = ai is None
         self._call_count = 0  # per-process counter for tests
+        self._active_requests: dict[str, Any] = {}
 
     def close(self) -> None:
         if self._ai_owned and self._ai is not None:
@@ -85,33 +91,50 @@ class ControlPlane:
 
     def _ensure_conversation(self, conversation_id: str | None) -> str:
         if conversation_id:
-            row = self.conn.execute(
-                "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
-            ).fetchone()
-            if row:
+            row = self.conversations.get(conversation_id)
+            if row and not row.get("deleted_at"):
                 return conversation_id
-        cid = _new_id()
-        now = _now()
-        self.conn.execute(
-            "INSERT INTO conversations (id, created_at, updated_at) VALUES (?, ?, ?)",
-            (cid, now, now),
-        )
-        self.conn.commit()
-        return cid
+        created = self.conversations.create()
+        return created["id"]
 
-    def _add_message(self, conversation_id: str, role: str, content: str) -> None:
+    def create_conversation(self) -> dict[str, Any]:
+        return self.conversations.create()
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        return self.conversations.list_active()
+
+    def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any] | None:
+        return self.conversations.rename(conversation_id, title)
+
+    def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        return self.conversations.soft_delete(conversation_id)
+
+    def restore_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        return self.conversations.restore(conversation_id)
+
+    def save_draft(self, conversation_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
+        return self.conversations.save_draft(conversation_id, draft)
+
+    def usage_today(self) -> dict[str, Any]:
+        return self.usage.today_summary()
+
+    def _add_message(self, conversation_id: str, role: str, content: str) -> str:
+        mid = _new_id()
         self.conn.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO messages (
+                id, conversation_id, role, content, created_at,
+                revision_group, revision_of, superseded
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0)
             """,
-            (_new_id(), conversation_id, role, content, _now()),
+            (mid, conversation_id, role, content, _now(), mid),
         )
         self.conn.execute(
             "UPDATE conversations SET updated_at=? WHERE id=?",
             (_now(), conversation_id),
         )
         self.conn.commit()
+        return mid
 
     def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -128,13 +151,18 @@ class ControlPlane:
 
     # --- explicit UI actions (no AI) ---
 
-    def decide_proposal(self, batch_id: str, decision: str) -> dict[str, Any]:
+    def decide_proposal(
+        self, batch_id: str, decision: str, *, conversation_id: str | None = None
+    ) -> dict[str, Any]:
         if decision == "approve":
-            booked = self.calendar.approve_batch(batch_id)
-            return {"booked": booked}
+            booked = self.calendar.approve_batch(batch_id, conversation_id=conversation_id)
+            return {"booked": booked, "undo_batch_id": batch_id if booked else None}
         if decision == "reject":
             n = self.calendar.reject_batch(batch_id)
             return {"rejected": n}
+        if decision == "undo":
+            restored = self.calendar.undo_batch(batch_id)
+            return {"undone": restored}
         return {"ok": False, "detail": "Use chat to describe an adjustment"}
 
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None):
@@ -146,6 +174,7 @@ class ControlPlane:
         text = message.strip()
         cid = self._ensure_conversation(conversation_id)
         self._add_message(cid, "user", text)
+        self.conversations.touch_title_from_first_user_message(cid, text)
 
         # Deterministic short-circuit for explicit approve/reject words when a batch is open.
         goal = self.goals.active_for_conversation(cid)
@@ -153,7 +182,7 @@ class ControlPlane:
             batch_id = self.calendar.open_proposal_batch(goal.id)
             lower = text.lower().strip()
             if batch_id and lower in {"approve", "approved", "yes approve", "looks good"}:
-                booked = self.calendar.approve_batch(batch_id)
+                booked = self.calendar.approve_batch(batch_id, conversation_id=cid)
                 reply = (
                     f"Booked {len(booked)} session(s) once each and linked them to {goal.title}. "
                     "Tell me when one is completed or missed and I'll record it."
@@ -165,6 +194,10 @@ class ControlPlane:
                     goal=self.goals.get(goal.id),
                     booked_sessions=booked,
                     ai_available=True,
+                    undo_batch_id=batch_id if booked else None,
+                    activity=[
+                        {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
+                    ],
                 )
             if batch_id and lower in {"reject", "reject those", "no thanks", "reject that"}:
                 n = self.calendar.reject_batch(batch_id)
@@ -222,8 +255,18 @@ class ControlPlane:
             open_sparks=sparks,
         )
         self._call_count += 1
-        raw = self._provider().complete_json(SYSTEM_PROMPT, payload, allow_retry=True)
         try:
+            raw = self._provider().complete_json(SYSTEM_PROMPT, payload, allow_retry=True)
+            stats = getattr(self._provider(), "last_stats", None)
+            self.usage.record(
+                conversation_id=cid,
+                model=self.settings.groq_model,
+                status="ok",
+                attempt=1 + (1 if stats and getattr(stats, "retried", False) else 0),
+                latency_ms=getattr(stats, "latency_ms", None) if stats else None,
+                tokens_prompt=getattr(stats, "tokens_prompt", None) if stats else None,
+                tokens_completion=getattr(stats, "tokens_completion", None) if stats else None,
+            )
             return parse_buddy_turn(raw)
         except Exception:
             # One repair retry for malformed structured output (counts as the allowed retry path).
@@ -232,10 +275,24 @@ class ControlPlane:
                 payload
                 + "\n\nPrevious output was invalid. Return ONLY valid BuddyTurn JSON using exact intent enums."
             )
-            raw2 = self._provider().complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
             try:
+                raw2 = self._provider().complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
+                stats = getattr(self._provider(), "last_stats", None)
+                self.usage.record(
+                    conversation_id=cid,
+                    model=self.settings.groq_model,
+                    status="ok",
+                    attempt=2,
+                    latency_ms=getattr(stats, "latency_ms", None) if stats else None,
+                )
                 return parse_buddy_turn(raw2)
             except Exception as exc:  # noqa: BLE001
+                self.usage.record(
+                    conversation_id=cid,
+                    model=self.settings.groq_model,
+                    status="malformed",
+                    attempt=2,
+                )
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
 
     def _apply_turn(self, cid: str, turn: BuddyTurn, goal: Goal | None) -> ChatResponse:
@@ -300,6 +357,9 @@ class ControlPlane:
                     "total": proposal_summary.get("total"),
                     "through": proposal_summary.get("through"),
                     "text": proposal_summary.get("text"),
+                    "why": proposal_summary.get("why") or {},
+                    "why_lines": proposal_summary.get("why_lines") or [],
+                    "goal_card": proposal_summary.get("goal_card") or {},
                     "sample": [
                         s.model_dump() if hasattr(s, "model_dump") else s
                         for s in (proposal_summary.get("sample") or [])
@@ -308,7 +368,8 @@ class ControlPlane:
         elif action.type == "approve_proposals" and goal:
             batch = action.batch_id or self.calendar.open_proposal_batch(goal.id)
             if batch:
-                booked = self.calendar.approve_batch(batch)
+                booked = self.calendar.approve_batch(batch, conversation_id=cid)
+                undo_batch_id = batch if booked else None
         elif action.type == "reject_proposals" and goal:
             batch = action.batch_id or self.calendar.open_proposal_batch(goal.id)
             if batch:
@@ -320,6 +381,25 @@ class ControlPlane:
         reply = turn.assistant_text.strip()
         if proposed and proposal_summary and proposal_summary.get("text"):
             reply = proposal_summary["text"]
+
+        activity = [
+            {"stage": "understanding", "label": "Understanding your goal", "detail": None},
+            {"stage": "calendar_read", "label": "Checking calendar availability", "detail": None},
+        ]
+        if proposed:
+            activity.append(
+                {
+                    "stage": "proposal_building",
+                    "label": "Shaping the proposal",
+                    "detail": f"Prepared {len(proposed)} sessions",
+                }
+            )
+            activity.append({"stage": "completed", "label": "Waiting for approval", "detail": "No calendar changes made"})
+        elif turn.clarification_questions:
+            activity.append({"stage": "answering", "label": "Preparing clarifying questions", "detail": None})
+            activity.append({"stage": "completed", "label": "Completed", "detail": "No calendar changes made"})
+        else:
+            activity.append({"stage": "completed", "label": "Completed", "detail": "No calendar changes made"})
 
         self._add_message(cid, "assistant", reply)
         return ChatResponse(
@@ -333,6 +413,9 @@ class ControlPlane:
             unresolved=unresolved,
             ai_available=True,
             proposal_summary=proposal_summary,
+            clarification_questions=turn.clarification_questions,
+            activity=activity,
+            undo_batch_id=locals().get("undo_batch_id"),
         )
 
     def get_today(self) -> TodayResponse:

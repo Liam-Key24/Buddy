@@ -1,10 +1,10 @@
-# Local model weights (inactive)
+# Models
 
-Buddy’s active architecture uses **Cloud AI (Groq)**, not local MLX/Qwen.
+Local Qwen/MLX weights have been removed from this project.
 
-These folders may still exist on disk until Stage 12 cleanup after Groq acceptance:
+Buddy uses **Cloud AI (Groq)** via `GROQ_API_KEY` in `backend/.env`.
 
-- `Qwen3-14B-4bit`
-- `Qwen3.5-4B-4bit`
+If you need to reclaim disk space further, empty Trash items named like:
 
-Do not wire them back into the app. Remove only after the acceptance checklist in `docs/ACCEPTANCE.md` passes, by moving them to Trash (not an unrecoverable `rm -rf` of unrelated paths).
+- `Qwen3-14B-4bit-buddy-removed-*`
+- `Qwen3.5-4B-4bit-buddy-removed-*`

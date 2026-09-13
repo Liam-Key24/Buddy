@@ -142,6 +142,44 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
     if data.get("clarification") is not None and not isinstance(data.get("clarification"), str):
         data["clarification"] = str(data["clarification"])
 
+    raw_qs = data.get("clarification_questions") or []
+    if isinstance(raw_qs, dict):
+        raw_qs = [raw_qs]
+    clean_qs = []
+    for i, q in enumerate(raw_qs[:4]):
+        if not isinstance(q, dict):
+            continue
+        label = q.get("label") or q.get("question")
+        if not label:
+            continue
+        at = str(q.get("answer_type") or "short_text").lower().replace(" ", "_")
+        if at not in {
+            "short_text",
+            "number",
+            "date",
+            "time",
+            "single_choice",
+            "multiple_choice",
+            "yes_no",
+        }:
+            at = "short_text"
+        opts = q.get("options") or []
+        if not isinstance(opts, list):
+            opts = []
+        clean_qs.append(
+            {
+                "id": str(q.get("id") or f"q{i+1}"),
+                "label": str(label),
+                "help_text": q.get("help_text"),
+                "answer_type": at,
+                "required": bool(q.get("required", True)),
+                "options": [str(o) for o in opts],
+                "suggested_answer": q.get("suggested_answer"),
+                "reason": q.get("reason"),
+            }
+        )
+    data["clarification_questions"] = clean_qs
+
     return data
 
 

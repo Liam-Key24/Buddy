@@ -391,7 +391,7 @@ class CalendarService:
         self.conn.commit()
         return sessions
 
-    def approve_batch(self, batch_id: str) -> list[SessionOut]:
+    def approve_batch(self, batch_id: str, *, conversation_id: str | None = None) -> list[SessionOut]:
         rows = self.conn.execute(
             "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'proposed'",
             (batch_id,),
@@ -400,8 +400,8 @@ class CalendarService:
             return []
         now = _now()
         booked: list[SessionOut] = []
+        session_ids: list[str] = []
         for r in rows:
-            # Duplicate prevention: skip if an identical scheduled session already exists
             dup = self.conn.execute(
                 """
                 SELECT id FROM sessions
@@ -420,13 +420,87 @@ class CalendarService:
                 (now, r["id"]),
             )
             booked.append(self._row_to_session({**dict(r), "status": "scheduled"}))
+            session_ids.append(r["id"])
         if booked and booked[0].goal_id:
             self.conn.execute(
                 "UPDATE goals SET status='active', updated_at=? WHERE id=?",
                 (now, booked[0].goal_id),
             )
+        if booked:
+            import json
+
+            self.conn.execute(
+                """
+                INSERT INTO approval_events (
+                    id, batch_id, goal_id, conversation_id, approved_at, undone_at, session_ids_json
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    _new_id(),
+                    batch_id,
+                    booked[0].goal_id,
+                    conversation_id,
+                    now,
+                    json.dumps(session_ids),
+                ),
+            )
         self.conn.commit()
         return booked
+
+    def undo_batch(self, batch_id: str) -> list[SessionOut]:
+        """Revert an approved booking without AI. Sessions return to proposed."""
+        import json
+
+        event = self.conn.execute(
+            """
+            SELECT * FROM approval_events
+            WHERE batch_id = ? AND undone_at IS NULL
+            ORDER BY approved_at DESC LIMIT 1
+            """,
+            (batch_id,),
+        ).fetchone()
+        now = _now()
+        if event:
+            ids = json.loads(event["session_ids_json"] or "[]")
+            restored: list[SessionOut] = []
+            for sid in ids:
+                row = self.conn.execute(
+                    "SELECT * FROM sessions WHERE id = ? AND status = 'scheduled'",
+                    (sid,),
+                ).fetchone()
+                if not row:
+                    continue
+                self.conn.execute(
+                    "UPDATE sessions SET status='proposed', updated_at=? WHERE id=?",
+                    (now, sid),
+                )
+                restored.append(self._row_to_session({**dict(row), "status": "proposed"}))
+            self.conn.execute(
+                "UPDATE approval_events SET undone_at=? WHERE id=?",
+                (now, event["id"]),
+            )
+            if restored and restored[0].goal_id:
+                self.conn.execute(
+                    "UPDATE goals SET status='planned', updated_at=? WHERE id=?",
+                    (now, restored[0].goal_id),
+                )
+            self.conn.commit()
+            return restored
+
+        # Fallback: any scheduled rows for this batch
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'scheduled'",
+            (batch_id,),
+        ).fetchall()
+        restored = []
+        for r in rows:
+            self.conn.execute(
+                "UPDATE sessions SET status='proposed', updated_at=? WHERE id=?",
+                (now, r["id"]),
+            )
+            restored.append(self._row_to_session({**dict(r), "status": "proposed"}))
+        self.conn.commit()
+        return restored
 
     def reject_batch(self, batch_id: str) -> int:
         now = _now()

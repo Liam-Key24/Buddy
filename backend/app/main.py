@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from .config import load_settings
 from .control_plane import ControlPlane
@@ -18,7 +21,7 @@ from .schemas import (
 )
 
 settings = load_settings()
-app = FastAPI(title="Buddy", version="0.3.0")
+app = FastAPI(title="Buddy", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -53,6 +56,7 @@ def health():
         },
         "db": str(settings.db_path),
         "host": settings.host,
+        "privacy": "Local data · Cloud reasoning",
     }
 
 
@@ -80,7 +84,9 @@ def calendar_fixed():
 
 @app.post("/calendar/proposals/decide")
 def decide_proposal(body: ProposalDecision):
-    return plane.decide_proposal(body.batch_id, body.decision)
+    return plane.decide_proposal(
+        body.batch_id, body.decision, conversation_id=body.conversation_id
+    )
 
 
 @app.post("/calendar/sessions/outcome")
@@ -125,9 +131,64 @@ def dismiss_spark(spark_id: str):
     return spark
 
 
+class ConversationRename(BaseModel):
+    title: str
+
+
+class DraftBody(BaseModel):
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/conversations")
+def list_conversations():
+    return plane.list_conversations()
+
+
+@app.post("/conversations")
+def create_conversation():
+    return plane.create_conversation()
+
+
+@app.patch("/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, body: ConversationRename):
+    row = plane.rename_conversation(conversation_id, body.title)
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str):
+    row = plane.delete_conversation(conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
+
+
+@app.post("/conversations/{conversation_id}/restore")
+def restore_conversation(conversation_id: str):
+    row = plane.restore_conversation(conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
+
+
+@app.put("/conversations/{conversation_id}/draft")
+def save_draft(conversation_id: str, body: DraftBody):
+    row = plane.save_draft(conversation_id, body.draft)
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
+
+
 @app.get("/conversations/{conversation_id}/messages")
 def messages(conversation_id: str):
     return plane.list_messages(conversation_id)
+
+
+@app.get("/ai/usage")
+def ai_usage():
+    return plane.usage_today()
 
 
 @app.get("/goals/{goal_id}")
