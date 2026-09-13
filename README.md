@@ -67,4 +67,4 @@ Buddy v1 user data may still exist at:
 
 It is preserved until migration or deletion is explicitly agreed.
 
-Local Qwen/MLX weights under `brain/models/` are no longer part of the active architecture; remove them only after Groq acceptance passes.
+Local Qwen/MLX weights under `brain/models/` have been removed from the project (moved to Trash). Buddy uses Cloud AI (Groq) only.
