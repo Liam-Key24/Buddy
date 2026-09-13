@@ -32,6 +32,51 @@ export type Spark = {
   created_at: string;
 };
 
+export type ClarificationQuestion = {
+  id: string;
+  label: string;
+  help_text?: string | null;
+  answer_type: string;
+  required: boolean;
+  options: string[];
+  suggested_answer?: string | null;
+  reason?: string | null;
+};
+
+export type ActivityStep = {
+  stage: string;
+  label: string;
+  detail?: string | null;
+};
+
+export type Conversation = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at?: string | null;
+  draft?: Record<string, unknown>;
+};
+
+export type ProposalSummary = {
+  pattern?: string | null;
+  total?: number;
+  through?: string | null;
+  text?: string;
+  sample?: Session[];
+  why?: Record<string, unknown>;
+  why_lines?: string[];
+  goal_card?: {
+    title?: string;
+    outcome?: string | null;
+    baseline?: string | null;
+    deadline?: string | null;
+    frequency?: string | null;
+    strategy?: string | null;
+    realistic_note?: string;
+  };
+};
+
 export type ChatResponse = {
   conversation_id: string;
   reply: string;
@@ -42,13 +87,10 @@ export type ChatResponse = {
   sparks?: Spark[];
   unresolved?: string[];
   ai_available?: boolean;
-  proposal_summary?: {
-    pattern?: string | null;
-    total?: number;
-    through?: string | null;
-    text?: string;
-    sample?: Session[];
-  } | null;
+  proposal_summary?: ProposalSummary | null;
+  clarification_questions?: ClarificationQuestion[];
+  activity?: ActivityStep[];
+  undo_batch_id?: string | null;
 };
 
 export type TodayResponse = {
@@ -68,6 +110,15 @@ export type TodayResponse = {
   resurfaced_spark?: Spark | null;
 };
 
+export type UsageSummary = {
+  used: number;
+  limit: number;
+  remaining: number;
+  reset?: string | null;
+  source: string;
+  label: string;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
 async function json<T>(res: Response): Promise<T> {
@@ -78,6 +129,7 @@ async function json<T>(res: Response): Promise<T> {
 export async function sendChat(
   message: string,
   conversationId?: string | null,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -86,6 +138,7 @@ export async function sendChat(
       message,
       conversation_id: conversationId || null,
     }),
+    signal,
   });
   return json(res);
 }
@@ -106,13 +159,18 @@ export async function fetchFixedBlocks(): Promise<
 
 export async function decideProposal(
   batchId: string,
-  decision: "approve" | "reject" | "adjust",
-): Promise<{ booked?: Session[]; rejected?: number }> {
+  decision: "approve" | "reject" | "adjust" | "undo",
+  conversationId?: string | null,
+): Promise<{ booked?: Session[]; rejected?: number; undone?: Session[]; undo_batch_id?: string }> {
   return json(
     await fetch(`${API_BASE}/calendar/proposals/decide`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batch_id: batchId, decision }),
+      body: JSON.stringify({
+        batch_id: batchId,
+        decision,
+        conversation_id: conversationId || null,
+      }),
     }),
   );
 }
@@ -134,6 +192,49 @@ export async function fetchMessages(
   conversationId: string,
 ): Promise<Array<{ role: string; content: string }>> {
   return json(await fetch(`${API_BASE}/conversations/${conversationId}/messages`));
+}
+
+export async function listConversations(): Promise<Conversation[]> {
+  return json(await fetch(`${API_BASE}/conversations`));
+}
+
+export async function createConversation(): Promise<Conversation> {
+  return json(await fetch(`${API_BASE}/conversations`, { method: "POST" }));
+}
+
+export async function renameConversation(id: string, title: string): Promise<Conversation> {
+  return json(
+    await fetch(`${API_BASE}/conversations/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
+export async function deleteConversation(id: string): Promise<Conversation> {
+  return json(await fetch(`${API_BASE}/conversations/${id}`, { method: "DELETE" }));
+}
+
+export async function restoreConversation(id: string): Promise<Conversation> {
+  return json(await fetch(`${API_BASE}/conversations/${id}/restore`, { method: "POST" }));
+}
+
+export async function saveDraft(
+  id: string,
+  draft: Record<string, unknown>,
+): Promise<Conversation> {
+  return json(
+    await fetch(`${API_BASE}/conversations/${id}/draft`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft }),
+    }),
+  );
+}
+
+export async function fetchUsage(): Promise<UsageSummary> {
+  return json(await fetch(`${API_BASE}/ai/usage`));
 }
 
 export async function fetchSparks(): Promise<Spark[]> {
