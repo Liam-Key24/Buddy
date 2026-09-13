@@ -9,6 +9,7 @@ venv/
 dist/
 frontend/dist/
 target/
+src-tauri/target/
 target-debug-tmp/
 __pycache__/
 *.pyc
@@ -16,8 +17,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+*.tsbuildinfo
 .build/
 .swiftpm/
+src-tauri/sidecars/buddy-backend-*
 
 # Models (never commit weights)
 brain/models/**
@@ -47,3 +50,4 @@ models/
 # Hugging Face / MLX accidental caches inside the repo
 .cache/
 huggingface/
+*.tsbuildinfo
