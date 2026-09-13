@@ -1,13 +1,47 @@
-.DS_Store
-target/
+# Dependencies
 node_modules/
+frontend/node_modules/
+backend/.venv/
+.venv/
+venv/
+
+# Build / cache
 dist/
-brain/venv/
-brain/models/
-.env
-*.db
-*.db-journal
-.vscode/
-.idea/
+frontend/dist/
+target/
+target-debug-tmp/
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.build/
+.swiftpm/
+
+# Models (never commit weights)
+brain/models/
+models/
+*.safetensors
+*.gguf
+*.bin
+
+# Local databases and secrets
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+
+# Logs and OS noise
+*.log
+.DS_Store
+.cursor/*.log
+.vscode/
+.idea/
+
+# Hugging Face / MLX accidental caches inside the repo
+.cache/
+huggingface/

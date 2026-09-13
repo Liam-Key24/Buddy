@@ -1,120 +1,51 @@
 # Buddy
 
-A lightweight, local-first AI desktop assistant for macOS.
+Buddy turns unclear goals into realistic actions in its calendar, tracks what actually happens, and helps adjust the plan through natural conversation, with the user retaining final control.
 
-Chat is the mouth. A local model (MLX) decides when to use tools. Rust runs them.
-Calendar is the deepest capability: **look**, **pin**, **organize**.
+## Experience
 
-```text
-                UI  (Chat · Calendar · Spark · Code · Settings)
-                 |
-              Buddy  (route + native tool loop)
-                 |
-    --------------------------------
-    |              |               |
- Memory          Brain            Core
-                   |               |
-              /v1/complete    Plugin tools
-                              look · pin · organize
-                              fs · spark · coder · …
-```
+Four primary destinations:
 
-## Turn flow
+- **Today** — agreed sessions, active goals, items needing attention
+- **Chat** — natural discussion that owns goal intake
+- **Calendar** — fixed, flexible, proposed, completed, and missed sessions
+- **Sparks** — ideas without turning them into commitments
 
-Composer is **one Buddy**. Canonical syntax and plugin extract skip the model.
-Messy language, dumps, and multi-intent go to Qwen. Llama may answer short chitchat
-only when Qwen is not already loaded — the user never picks a model.
+## Stack
 
-```text
-User → Memory context (soft-fail)
-     → confirm/cancel open proposal
-     → canonical syntax / plugin extract → clarify → Core → phrase
-     → else Qwen native loop (max 8 steps, life tools attached)
-           ├── tool_calls → clarify → Core → continue
-           ├── ask / propose → wait for radios or “yes”
-           └── text reply → Personality → UI
-     → matching workspace opens (doc, week, fitness, …)
-```
+- `frontend/` — React, TypeScript, Vite, FullCalendar
+- `backend/` — FastAPI, SQLite, one MLX model integration
+- `brain/models/` — local model weights (gitignored)
 
-Organize always **proposes** first (ghost week). Confirm with `yes` / Accept.
-Clarification asks only for missing required fields. Personality only styles tone.
+One frontend, one backend, one database, one model.
 
-## Calendar
+## Models
 
-| Kind | Examples | Tool |
-|---|---|---|
-| **Look** | What’s on today? When am I free tomorrow? | `calendar.look` |
-| **Pin** | Dentist tomorrow at 2pm | `calendar.pin` (fixed clock) |
-| **Organize** | Book climbing this week; plan my week… | `calendar.organize` (flexible) |
+Preserved on disk (not in Git):
 
-Work / Sleep lifestyle blocks are protected. The organizer schedules around them.
+- `brain/models/Qwen3-14B-4bit` — Buddy v1 model, keep until Qwen3.5 acceptance passes
+- Intended replacement: compatible 4-bit MLX `Qwen3.5-4B` stored under `brain/models/`
 
-Parser goldens: `cd brain && ./venv/bin/python test_parser_calendar.py`  
-Hold-out paraphrases: `cd brain && ./venv/bin/python evals/run_holdout.py`
-
-## Responsibilities
-
-| System | Owns |
-|---|---|
-| **Buddy** | One front door: canonical route → clarify → Core; else Qwen (`orchestrator.rs`, `native_loop.rs`) |
-| **Brain** | `/v1/complete` tool calls; `/chat/talk` hidden chat stream; `/chat/plan` eval-only |
-| **Clarification** | Schema gaps, radio asks |
-| **Personality** | Tone / phrasing (never truncates meaning) |
-| **Core** | Registry, TaskRunner |
-| **Plugins** | Tools + schemas + catalog |
-| **Memory** | Context, pending jobs, last-look, handover |
-
-Adding a plugin: implement `Tool` (+ `ToolSchema`), register in `all_builtin_plugins`. Do not put domain logic in the orchestrator.
-
-## Prerequisites
-
-- macOS (Apple Silicon recommended)
-- Rust, Node 18+, Python 3.10+
-
-## Setup
+## Development
 
 ```bash
-cd app && npm install
-python3 -m venv brain/venv && source brain/venv/bin/activate
-pip install -r brain/requirements.txt
+# Backend
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8787
+
+# Frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-## Run (dev)
+## Personal data
 
-```bash
-cd app && npm run tauri dev
-```
+Buddy v1 user data lives outside this repo at:
 
-Brain (`:8002`) starts on launch. MLX (`:8001`) starts when a turn needs a model
-(canonical look / extract skip it) and idles off after ~90s unless **Settings → Keep
-model loaded after chat** is on.
+`~/Library/Application Support/com.liamgk.buddy/`
 
-```bash
-./brain/scripts/download_qwen14b.sh   # ~8 GB, resume-safe (16 GB Macs)
-./brain/scripts/start_mlx.sh          # optional manual start
-```
-
-The assistant is Qwen3-14B-4bit (`brain/models/Qwen3-14B-4bit` when the shards
-are complete). Llama 3.2 3B may answer short chitchat if Qwen is not resident.
-30B-A3B-4bit does not fit a 16 GB Air.
-
-## Desktop build
-
-```bash
-cd app && npm run tauri build
-```
-
-App: `target/release/bundle/macos/Buddy.app`
-
-Set `BUDDY_PROJECT_ROOT` if you move the `.app` away from the repo.
-
-## Testing
-
-```bash
-cargo test -p buddy-core -p buddy-clarification -p buddy-personality -p buddy-plugins
-cargo test -p buddy-calendar
-cargo test -p buddy-app --lib
-cd app && npm test
-cd brain && ./venv/bin/python test_parser_calendar.py
-cd brain && ./venv/bin/python evals/run_holdout.py
-```
+It is preserved until migration or deletion is explicitly agreed.

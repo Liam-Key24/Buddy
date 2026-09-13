@@ -1,3 +1,0 @@
-{"id":"coder_1","message":"implement a dark mode toggle in the settings page","expect_intent":"tool_use","expect_tool":"coder.run"}
-{"id":"coder_2","message":"debug why the chat store isn't updating","expect_intent":"tool_use","expect_tool":"coder.run"}
-{"id":"coder_3","message":"help me refactor the orchestrator loop","expect_intent":"tool_use","expect_tool":"coder.run"}
