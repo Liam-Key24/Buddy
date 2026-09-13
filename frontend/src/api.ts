@@ -42,6 +42,13 @@ export type ChatResponse = {
   sparks?: Spark[];
   unresolved?: string[];
   ai_available?: boolean;
+  proposal_summary?: {
+    pattern?: string | null;
+    total?: number;
+    through?: string | null;
+    text?: string;
+    sample?: Session[];
+  } | null;
 };
 
 export type TodayResponse = {

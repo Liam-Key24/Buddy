@@ -22,13 +22,22 @@ def frequency_to_weekly_count(frequency: str | None, commitment: str | None = No
     text = f"{commitment or ''} {frequency or ''}".lower()
     if "every day" in text or "daily" in text:
         return 7
-    m = re.search(r"(\d+)\s+times?\s+(?:a|per)\s+week", text)
+    # Ranges like 3-4 → prefer the higher end when planning capacity
+    m_range = re.search(r"(\d+)\s*[-–]\s*(\d+)", text)
+    if m_range:
+        return max(1, int(m_range.group(2)))
+    m = re.search(r"(\d+)\s*(?:x|×|times?)\s*(?:a|per)?\s*week", text)
+    if m:
+        return max(1, int(m.group(1)))
+    m = re.search(r"(\d+)\s+per\s+week", text)
     if m:
         return max(1, int(m.group(1)))
     if "twice" in text or "two times" in text:
         return 2
     if "once" in text or "one time" in text:
         return 1
+    if "four" in text:
+        return 4
     if "three" in text:
         return 3
     return 2
@@ -157,9 +166,42 @@ class CalendarService:
             day += timedelta(days=1)
         return slots
 
+    def _slot_on_day(
+        self,
+        day: date,
+        *,
+        duration_minutes: int,
+        prefer_hour: int,
+        prefer_minute: int,
+        window_start_hour: int = 17,
+        window_end_hour: int = 21,
+    ) -> tuple[datetime, datetime] | None:
+        """Place one session on a day near the preferred time, within the evening window."""
+        busy = self._busy_intervals(day)
+        preferred = datetime(day.year, day.month, day.day, prefer_hour, prefer_minute)
+        window_start = datetime(day.year, day.month, day.day, window_start_hour, 0)
+        window_end = datetime(day.year, day.month, day.day, window_end_hour, 0)
+        # Try preferred, then step forward, then earlier within the window.
+        candidates: list[datetime] = [preferred]
+        cursor = preferred + timedelta(minutes=30)
+        while cursor + timedelta(minutes=duration_minutes) <= window_end:
+            candidates.append(cursor)
+            cursor += timedelta(minutes=30)
+        cursor = preferred - timedelta(minutes=30)
+        while cursor >= window_start:
+            candidates.append(cursor)
+            cursor -= timedelta(minutes=30)
+        for start in candidates:
+            end = start + timedelta(minutes=duration_minutes)
+            if start < window_start or end > window_end:
+                continue
+            if any(_overlaps(start, end, b0, b1) for b0, b1 in busy):
+                continue
+            return start, end
+        return None
+
     def propose_goal_sessions(self, goal: Any, *, weeks: int | None = None) -> list[SessionOut]:
         """Create dated proposed sessions from real availability. Replaces open proposals for the goal."""
-        # Drop previous open proposals for this goal (re-propose cleanly).
         self.conn.execute(
             """
             DELETE FROM sessions
@@ -168,37 +210,51 @@ class CalendarService:
             (goal.id,),
         )
 
-        weekly = frequency_to_weekly_count(goal.frequency, goal.commitment)
-        duration = session_duration_minutes(goal.domain)
         today = datetime.now().date()
-        # start from tomorrow so proposals are actionable upcoming sessions
         start_day = today + timedelta(days=1)
         end_day = _parse_deadline_end(goal.deadline)
         if weeks:
             end_day = min(end_day, today + timedelta(weeks=weeks))
-        # Cap proposal horizon to 4 weeks for readable approval batches
-        end_day = min(end_day, today + timedelta(weeks=4))
 
+        plan = (getattr(goal, "facts", None) or {}).get("weekly_plan")
+        if isinstance(plan, dict) and isinstance(plan.get("slots"), list) and plan["slots"]:
+            sessions = self._propose_from_weekly_plan(goal, plan, start_day, end_day)
+            self.conn.commit()
+            return sessions
+
+        # Generic path (no structured weekly plan): keep a short approval horizon.
+        end_day = min(end_day, today + timedelta(weeks=4))
+        weekly = frequency_to_weekly_count(goal.frequency, goal.commitment)
+        duration = session_duration_minutes(goal.domain)
         needed = weekly * max(1, ((end_day - start_day).days // 7) + 1)
         needed = min(needed, weekly * 4)
+
+        prefer_after = 17
+        facts = getattr(goal, "facts", None) or {}
+        if isinstance(facts.get("prefer_after_hour"), int):
+            prefer_after = max(0, min(22, int(facts["prefer_after_hour"])))
 
         free = self.find_free_slots(
             start_day=start_day,
             end_day=end_day,
             duration_minutes=duration,
+            prefer_hours=(prefer_after, 21),
             limit=needed * 3,
         )
-        # Spread across weeks: take up to `weekly` per week.
+        avoid = set()
+        if isinstance(facts.get("avoid_weekdays"), list):
+            avoid = {int(x) for x in facts["avoid_weekdays"] if isinstance(x, int)}
+
         chosen: list[tuple[datetime, datetime]] = []
         per_week: dict[str, int] = {}
         for slot in free:
+            if slot[0].weekday() in avoid:
+                continue
             key = slot[0].strftime("%G-W%V")
             if per_week.get(key, 0) >= weekly:
                 continue
-            # Conflict / duplicate prevention against already chosen
             if any(_overlaps(slot[0], slot[1], c0, c1) for c0, c1 in chosen):
                 continue
-            # Duplicate prevention vs already scheduled for this goal at same start
             exists = self.conn.execute(
                 """
                 SELECT id FROM sessions
@@ -213,11 +269,65 @@ class CalendarService:
             if len(chosen) >= needed:
                 break
 
+        return self._insert_proposed(goal, chosen, title_for=lambda _s, _e: goal.title)
+
+    def _propose_from_weekly_plan(
+        self,
+        goal: Any,
+        plan: dict[str, Any],
+        start_day: date,
+        end_day: date,
+    ) -> list[SessionOut]:
+        slots = [s for s in plan.get("slots", []) if isinstance(s, dict)]
+        avoid = set()
+        if isinstance(plan.get("avoid_weekdays"), list):
+            avoid = {int(x) for x in plan["avoid_weekdays"] if isinstance(x, int)}
+        window_start = int(plan.get("prefer_after_hour", 17))
+        window_end = int(plan.get("window_end_hour", 21))
+
+        chosen: list[tuple[datetime, datetime, str]] = []
+        day = start_day
+        while day <= end_day:
+            if day.weekday() in avoid:
+                day += timedelta(days=1)
+                continue
+            for spec in slots:
+                wd = spec.get("weekday")
+                if not isinstance(wd, int) or wd != day.weekday():
+                    continue
+                title = str(spec.get("title") or goal.title).strip() or goal.title
+                duration = int(spec.get("duration_minutes") or session_duration_minutes(goal.domain))
+                prefer_hour = int(spec.get("start_hour", window_start))
+                prefer_minute = int(spec.get("start_minute", 30))
+                placed = self._slot_on_day(
+                    day,
+                    duration_minutes=duration,
+                    prefer_hour=prefer_hour,
+                    prefer_minute=prefer_minute,
+                    window_start_hour=min(window_start, prefer_hour),
+                    window_end_hour=window_end,
+                )
+                if not placed:
+                    continue
+                start, end = placed
+                exists = self.conn.execute(
+                    """
+                    SELECT id FROM sessions
+                    WHERE goal_id = ? AND start_at = ? AND status IN ('scheduled', 'proposed', 'completed')
+                    """,
+                    (goal.id, start.isoformat()),
+                ).fetchone()
+                if exists:
+                    continue
+                if any(_overlaps(start, end, c0, c1) for c0, c1, _t in chosen):
+                    continue
+                chosen.append((start, end, title))
+            day += timedelta(days=1)
+
         batch_id = _new_id()
         now = _now()
         sessions: list[SessionOut] = []
-        title = goal.title
-        for start, end in chosen:
+        for start, end, title in chosen:
             sid = _new_id()
             self.conn.execute(
                 """
@@ -226,16 +336,44 @@ class CalendarService:
                     proposal_batch_id, notes, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?)
                 """,
-                (
-                    sid,
-                    goal.id,
-                    title,
-                    start.isoformat(),
-                    end.isoformat(),
-                    batch_id,
-                    now,
-                    now,
-                ),
+                (sid, goal.id, title, start.isoformat(), end.isoformat(), batch_id, now, now),
+            )
+            sessions.append(
+                SessionOut(
+                    id=sid,
+                    goal_id=goal.id,
+                    title=title,
+                    start_at=start.isoformat(),
+                    end_at=end.isoformat(),
+                    kind="flexible",
+                    status="proposed",
+                    proposal_batch_id=batch_id,
+                    notes=None,
+                )
+            )
+        return sessions
+
+    def _insert_proposed(
+        self,
+        goal: Any,
+        chosen: list[tuple[datetime, datetime]],
+        *,
+        title_for,
+    ) -> list[SessionOut]:
+        batch_id = _new_id()
+        now = _now()
+        sessions: list[SessionOut] = []
+        for start, end in chosen:
+            sid = _new_id()
+            title = title_for(start, end)
+            self.conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, goal_id, title, start_at, end_at, kind, status,
+                    proposal_batch_id, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?)
+                """,
+                (sid, goal.id, title, start.isoformat(), end.isoformat(), batch_id, now, now),
             )
             sessions.append(
                 SessionOut(

@@ -26,6 +26,12 @@ export function ChatPage() {
   );
   const [goal, setGoal] = useState<Goal | null>(null);
   const [proposals, setProposals] = useState<Session[]>([]);
+  const [proposalSummary, setProposalSummary] = useState<{
+    pattern?: string | null;
+    total?: number;
+    through?: string | null;
+    sample?: Session[];
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -63,9 +69,14 @@ export function ChatPage() {
       setConversationId(res.conversation_id);
       localStorage.setItem(STORAGE_KEY, res.conversation_id);
       setGoal(res.goal);
-      if (res.proposed_sessions?.length) setProposals(res.proposed_sessions);
-      if (res.booked_sessions?.length) setProposals([]);
-      setMessages((m) => [...m, { role: "assistant", content: res.reply }]);
+      if (res.proposed_sessions?.length) {
+        setProposals(res.proposed_sessions);
+        setProposalSummary(res.proposal_summary ?? null);
+      }
+      if (res.booked_sessions?.length) {
+        setProposals([]);
+        setProposalSummary(null);
+      }      setMessages((m) => [...m, { role: "assistant", content: res.reply }]);
       if (res.ai_available === false) {
         setError("Cloud AI is temporarily unavailable. Today, Calendar and Sparks still work.");
       }
@@ -101,6 +112,7 @@ export function ChatPage() {
       if (decision === "approve") {
         const n = res.booked?.length ?? 0;
         setProposals([]);
+        setProposalSummary(null);
         setMessages((m) => [
           ...m,
           {
@@ -110,6 +122,7 @@ export function ChatPage() {
         ]);
       } else {
         setProposals([]);
+        setProposalSummary(null);
         setMessages((m) => [
           ...m,
           {
@@ -151,9 +164,24 @@ export function ChatPage() {
         )}
         {!!proposals.length && (
           <div className="proposal-card">
-            <h2 style={{ margin: "0 0 0.55rem", fontSize: "0.95rem" }}>Proposed sessions</h2>
+            <h2 style={{ margin: "0 0 0.55rem", fontSize: "0.95rem" }}>Proposed plan</h2>
+            {proposalSummary?.pattern && (
+              <p style={{ margin: "0 0 0.65rem" }}>
+                <strong>Weekly rhythm:</strong> {proposalSummary.pattern}
+              </p>
+            )}
+            <p className="muted" style={{ margin: "0 0 0.55rem" }}>
+              First week preview
+              {proposalSummary?.through
+                ? ` · then repeats through ${proposalSummary.through}`
+                : ""}
+              {proposalSummary?.total ? ` · ${proposalSummary.total} sessions total` : ""}
+            </p>
             <ul className="list">
-              {proposals.map((s) => (
+              {(proposalSummary?.sample?.length
+                ? proposalSummary.sample
+                : proposals.slice(0, 7)
+              ).map((s) => (
                 <li key={s.id}>
                   {formatSessionWhen(s)} · {s.title}
                 </li>

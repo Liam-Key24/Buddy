@@ -284,13 +284,27 @@ class ControlPlane:
                     self.sparks.promote(turn.requested_action.spark_id, goal.id)
 
         action = turn.requested_action or RequestedAction()
+        proposal_summary = None
         if action.type == "propose_sessions" and goal:
             if goal.status == "gathering" and not (goal.frequency or goal.commitment):
                 # Don't propose without a workable cadence — ask instead
                 pass
             else:
-                _, proposed = propose_for_goal(self.calendar, goal)
+                reply_text, proposed, proposal_summary = propose_for_goal(self.calendar, goal)
                 self.goals.save(goal)
+                # Deterministic proposal copy so titles/pattern match the calendar, not AI drift.
+                turn.assistant_text = reply_text
+                # JSON-safe summary for the UI (sample sessions as plain dicts).
+                proposal_summary = {
+                    "pattern": proposal_summary.get("pattern"),
+                    "total": proposal_summary.get("total"),
+                    "through": proposal_summary.get("through"),
+                    "text": proposal_summary.get("text"),
+                    "sample": [
+                        s.model_dump() if hasattr(s, "model_dump") else s
+                        for s in (proposal_summary.get("sample") or [])
+                    ],
+                }
         elif action.type == "approve_proposals" and goal:
             batch = action.batch_id or self.calendar.open_proposal_batch(goal.id)
             if batch:
@@ -304,20 +318,21 @@ class ControlPlane:
             self.calendar.mark_outcome(action.session_id, action.outcome)
 
         reply = turn.assistant_text.strip()
-        if proposed and "propose" not in reply.lower() and "session" not in reply.lower():
-            reply = reply + "\n\n" + f"Proposed {len(proposed)} session(s) for your approval."
+        if proposed and proposal_summary and proposal_summary.get("text"):
+            reply = proposal_summary["text"]
 
         self._add_message(cid, "assistant", reply)
         return ChatResponse(
             conversation_id=cid,
             reply=reply,
             goal=goal,
-            pending_question=turn.clarification,
+            pending_question=turn.clarification if not proposed else "Approve or reject these proposed sessions?",
             proposed_sessions=proposed,
             booked_sessions=booked,
             sparks=captured,
             unresolved=unresolved,
             ai_available=True,
+            proposal_summary=proposal_summary,
         )
 
     def get_today(self) -> TodayResponse:

@@ -119,6 +119,7 @@ class ChatResponse(BaseModel):
     sparks: list[Spark] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
     ai_available: bool = True
+    proposal_summary: dict[str, Any] | None = None
 
 
 class TodayResponse(BaseModel):
