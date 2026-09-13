@@ -20,11 +20,13 @@ __pycache__/
 .swiftpm/
 
 # Models (never commit weights)
-brain/models/
+brain/models/**
+!brain/models/README.md
 models/
 *.safetensors
 *.gguf
 *.bin
+# Keep model path docs only if added outside weights dirs
 
 # Local databases and secrets
 *.db
