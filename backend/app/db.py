@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
+
+from .migrations import run_migrations
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "buddy.db"
 
 
+def resolve_db_path(db_path: Path | None = None) -> Path:
+    if db_path is not None:
+        return db_path
+    env = os.environ.get("BUDDY_DB_PATH", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return DEFAULT_DB_PATH
+
+
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
-    path = db_path or DEFAULT_DB_PATH
+    path = resolve_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -99,6 +111,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    run_migrations(conn)
     _seed_default_fixed_blocks(conn)
 
 
@@ -106,7 +119,6 @@ def _seed_default_fixed_blocks(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT COUNT(*) AS c FROM fixed_blocks").fetchone()
     if row and row["c"] > 0:
         return
-    # Weekday work + nightly sleep as protected fixed commitments.
     import uuid
     from datetime import datetime, timezone
 

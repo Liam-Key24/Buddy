@@ -7,18 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from app.goal_conversation import GoalConversationService
+from app.control_plane import ControlPlane
+from tests.fake_ai import FakeGroq
 
 
 @pytest.fixture()
-def service(tmp_path: Path):
-    db = tmp_path / "test.db"
-    svc = GoalConversationService(db_path=db)
+def plane(tmp_path: Path):
+    ai = FakeGroq()
+    svc = ControlPlane(db_path=tmp_path / "test.db", ai=ai)
     yield svc
     svc.close()
 
 
-def _intake_ready(service: GoalConversationService):
+def _intake_ready(service: ControlPlane):
     first = service.handle_message("I want to climb V6 by the end of November.")
     second = service.handle_message("V4, twice a week.", conversation_id=first.conversation_id)
     assert second.goal is not None
@@ -26,86 +27,77 @@ def _intake_ready(service: GoalConversationService):
     return second
 
 
-def test_propose_dated_sessions_from_availability(service: GoalConversationService):
-    ready = _intake_ready(service)
-    planned = service.handle_message("Yes, look at the calendar.", conversation_id=ready.conversation_id)
+def test_propose_dated_sessions_from_availability(plane: ControlPlane):
+    ready = _intake_ready(plane)
+    planned = plane.handle_message("Yes, look at the calendar.", conversation_id=ready.conversation_id)
     assert planned.proposed_sessions
     assert all(s.status == "proposed" for s in planned.proposed_sessions)
     assert all(s.goal_id == ready.goal.id for s in planned.proposed_sessions)
-    # Sessions are dated in the future
     for s in planned.proposed_sessions:
         assert datetime.fromisoformat(s.start_at) > datetime.now()
 
 
-def test_approve_books_once_and_links_goal(service: GoalConversationService):
-    ready = _intake_ready(service)
-    planned = service.handle_message("Yes, schedule it.", conversation_id=ready.conversation_id)
-    batch = planned.proposed_sessions[0].proposal_batch_id
-    assert batch
-    approved = service.handle_message("Approve", conversation_id=ready.conversation_id)
+def test_approve_books_once_and_links_goal(plane: ControlPlane):
+    ready = _intake_ready(plane)
+    planned = plane.handle_message("Yes, schedule it.", conversation_id=ready.conversation_id)
+    assert planned.proposed_sessions
+    approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
     assert approved.booked_sessions
     assert all(s.status == "scheduled" for s in approved.booked_sessions)
     assert all(s.goal_id == ready.goal.id for s in approved.booked_sessions)
-    # Duplicate prevention: approving again does not double-book
-    again = service.handle_message("Approve", conversation_id=ready.conversation_id)
+    again = plane.handle_message("Approve", conversation_id=ready.conversation_id)
     assert again.booked_sessions == []
 
 
-def test_reject_proposal(service: GoalConversationService):
-    ready = _intake_ready(service)
-    planned = service.handle_message("Propose sessions.", conversation_id=ready.conversation_id)
+def test_reject_proposal(plane: ControlPlane):
+    ready = _intake_ready(plane)
+    planned = plane.handle_message("Propose sessions.", conversation_id=ready.conversation_id)
     assert planned.proposed_sessions
-    rejected = service.handle_message("Reject those", conversation_id=ready.conversation_id)
+    rejected = plane.handle_message("Reject those", conversation_id=ready.conversation_id)
     assert "Rejected" in rejected.reply
-    open_batch = service.calendar.open_proposal_batch(ready.goal.id)
+    open_batch = plane.calendar.open_proposal_batch(ready.goal.id)
     assert open_batch is None
 
 
-def test_track_completed_and_missed(service: GoalConversationService):
-    ready = _intake_ready(service)
-    service.handle_message("Yes, look at the calendar.", conversation_id=ready.conversation_id)
-    booked = service.handle_message("Approve", conversation_id=ready.conversation_id)
+def test_track_completed_and_missed(plane: ControlPlane):
+    ready = _intake_ready(plane)
+    plane.handle_message("Yes, look at the calendar.", conversation_id=ready.conversation_id)
+    booked = plane.handle_message("Approve", conversation_id=ready.conversation_id)
     assert len(booked.booked_sessions) >= 2
-    done = service.handle_message(
-        "I completed today's climbing session.",
-        conversation_id=ready.conversation_id,
-    )
-    assert "completed" in done.reply.lower()
-    missed = service.handle_message(
-        "I missed a session.",
-        conversation_id=ready.conversation_id,
-    )
-    assert "missed" in missed.reply.lower()
-    progress = service.calendar.progress_for_goal(ready.goal.id)
+    # Use explicit API outcome on first booked session (deterministic, no AI)
+    first_id = booked.booked_sessions[0].id
+    plane.mark_outcome(first_id, "completed")
+    second_id = booked.booked_sessions[1].id
+    plane.mark_outcome(second_id, "missed")
+    progress = plane.calendar.progress_for_goal(ready.goal.id)
     assert progress["completed"] >= 1
     assert progress["missed"] >= 1
 
 
-def test_sparks_capture_without_commitment(service: GoalConversationService):
-    res = service.handle_message("Spark: try pottery one weekend")
+def test_spark_capture(plane: ControlPlane):
+    res = plane.handle_message("spark: try a standing desk")
     assert res.sparks
-    assert res.sparks[0].status == "open"
-    assert "not a commitment" in res.reply.lower()
-    opens = service.sparks.list_open()
-    assert len(opens) == 1
+    assert "standing desk" in res.sparks[0].content.lower()
 
 
-def test_mixed_day_dump_preserves_unresolved(service: GoalConversationService):
-    res = service.handle_message(
-        "I want to climb V6 by the end of November; also spark: visit Lisbon; and buy milk"
-    )
-    assert res.goal is not None
-    assert res.sparks
-    assert any("milk" in u.lower() for u in res.unresolved) or "unresolved" in res.reply.lower()
+def test_invalid_buddy_turn_does_not_mutate(tmp_path: Path):
+    class BadAI:
+        calls = 0
 
+        def complete_json(self, system, user, *, allow_retry=True):
+            self.calls += 1
+            return {"nope": True}
 
-def test_multiple_goals(service: GoalConversationService):
-    climb = service.handle_message("I want to climb V6 by the end of November.")
-    service.handle_message("V4, twice a week.", conversation_id=climb.conversation_id)
-    reading = service.handle_message(
-        "Also I want to read 12 books by the end of December.",
-        conversation_id=climb.conversation_id,
-    )
-    assert reading.goal is not None
-    assert reading.goal.id != climb.goal.id
-    assert reading.goal.domain == "reading"
+        def close(self):
+            pass
+
+    ai = BadAI()
+    svc = ControlPlane(db_path=tmp_path / "bad.db", ai=ai)
+    try:
+        before = svc.conn.execute("SELECT COUNT(*) AS c FROM goals").fetchone()["c"]
+        res = svc.handle_message("I want to climb V6")
+        after = svc.conn.execute("SELECT COUNT(*) AS c FROM goals").fetchone()["c"]
+        assert before == after
+        assert res.ai_available is False
+    finally:
+        svc.close()

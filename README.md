@@ -11,27 +11,32 @@ Four primary destinations:
 - **Calendar** — fixed, flexible, proposed, completed, and missed sessions
 - **Sparks** — ideas without turning them into commitments
 
+Settings stay secondary. The interface refers to language understanding as **Cloud AI** (Groq).
+
 ## Stack
 
 - `frontend/` — React, TypeScript, Vite, FullCalendar
-- `backend/` — FastAPI, SQLite, one MLX model integration
-- `brain/models/` — local model weights (gitignored)
+- `backend/` — FastAPI on `127.0.0.1`, SQLite, one Groq provider
+- One control plane: user message → one Groq request → validated `BuddyTurn` → deterministic handlers
 
-One frontend, one backend, one database, one model.
+## Cloud AI setup
 
-## Models
+1. Create a Groq API key.
+2. Enable **Zero Data Retention** in the Groq console for that key (Buddy cannot verify ZDR via API).
+3. Copy `backend/.env.example` to `backend/.env` and set:
 
-Preserved on disk (not in Git):
+```bash
+GROQ_API_KEY=...
+GROQ_MODEL=openai/gpt-oss-120b   # default; override only if your account exposes another model
+BUDDY_AI_ENABLED=1
+BUDDY_DB_PATH=                    # optional; defaults to backend/data/buddy.db
+```
 
-- `brain/models/Qwen3-14B-4bit` — Buddy v1 model, keep until Qwen3.5 acceptance passes
-- `brain/models/Qwen3.5-4B-4bit` — `mlx-community/Qwen3.5-4B-4bit` @ `0e7ffd5c…` (~3 GB)
-- Download cache colocated at `brain/models/.hf` (do not use a second `~/.cache` copy)
+Retired Llama free-tier IDs must not be hardcoded. If `GROQ_MODEL` is unavailable, Buddy returns a configuration error and does not silently switch models.
+
+When Cloud AI is offline, Today / Calendar / Sparks keep working; Chat explains that conversational understanding is temporarily unavailable.
 
 ## Development
-
-Chat plans with you first (heuristic by default). Nothing hits the calendar until you approve proposed sessions.
-
-Optional local Qwen (can be unstable depending on Python/MLX): `BUDDY_USE_MLX=1`.
 
 ```bash
 # Backend
@@ -39,7 +44,8 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-PYTHONPATH=. uvicorn app.main:app --reload --port 8787
+set -a && source .env && set +a   # if present
+PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
 
 # Frontend
 cd frontend
@@ -47,10 +53,18 @@ npm install
 npm run dev
 ```
 
+## Database
+
+Development uses `backend/data/buddy.db` (gitignored). TablePlus is a viewer for this file.
+
+Packaged builds should set `BUDDY_DB_PATH` to a stable Application Support location. Never store the writable database inside the signed app bundle.
+
 ## Personal data
 
-Buddy v1 user data lives outside this repo at:
+Buddy v1 user data may still exist at:
 
 `~/Library/Application Support/com.liamgk.buddy/`
 
 It is preserved until migration or deletion is explicitly agreed.
+
+Local Qwen/MLX weights under `brain/models/` are no longer part of the active architecture; remove them only after Groq acceptance passes.
