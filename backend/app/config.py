@@ -6,7 +6,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "buddy.db"
+from dotenv import load_dotenv
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+# Load backend/.env for local/dev. Never commit this file.
+load_dotenv(_BACKEND_ROOT / ".env", override=False)
+
+DEFAULT_DB = _BACKEND_ROOT / "data" / "buddy.db"
 DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 

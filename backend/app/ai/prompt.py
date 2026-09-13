@@ -13,6 +13,8 @@ Rules:
 - Never invent database IDs. Use null when unknown.
 - Support multi-intent day dumps via multiple intents.
 - Do not mention model names, tools, JSON, or internal routing in assistant_text.
+- Use EXACT intent enum strings only (no synonyms like set_goal or request_plan).
+- requested_action MUST be an object (or null), never a bare string.
 
 Return ONLY a JSON object matching BuddyTurn:
 {

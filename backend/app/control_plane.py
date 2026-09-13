@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from .ai.groq_provider import GroqError, GroqProvider
 from .ai.prompt import SYSTEM_PROMPT, build_user_payload
+from .buddy_turn import parse_buddy_turn
 from .calendar import CalendarService
 from .config import Settings, load_settings
 from .db import get_connection, init_db
@@ -223,9 +224,19 @@ class ControlPlane:
         self._call_count += 1
         raw = self._provider().complete_json(SYSTEM_PROMPT, payload, allow_retry=True)
         try:
-            return BuddyTurn.model_validate(raw)
-        except Exception as exc:  # noqa: BLE001
-            raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
+            return parse_buddy_turn(raw)
+        except Exception:
+            # One repair retry for malformed structured output (counts as the allowed retry path).
+            self._call_count += 1
+            repair = (
+                payload
+                + "\n\nPrevious output was invalid. Return ONLY valid BuddyTurn JSON using exact intent enums."
+            )
+            raw2 = self._provider().complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
+            try:
+                return parse_buddy_turn(raw2)
+            except Exception as exc:  # noqa: BLE001
+                raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
 
     def _apply_turn(self, cid: str, turn: BuddyTurn, goal: Goal | None) -> ChatResponse:
         proposed: list[SessionOut] = []
