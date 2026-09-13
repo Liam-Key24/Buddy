@@ -29,13 +29,17 @@ Preserved on disk (not in Git):
 
 ## Development
 
+Chat plans with you first (heuristic by default). Nothing hits the calendar until you approve proposed sessions.
+
+Optional local Qwen (can be unstable depending on Python/MLX): `BUDDY_USE_MLX=1`.
+
 ```bash
 # Backend
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8787
+PYTHONPATH=. uvicorn app.main:app --reload --port 8787
 
 # Frontend
 cd frontend

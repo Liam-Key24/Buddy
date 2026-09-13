@@ -10,6 +10,7 @@ from typing import Any
 
 from .calendar import CalendarService
 from .db import get_connection, init_db
+from .planner import apply_goal_patch, plan_turn
 from .schemas import ChatResponse, Goal, SessionOut, Spark, TodayResponse
 from .sparks import SparkService
 
@@ -38,6 +39,20 @@ MONTHS = {
 }
 
 
+def _is_product_goal_text(text: str) -> bool:
+    lower = text.lower()
+    if re.search(r"\b(product|app|saas|startup|software|mvp)\b", lower):
+        return True
+    if re.search(
+        r"\b(?:make|build|ship|launch|finish|complete)\b.{0,48}\b(?:product|app|saas|mvp|tool)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"\b(?:product|app|saas|tool|project)\s+called\s+\w+", lower):
+        return True
+    return False
+
+
 def _infer_domain(text: str) -> str | None:
     lower = text.lower()
     if any(w in lower for w in ("climb", "climbing", "boulder", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")):
@@ -46,6 +61,8 @@ def _infer_domain(text: str) -> str | None:
         return "reading"
     if any(w in lower for w in ("save", "saving", "money", "£", "$", "budget")):
         return "savings"
+    if _is_product_goal_text(text):
+        return "product"
     return None
 
 
@@ -94,6 +111,32 @@ def _extract_target(text: str, domain: str | None) -> str | None:
         m = re.search(r"([\d,]+)\s*(?:pounds|dollars|quid)", lower)
         if m:
             return m.group(1)
+    if domain == "product" or _is_product_goal_text(text):
+        m = re.search(
+            r"(?:product|app|saas|tool|startup|project)\s+called\s+([A-Za-z][\w-]*)",
+            text,
+            flags=re.I,
+        )
+        if m:
+            return m.group(1)
+        m = re.search(
+            r"\b(?:make|build|ship|launch|finish)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][\w-]*)\b",
+            text,
+            flags=re.I,
+        )
+        if m and m.group(1).lower() not in {
+            "a",
+            "an",
+            "the",
+            "product",
+            "app",
+            "saas",
+            "mvp",
+            "tool",
+            "startup",
+            "project",
+        }:
+            return m.group(1)
     return None
 
 
@@ -116,15 +159,35 @@ def _extract_baseline(text: str, domain: str | None) -> str | None:
         m = re.search(r"(?:currently|now|have)\s*(?:saved\s*)?(?:£|\$)?\s*([\d,]+)", lower)
         if m:
             return m.group(0).strip()
+    if domain == "product" or _is_product_goal_text(text):
+        m = re.search(r"(\d+)\s*%", lower)
+        if m:
+            return f"{m.group(1)}% done"
+        if re.search(r"\b(?:almost done|nearly finished|mostly done)\b", lower):
+            return "mostly done"
     return None
 
 
 def _extract_frequency(text: str) -> str | None:
     lower = text.lower().strip()
+    word_counts = {
+        "once": 1,
+        "one": 1,
+        "twice": 2,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+    }
     patterns = [
         (r"\b(once|one)\s+(?:a|per)\s+week\b", "once a week"),
         (r"\b(twice|two\s+times)\s+(?:a|per)\s+week\b", "twice a week"),
         (r"\b(\d+)\s+times?\s+(?:a|per)\s+week\b", None),
+        (r"\b(once|one|twice|two|three|four|five|six|seven)\s+times?\s+(?:a|per)\s+week\b", None),
+        (r"\b(\d+)\s+(?:focused\s+)?sessions?\s+(?:a|per)\s+week\b", None),
+        (r"\b(once|one|twice|two|three|four|five|six|seven)\s+(?:focused\s+)?sessions?\s+(?:a|per)\s+week\b", None),
         (r"\bevery\s+day\b", "every day"),
         (r"\bdaily\b", "every day"),
         (r"\b(\d+)\s+times?\s+(?:a|per)\s+month\b", None),
@@ -135,7 +198,20 @@ def _extract_frequency(text: str) -> str | None:
             continue
         if fixed:
             return fixed
-        return m.group(0)
+        raw = m.group(1)
+        if raw.isdigit():
+            n = int(raw)
+        else:
+            n = word_counts.get(raw, 0)
+            if not n:
+                return m.group(0)
+        if "month" in m.group(0):
+            return f"{n} times a month"
+        if n == 1:
+            return "once a week"
+        if n == 2:
+            return "twice a week"
+        return f"{n} times a week"
     m = re.search(r"\b(\d+)\s*x\s*/?\s*week\b", lower)
     if m:
         n = int(m.group(1))
@@ -154,6 +230,9 @@ def _title_from_parts(domain: str | None, target: str | None, deadline: str | No
         base = f"Read {target}"
     elif domain == "savings" and target:
         base = f"Save {target}"
+    elif domain == "product" and target:
+        nice = target[:1].upper() + target[1:] if target else target
+        base = f"Finish {nice}"
     else:
         cleaned = re.sub(r"\s+", " ", raw.strip())
         cleaned = re.sub(r"^(i\s+want\s+to|i'?d\s+like\s+to|help\s+me)\s+", "", cleaned, flags=re.I)
@@ -187,6 +266,8 @@ def _question_for(goal: Goal, slot: str) -> str:
             return "How much are you reading consistently right now?"
         if domain == "savings":
             return "How much have you already saved toward this, and what can you put aside now?"
+        if domain == "product":
+            return "Where are you with this today — what's already done, and what's left?"
         return "Where are you starting from with this today?"
     if slot == "frequency":
         if domain == "climbing":
@@ -194,7 +275,9 @@ def _question_for(goal: Goal, slot: str) -> str:
         if domain == "reading":
             return "How often can you read in a typical week?"
         if domain == "savings":
-            return "How often can you set money aside?"
+            return "What usually remains after essentials, and how much do you want to keep for spending?"
+        if domain == "product":
+            return "How often can you work on shipping this each week?"
         return "How often can you work on this each week?"
     if slot == "commitment":
         return "What weekly commitment feels realistic before we look at the calendar?"
@@ -247,6 +330,7 @@ def _is_plan_request(text: str) -> bool:
         for p in (
             "look at the calendar",
             "check availability",
+            "check the calendar",
             "propose",
             "plan sessions",
             "schedule",
@@ -257,8 +341,12 @@ def _is_plan_request(text: str) -> bool:
             "let's plan",
             "lets plan",
             "go ahead and plan",
+            "payday sessions",
+            "propose sessions",
+            "add to calendar",
+            "put it on the calendar",
         )
-    ) or lower in {"yes", "yep", "yeah", "ok", "okay", "sure"}
+    ) or lower in {"yes", "yep", "yeah", "ok", "okay", "sure", "yes please", "do it"}
 
 
 def _wants_adjustment(text: str) -> bool:
@@ -293,10 +381,67 @@ def _is_outcome_fragment(text: str) -> bool:
 
 def _is_goal_fragment(text: str) -> bool:
     lower = text.lower()
-    if _infer_domain(text) and re.search(r"\bi want\b|\bi'?d like\b|goal|by the end", lower):
+    if _infer_domain(text) and re.search(
+        r"\bi want\b|\bi'?d like\b|goal|by the end|make|build|ship|launch",
+        lower,
+    ):
         return True
     if re.search(r"\bv\d+\b", lower) and ("want" in lower or "climb" in lower):
         return True
+    return False
+
+
+def _looks_like_new_goal_statement(text: str) -> bool:
+    lower = text.lower()
+    if not re.search(
+        r"\bi want to\b|\bi'?d like to\b|\bi'?m (?:going to|trying to)\b|"
+        r"\bhelp me (?:make|build|ship|finish|plan)\b|"
+        r"\bmy goal (?:is|:)|\bnew goal\b",
+        lower,
+    ):
+        return False
+    if _infer_domain(text):
+        return True
+    if _extract_deadline(text):
+        return True
+    if re.search(r"\b(?:product|app|project)\s+called\b|\bby (?:the )?end of\b", lower):
+        return True
+    return False
+
+
+def _is_interruption_new_goal(text: str, current: Goal | None) -> bool:
+    if current is None:
+        return True
+    lower = text.lower()
+    starts_new = any(
+        p in lower
+        for p in ("also i want", "another goal", "new goal", "separate goal", "meanwhile i want")
+    )
+    if starts_new:
+        return True
+
+    new_domain = _infer_domain(text)
+    if new_domain and current.domain and new_domain != current.domain:
+        if _looks_like_new_goal_statement(text) or re.search(
+            r"\bi want\b|\bi'?d like\b|\bby (?:the )?end\b",
+            lower,
+        ):
+            return True
+
+    # Same-domain or unknown-domain: still switch when the user clearly opens a
+    # different named goal (e.g. product called Mevero while Climb V6 is active).
+    if _looks_like_new_goal_statement(text):
+        if new_domain and new_domain != (current.domain or ""):
+            return True
+        if new_domain == "product" or _is_product_goal_text(text):
+            named = _extract_target(text, "product")
+            if named:
+                current_name = (current.target or "").lower()
+                if named.lower() != current_name and (
+                    current.domain != "product"
+                    or named.lower() not in (current.title or "").lower()
+                ):
+                    return True
     return False
 
 
@@ -360,22 +505,6 @@ def _merge_answer_into_goal(goal: Goal, text: str) -> Goal:
         goal.status = "gathering"
 
     return goal
-
-
-def _is_interruption_new_goal(text: str, current: Goal | None) -> bool:
-    if current is None:
-        return True
-    lower = text.lower()
-    starts_new = any(
-        p in lower
-        for p in ("also i want", "another goal", "new goal", "separate goal", "meanwhile i want")
-    )
-    if starts_new:
-        return True
-    if current.title and _infer_domain(text) and _infer_domain(text) != current.domain:
-        if re.search(r"\bi want to\b|\bi'?d like to\b", lower):
-            return True
-    return False
 
 
 def _format_session_line(s: SessionOut) -> str:
@@ -504,6 +633,11 @@ class GoalConversationService:
             )
         self.conn.commit()
 
+    def _pause_goal(self, goal: Goal) -> None:
+        if goal.status in {"gathering", "ready_to_plan", "planned", "active"}:
+            goal.status = "paused"
+            self._save_goal(goal)
+
     def _create_goal_from_text(self, cid: str, text: str) -> Goal:
         domain = _infer_domain(text)
         target = _extract_target(text, domain)
@@ -624,6 +758,8 @@ class GoalConversationService:
                         chunk, _ = self._compose_gather_reply(goal, just_created=False)
                         reply_chunks.append(chunk)
                     else:
+                        if goal and _is_interruption_new_goal(part, goal):
+                            self._pause_goal(goal)
                         goal = self._create_goal_from_text(cid, part)
                         self._save_goal(goal)
                         chunk, _ = self._compose_gather_reply(goal, just_created=True)
@@ -714,7 +850,7 @@ class GoalConversationService:
                 self._add_message(cid, "assistant", reply)
                 return ChatResponse(conversation_id=cid, reply=reply, goal=goal)
 
-        # Propose from ready goal
+        # Propose from ready goal when user asks to put times on the calendar.
         if goal and goal.status in {"ready_to_plan", "planned", "active"} and _is_plan_request(text):
             if _wants_adjustment(text) and not _is_approval(text):
                 reply = (
@@ -733,21 +869,58 @@ class GoalConversationService:
                 pending_question="Approve or reject these proposed sessions?",
             )
 
-        just_created = False
+        # Natural planning turn (model when available, heuristic otherwise) — no slot walls.
+        recent = [
+            {"role": m["role"], "content": m["content"]}
+            for m in self.list_messages(cid)[-10:]
+        ]
         if goal is None or _is_interruption_new_goal(text, goal):
+            # Start from a light seed so the planner has an id to patch.
+            if goal is not None:
+                self._pause_goal(goal)
             goal = self._create_goal_from_text(cid, text)
-            just_created = True
-        else:
-            goal = _merge_answer_into_goal(goal, text)
+            self._save_goal(goal)
 
+        plan = plan_turn(goal, text, recent)
+        goal = apply_goal_patch(goal, plan.goal_patch)
+        # Keep structured field extraction as a supplement (grades, "twice a week", etc.).
+        goal = _merge_answer_into_goal(goal, text)
+        if not goal.title:
+            goal.title = _title_from_parts(goal.domain, goal.target, goal.deadline, text)
         self._save_goal(goal)
-        reply, pending = self._compose_gather_reply(goal, just_created=just_created)
 
-        # Auto-offer planning nudge stays text-only; proposals require consent via plan request / yes.
-        self._add_message(cid, "assistant", reply)
+        # Planner may say we're ready; only open calendar proposals when the user
+        # also asked to schedule / agreed to proposing in this turn.
+        if (
+            plan.ready_to_propose
+            and goal.status in {"ready_to_plan", "planned", "active"}
+            and _is_plan_request(text)
+        ):
+            reply, proposed = self._propose_for_goal(goal)
+            self._add_message(cid, "assistant", reply)
+            return ChatResponse(
+                conversation_id=cid,
+                reply=reply,
+                goal=goal,
+                proposed_sessions=proposed,
+                pending_question="Approve or reject these proposed sessions?",
+            )
+
+        self._add_message(cid, "assistant", plan.reply)
+        pending = plan.pending_question
+        if not pending and goal.status == "gathering":
+            missing = _missing_slots(goal)
+            if goal.domain == "savings":
+                # Prefer capacity over a naked frequency wall.
+                if not (goal.facts or {}).get("monthly_leftover") and not goal.baseline:
+                    pending = "What do you usually have left after essentials, and how much spending money do you want to keep?"
+                elif missing:
+                    pending = _question_for(goal, missing[0])
+            elif missing:
+                pending = _question_for(goal, missing[0])
         return ChatResponse(
             conversation_id=cid,
-            reply=reply,
+            reply=plan.reply,
             goal=goal,
             pending_question=pending,
         )

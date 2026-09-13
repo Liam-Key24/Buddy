@@ -41,6 +41,8 @@ def session_duration_minutes(domain: str | None) -> int:
         return 45
     if domain == "savings":
         return 30
+    if domain == "product":
+        return 90
     return 60
 
 
