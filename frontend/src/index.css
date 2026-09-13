@@ -210,6 +210,35 @@ a {
   cursor: pointer;
 }
 
+.ghost {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.55rem 0.9rem;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.spark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.calendar-panel .fc {
+  --fc-border-color: var(--line);
+  --fc-page-bg-color: transparent;
+  --fc-neutral-bg-color: rgba(255, 255, 255, 0.03);
+  --fc-list-event-hover-bg-color: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+}
+
+.calendar-panel .fc-toolbar-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+}
+
 .composer button:disabled {
   opacity: 0.55;
   cursor: wait;

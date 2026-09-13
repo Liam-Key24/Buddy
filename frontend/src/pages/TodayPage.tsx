@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchToday, type TodayResponse } from "./api";
+import { fetchToday, formatSessionWhen, type TodayResponse } from "../api";
 
 export function TodayPage() {
   const [data, setData] = useState<TodayResponse | null>(null);
@@ -30,19 +30,40 @@ export function TodayPage() {
       {error && <p className="muted">Could not load today: {error}</p>}
 
       <div className="panel">
-        <h2>Active goals</h2>
-        {!data?.goals.length && <p className="muted">No active goals yet. Start in Chat.</p>}
+        <h2>Today’s sessions</h2>
+        {!data?.todays_sessions?.length && <p className="muted">No sessions for today.</p>}
         <ul className="list">
-          {data?.goals.map((g) => (
-            <li key={g.id}>
-              <strong>{g.title}</strong>
+          {data?.todays_sessions?.map((s) => (
+            <li key={s.id}>
+              <strong>{s.title}</strong>
               <div className="muted">
-                {[g.baseline && `from ${g.baseline}`, g.frequency, g.status]
-                  .filter(Boolean)
-                  .join(" · ")}
+                {formatSessionWhen(s)} · {s.status}
               </div>
             </li>
           ))}
+        </ul>
+      </div>
+
+      <div className="panel">
+        <h2>Active goals</h2>
+        {!data?.goals.length && <p className="muted">No active goals yet. Start in Chat.</p>}
+        <ul className="list">
+          {data?.goals.map((g) => {
+            const prog = data.progress?.find((p) => p.goal_id === g.id);
+            return (
+              <li key={g.id}>
+                <strong>{g.title}</strong>
+                <div className="muted">
+                  {[g.baseline && `from ${g.baseline}`, g.frequency, g.status]
+                    .filter(Boolean)
+                    .join(" · ")}
+                  {prog
+                    ? ` · ${prog.completed} done / ${prog.missed} missed / ${prog.scheduled} scheduled`
+                    : ""}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       </div>
 

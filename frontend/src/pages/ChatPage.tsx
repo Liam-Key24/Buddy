@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { sendChat, type Goal } from "../api";
+import { formatSessionWhen, sendChat, type Goal, type Session } from "../api";
 
 type Msg = { role: "user" | "assistant"; content: string };
 
@@ -18,6 +18,7 @@ export function ChatPage() {
     () => localStorage.getItem(STORAGE_KEY),
   );
   const [goal, setGoal] = useState<Goal | null>(null);
+  const [proposals, setProposals] = useState<Session[]>([]);
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -37,6 +38,8 @@ export function ChatPage() {
       setConversationId(res.conversation_id);
       localStorage.setItem(STORAGE_KEY, res.conversation_id);
       setGoal(res.goal);
+      if (res.proposed_sessions?.length) setProposals(res.proposed_sessions);
+      if (res.booked_sessions?.length) setProposals([]);
       setMessages((m) => [...m, { role: "assistant", content: res.reply }]);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong";
@@ -68,6 +71,20 @@ export function ChatPage() {
             Tracking goal <strong>{goal.title}</strong>
             {goal.baseline ? ` · from ${goal.baseline}` : ""}
             {goal.frequency ? ` · ${goal.frequency}` : ""}
+            {goal.status ? ` · ${goal.status}` : ""}
+          </div>
+        )}
+        {!!proposals.length && (
+          <div className="panel">
+            <h2>Proposed sessions</h2>
+            <ul className="list">
+              {proposals.map((s) => (
+                <li key={s.id}>
+                  {formatSessionWhen(s)} · {s.title}
+                </li>
+              ))}
+            </ul>
+            <p className="muted">Reply “Approve” or “Reject those” to decide.</p>
           </div>
         )}
       </div>
