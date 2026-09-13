@@ -266,6 +266,9 @@ class ControlPlane:
                 latency_ms=getattr(stats, "latency_ms", None) if stats else None,
                 tokens_prompt=getattr(stats, "tokens_prompt", None) if stats else None,
                 tokens_completion=getattr(stats, "tokens_completion", None) if stats else None,
+                rate_limit=getattr(stats, "rate_limit", None) if stats else None,
+                rate_remaining=getattr(stats, "rate_remaining", None) if stats else None,
+                rate_reset=getattr(stats, "rate_reset", None) if stats else None,
             )
             return parse_buddy_turn(raw)
         except Exception:

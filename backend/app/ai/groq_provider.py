@@ -29,6 +29,9 @@ class GroqCallStats:
     tokens_completion: int | None = None
     retried: bool = False
     error_category: str | None = None
+    rate_limit: int | None = None
+    rate_remaining: int | None = None
+    rate_reset: str | None = None
 
 
 class GroqProvider:
@@ -121,12 +124,16 @@ class GroqProvider:
             body = resp.json()
             content = body["choices"][0]["message"]["content"]
             usage = body.get("usage") or {}
+            rate_limit, rate_remaining, rate_reset = _rate_headers(resp)
             self.last_stats = GroqCallStats(
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 status=status,
                 tokens_prompt=usage.get("prompt_tokens"),
                 tokens_completion=usage.get("completion_tokens"),
                 retried=retried,
+                rate_limit=rate_limit,
+                rate_remaining=rate_remaining,
+                rate_reset=rate_reset,
             )
             log.info(
                 "groq_ok latency_ms=%s status=%s prompt_tokens=%s completion_tokens=%s retried=%s",
@@ -168,6 +175,22 @@ class GroqProvider:
                 error_category="transport",
             )
             raise GroqError("transport", f"Cloud AI unreachable ({exc.__class__.__name__})") from exc
+
+
+def _rate_headers(resp: httpx.Response) -> tuple[int | None, int | None, str | None]:
+    def _int(name: str) -> int | None:
+        raw = resp.headers.get(name)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    limit = _int("x-ratelimit-limit-requests") or _int("x-ratelimit-limit-tokens")
+    remaining = _int("x-ratelimit-remaining-requests") or _int("x-ratelimit-remaining-tokens")
+    reset = resp.headers.get("x-ratelimit-reset-requests") or resp.headers.get("x-ratelimit-reset-tokens")
+    return limit, remaining, reset
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
