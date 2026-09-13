@@ -12,6 +12,15 @@ export type Goal = {
   facts?: Record<string, unknown>;
 };
 
+export type Category = {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+  keywords: string;
+  sort_order?: number;
+};
+
 export type Session = {
   id: string;
   goal_id?: string | null;
@@ -22,6 +31,8 @@ export type Session = {
   status: string;
   proposal_batch_id?: string | null;
   notes?: string | null;
+  category_id?: string | null;
+  category?: Category | null;
 };
 
 export type Spark = {
@@ -119,11 +130,31 @@ export type UsageSummary = {
   label: string;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+
+export const APP_VERSION = "0.1.0";
+
+export type HealthResponse = {
+  ok: boolean;
+  product: string;
+  ai: {
+    label: string;
+    enabled: boolean;
+    configured: boolean;
+    model_configured: string;
+  };
+  db: string;
+  host: string;
+  privacy: string;
+};
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   return res.json();
+}
+
+export async function fetchHealth(): Promise<HealthResponse> {
+  return json(await fetch(`${API_BASE}/health`));
 }
 
 export async function sendChat(
@@ -151,10 +182,72 @@ export async function fetchSessions(): Promise<Session[]> {
   return json(await fetch(`${API_BASE}/calendar/sessions`));
 }
 
+export async function createSession(input: {
+  title: string;
+  start_at: string;
+  end_at: string;
+  category_id?: string | null;
+}): Promise<Session> {
+  return json(
+    await fetch(`${API_BASE}/calendar/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await json(await fetch(`${API_BASE}/calendar/sessions/${id}`, { method: "DELETE" }));
+}
+
+export async function fetchCategories(): Promise<Category[]> {
+  return json(await fetch(`${API_BASE}/categories`));
+}
+
+export async function createCategory(input: {
+  name: string;
+  color?: string;
+  icon?: string;
+  keywords?: string;
+}): Promise<Category> {
+  return json(
+    await fetch(`${API_BASE}/categories`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function updateCategory(
+  id: string,
+  input: Partial<Pick<Category, "name" | "color" | "icon" | "keywords">>,
+): Promise<Category> {
+  return json(
+    await fetch(`${API_BASE}/categories/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function deleteCategory(id: string): Promise<void> {
+  await json(await fetch(`${API_BASE}/categories/${id}`, { method: "DELETE" }));
+}
+
 export async function fetchFixedBlocks(): Promise<
   Array<{ id: string; title: string; weekday: number; start_minute: number; end_minute: number }>
 > {
   return json(await fetch(`${API_BASE}/calendar/fixed`));
+}
+
+export function formatSessionTime(session: Session): string {
+  return new Date(session.start_at).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export async function decideProposal(
@@ -263,6 +356,14 @@ export async function promoteSpark(id: string): Promise<unknown> {
 
 export async function dismissSpark(id: string): Promise<Spark> {
   return json(await fetch(`${API_BASE}/sparks/${id}/dismiss`, { method: "POST" }));
+}
+
+export async function fetchGoals(): Promise<Goal[]> {
+  return json(await fetch(`${API_BASE}/goals`));
+}
+
+export async function deleteGoal(id: string): Promise<Goal> {
+  return json(await fetch(`${API_BASE}/goals/${id}`, { method: "DELETE" }));
 }
 
 export function formatSessionWhen(session: Session): string {

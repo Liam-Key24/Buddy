@@ -49,6 +49,47 @@ class GoalStore:
         ).fetchall()
         return [self._row(r) for r in rows]
 
+    def list_managed(self) -> list[Goal]:
+        """Open + paused goals for the Goals page (excludes done)."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM goals
+            WHERE status IN (
+              'gathering', 'ready_to_plan', 'planned', 'active', 'paused'
+            )
+            ORDER BY
+              CASE status
+                WHEN 'active' THEN 0
+                WHEN 'planned' THEN 1
+                WHEN 'ready_to_plan' THEN 2
+                WHEN 'gathering' THEN 3
+                ELSE 4
+              END,
+              updated_at DESC
+            """
+        ).fetchall()
+        return [self._row(r) for r in rows]
+
+    def remove(self, goal_id: str) -> Goal | None:
+        """Archive a goal as done and drop open proposals for it."""
+        goal = self.get(goal_id)
+        if not goal:
+            return None
+        now = _now()
+        self.conn.execute(
+            "UPDATE goals SET status='done', updated_at=? WHERE id=?",
+            (now, goal_id),
+        )
+        self.conn.execute(
+            """
+            UPDATE sessions SET status='rejected', updated_at=?
+            WHERE goal_id=? AND status='proposed'
+            """,
+            (now, goal_id),
+        )
+        self.conn.commit()
+        return self.get(goal_id)
+
     def pause_others(self, conversation_id: str, keep_id: str | None = None) -> None:
         now = _now()
         if keep_id:

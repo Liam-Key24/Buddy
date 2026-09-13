@@ -11,6 +11,7 @@ from .ai.groq_provider import GroqError, GroqProvider
 from .ai.prompt import SYSTEM_PROMPT, build_user_payload
 from .buddy_turn import parse_buddy_turn
 from .calendar import CalendarService
+from .categories import CategoryStore
 from .config import Settings, load_settings
 from .db import get_connection, init_db
 from .goals import GoalStore, progress_summary
@@ -62,7 +63,9 @@ class ControlPlane:
         init_db(self.conn)
         run_migrations(self.conn)
         self.goals = GoalStore(self.conn)
-        self.calendar = CalendarService(self.conn)
+        self.categories = CategoryStore(self.conn)
+        self.categories.ensure_defaults()
+        self.calendar = CalendarService(self.conn, categories=self.categories)
         self.sparks = SparkService(self.conn)
         self.conversations = ConversationStore(self.conn)
         self.usage = UsageStore(self.conn)
@@ -148,6 +151,12 @@ class ControlPlane:
 
     def get_goal(self, goal_id: str) -> Goal | None:
         return self.goals.get(goal_id)
+
+    def list_goals(self) -> list[Goal]:
+        return self.goals.list_managed()
+
+    def remove_goal(self, goal_id: str) -> Goal | None:
+        return self.goals.remove(goal_id)
 
     # --- explicit UI actions (no AI) ---
 

@@ -4,12 +4,14 @@ import {
   Lightning,
   SquaresFour,
   GearSix,
+  Target,
 } from "@phosphor-icons/react";
 import { NavLink, Outlet } from "react-router-dom";
 
 const links = [
   { to: "/", label: "Today", icon: SquaresFour, end: true },
   { to: "/chat", label: "Chat", icon: ChatCircle },
+  { to: "/goals", label: "Goals", icon: Target },
   { to: "/calendar", label: "Calendar", icon: CalendarBlank },
   { to: "/sparks", label: "Sparks", icon: Lightning },
 ];
@@ -18,9 +20,14 @@ export function AppShell() {
   return (
     <div className="app-shell">
       <nav className="nav-rail" aria-label="Primary">
-        <div className="brand-mark" title="Buddy">
-          B
-        </div>
+        <img
+          className="brand-mark"
+          src="/buddy-icon.png"
+          alt="Buddy"
+          title="Buddy"
+          width={30}
+          height={30}
+        />
         {links.map((link) => {
           const Icon = link.icon;
           return (
@@ -36,18 +43,13 @@ export function AppShell() {
           );
         })}
         <div className="nav-spacer" />
-        <button
-          type="button"
-          className="nav-link"
+        <NavLink
+          to="/settings"
           title="Settings"
-          onClick={() =>
-            window.alert(
-              "Settings stay secondary. Configure Cloud AI via GROQ_API_KEY on the local backend / Keychain in the Mac app.",
-            )
-          }
+          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
         >
-          <GearSix size={20} />
-        </button>
+          <GearSix size={20} weight="regular" />
+        </NavLink>
       </nav>
       <main className="content">
         <Outlet />
