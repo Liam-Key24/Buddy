@@ -153,10 +153,36 @@ pub fn stop_run(
     tracing::info!(conversation_id = %conversation_id, "stop run requested");
     if state.runs.cancel(Some(&conversation_id)) {
         if let Some(pm) = app.try_state::<Arc<ProcessManager>>() {
-            pm.interrupt_mlx(&state);
+            pm.interrupt_mlx(&state, "user_stop");
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn retry_last_turn(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> Result<(), String> {
+    let item = state
+        .memory
+        .get_work_item(&conversation_id)
+        .ok_or_else(|| "No saved request to retry.".to_string())?;
+    let text = item
+        .original_message
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "No saved request to retry.".to_string())?;
+    crate::turn_controller::TurnController::handle(
+        app,
+        &state,
+        crate::turn_controller::TurnRequest {
+            conversation_id,
+            text,
+            ui_context: None,
+        },
+    )
+    .await
 }
 
 #[tauri::command]

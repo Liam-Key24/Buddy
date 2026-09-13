@@ -53,15 +53,14 @@ pub struct RunControl {
 }
 
 impl RunControl {
-    /// Start a turn, or reject if another uncancelled turn is live.
+    /// Start a turn, or reject if any prior turn still occupies the slot
+    /// (including a cancelled guard that has not finished draining).
     pub fn try_begin(&self, conversation_id: &str) -> Result<Arc<RunGuard>, BusyRun> {
         let mut lock = self.active.lock().expect("run control");
         if let Some(existing) = lock.as_ref() {
-            if !existing.is_cancelled() {
-                return Err(BusyRun {
-                    conversation_id: existing.conversation_id.clone(),
-                });
-            }
+            return Err(BusyRun {
+                conversation_id: existing.conversation_id.clone(),
+            });
         }
         let guard = Arc::new(RunGuard {
             conversation_id: conversation_id.to_string(),
@@ -148,13 +147,26 @@ mod tests {
     }
 
     #[test]
-    fn cancel_then_begin_is_allowed() {
+    fn cancel_then_begin_is_rejected_until_end() {
         let control = RunControl::default();
         let first = control.try_begin("c1").unwrap();
         first.cancel();
-        let second = control.try_begin("c2").expect("cancelled slot");
+        assert!(control.try_begin("c2").is_err());
+        control.end(&first);
+        let second = control.try_begin("c2").expect("after drain");
         assert_eq!(second.conversation_id, "c2");
         assert!(first.is_cancelled());
         assert!(!second.is_cancelled());
+    }
+
+    #[test]
+    fn stop_then_immediate_retry_cannot_overlap() {
+        let control = RunControl::default();
+        let first = control.try_begin("c1").unwrap();
+        control.cancel(Some("c1"));
+        assert!(first.is_cancelled());
+        assert!(control.try_begin("c1").is_err(), "retry while draining");
+        control.end(&first);
+        assert!(control.try_begin("c1").is_ok());
     }
 }

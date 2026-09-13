@@ -62,11 +62,15 @@ def test_apply_no_think_last_user():
 
 
 def test_cool_mode_token_caps():
-    from mlx_client import AGENT_MAX_TOKENS, CHAT_MAX_TOKENS, NARRATE_MAX_TOKENS
+    import inspect
+
+    from mlx_client import AGENT_MAX_TOKENS, CHAT_MAX_TOKENS, MLXClient, NARRATE_MAX_TOKENS
 
     assert AGENT_MAX_TOKENS == 1024
     assert CHAT_MAX_TOKENS == 256
     assert NARRATE_MAX_TOKENS == 256
+    src = inspect.getsource(MLXClient.__init__)
+    assert "timeout=180" in src.replace(" ", "") or "timeout=180.0" in src
 
 
 def test_think_stream_filter_drops_reasoning():

@@ -6,8 +6,10 @@ mod native_loop;
 mod coder_bridge;
 mod coder_tool;
 mod commands;
+mod inference_gateway;
 mod intelligence_hooks;
 mod logging;
+mod mlx_runtime;
 mod memory_api;
 mod memory_extraction;
 mod memory_tools;
@@ -118,6 +120,7 @@ pub fn run() {
             commands::get_messages,
             commands::send_message,
             commands::stop_run,
+            commands::retry_last_turn,
             commands::resolve_clarification,
             commands::run_tool,
             commands::get_settings,

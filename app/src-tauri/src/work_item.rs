@@ -99,6 +99,16 @@ pub struct WorkItem {
     /// Full native dialogue (messages + scratchpad). Never thinned to a scratchpad.
     #[serde(default)]
     pub transcript: Option<Value>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub original_message: Option<String>,
+    #[serde(default)]
+    pub detected_skills: Vec<String>,
+    #[serde(default)]
+    pub interpretation_status: Option<String>,
+    #[serde(default)]
+    pub idempotency_keys: Vec<String>,
 }
 
 impl WorkItem {
@@ -190,6 +200,43 @@ impl WorkItem {
     pub fn clear_transcript(&mut self) {
         self.transcript = None;
         self.observations.clear();
+        self.touch();
+    }
+
+    pub fn mark_pending_interpretation(
+        &mut self,
+        message: &str,
+        skills: Vec<String>,
+    ) {
+        if self.turn_id.as_deref().unwrap_or("").is_empty() {
+            self.turn_id = Some(format!("turn:{}:{}", self.conversation_id, now_stamp()));
+        }
+        self.original_message = Some(message.to_string());
+        self.detected_skills = skills;
+        self.interpretation_status = Some("pending_interpretation".into());
+        self.status = WorkStatus::Active;
+        self.touch();
+    }
+
+    pub fn mark_interpretation(&mut self, status: &str) {
+        self.interpretation_status = Some(status.into());
+        self.status = match status {
+            "timed_out" | "service_unavailable" => WorkStatus::Paused,
+            "stopped" => WorkStatus::Cancelled,
+            "done" => WorkStatus::Done,
+            _ => self.status,
+        };
+        self.touch();
+    }
+
+    pub fn already_did(&self, key: &str) -> bool {
+        self.idempotency_keys.iter().any(|k| k == key)
+    }
+
+    pub fn remember_idempotency(&mut self, key: String) {
+        if !self.already_did(&key) {
+            self.idempotency_keys.push(key);
+        }
         self.touch();
     }
 
@@ -337,5 +384,28 @@ mod tests {
         assert_eq!(item.status, WorkStatus::Clarifying);
         assert_eq!(item.pending_clarification.unwrap().tool, "todo.add");
         assert!(!transcript_is_empty(item.transcript.as_ref()));
+    }
+
+    #[test]
+    fn retry_reuses_turn_id_and_skips_duplicate_intake() {
+        let mut item = WorkItem::new("c1");
+        item.mark_pending_interpretation(
+            "I want to climb V6 by the end of November",
+            vec!["goals".into(), "fitness".into()],
+        );
+        let turn = item.turn_id.clone().unwrap();
+        let key = crate::runtime_policy::action_idempotency_key(&turn, 0);
+        item.remember_idempotency(key.clone());
+        item.mark_interpretation("timed_out");
+        item.mark_pending_interpretation(
+            "I want to climb V6 by the end of November",
+            vec!["goals".into(), "fitness".into()],
+        );
+        assert_eq!(item.turn_id.as_deref(), Some(turn.as_str()));
+        assert!(item.already_did(&key));
+        assert_eq!(
+            item.interpretation_status.as_deref(),
+            Some("pending_interpretation")
+        );
     }
 }

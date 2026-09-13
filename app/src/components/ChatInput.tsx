@@ -18,7 +18,7 @@ import {
 import { useChatStore } from "../stores/useChatStore";
 import { useAppStore, type AppPage } from "../stores/useAppStore";
 import { useConversationStore } from "../stores/useConversationStore";
-import { sendMessage, createConversation, loadConversations, loadMessages, stopRun } from "../lib/api";
+import { sendMessage, createConversation, loadConversations, loadMessages, stopRun, retryLastTurn } from "../lib/api";
 import { createResearchConversation, researchEnsure } from "../lib/lifeApi";
 
 const MIN_HEIGHT = 40;
@@ -29,7 +29,7 @@ type FormatAction = "bold" | "italic" | "code" | "list";
 export function ChatInput() {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { activeConversationId, isStreaming, setActiveConversationId, setMessages } =
+  const { activeConversationId, isStreaming, canRetry, setActiveConversationId, setMessages } =
     useChatStore();
   const conversations = useConversationStore((s) => s.conversations);
   const {
@@ -79,6 +79,19 @@ export function ChatInput() {
       await sendMessage(convId!, trimmed, { skipOptimistic: true });
     } catch (err) {
       console.error("send failed:", err);
+    } finally {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    }
+  }
+
+  async function handleRetry() {
+    const id = useChatStore.getState().activeConversationId;
+    if (!id || isStreaming) return;
+    try {
+      await retryLastTurn(id);
+    } catch (err) {
+      console.error("retry failed:", err);
+      useChatStore.getState().finalizeStreaming();
     } finally {
       requestAnimationFrame(() => textareaRef.current?.focus());
     }
@@ -284,6 +297,17 @@ export function ChatInput() {
       </div>
       <div className="mt-2 flex items-center justify-between gap-3 px-0.5">
         <div className="flex items-center gap-2">
+          {canRetry && !isStreaming ? (
+            <button
+              type="button"
+              title="Retry last request"
+              aria-label="Retry last request"
+              onClick={() => void handleRetry()}
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1 text-[11px] font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
+            >
+              Retry
+            </button>
+          ) : null}
           <button
             type="button"
             title="Deep research"

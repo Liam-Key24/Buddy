@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::inference_gateway::{self, InferenceGateway};
 use crate::runtime_policy::RuntimePolicy;
 use crate::state::AppState;
 
@@ -138,6 +139,7 @@ pub struct ProcessManager {
     mlx_ensure_lock: tokio::sync::Mutex<()>,
     last_mlx_used_secs: AtomicU64,
     mlx_loaded_model: Mutex<Option<String>>,
+    pub gateway: InferenceGateway,
 }
 
 impl ProcessManager {
@@ -151,6 +153,7 @@ impl ProcessManager {
             mlx_ensure_lock: tokio::sync::Mutex::new(()),
             last_mlx_used_secs: AtomicU64::new(0),
             mlx_loaded_model: Mutex::new(None),
+            gateway: InferenceGateway::default(),
         }
     }
 
@@ -162,8 +165,9 @@ impl ProcessManager {
     }
 
     pub fn mark_mlx_used(&self) {
-        self.last_mlx_used_secs
-            .store(Self::now_secs(), Ordering::SeqCst);
+        let now = Self::now_secs();
+        self.last_mlx_used_secs.store(now, Ordering::SeqCst);
+        self.gateway.touch();
     }
 
     /// Kill leftover MLX on our port (previous run / manual server) so launch
@@ -195,14 +199,17 @@ impl ProcessManager {
                 if !pm.mlx_owned.load(Ordering::SeqCst) {
                     continue;
                 }
-                let last = pm.last_mlx_used_secs.load(Ordering::SeqCst);
-                if last == 0 {
-                    continue;
-                }
-                let idle = ProcessManager::now_secs().saturating_sub(last);
-                if idle >= RuntimePolicy::cool().mlx_idle.as_secs() {
-                    info!(idle_secs = idle, "stopping idle mlx");
+                let policy = RuntimePolicy::cool();
+                let now = ProcessManager::now_secs();
+                if pm.gateway.should_idle_unload(
+                    &policy,
+                    now,
+                    ProcessManager::auto_start_mlx(&state),
+                ) {
+                    let idle = now.saturating_sub(pm.gateway.last_used_secs());
+                    info!(idle_secs = idle, reason = "idle_unload", "stopping idle mlx");
                     pm.stop_mlx();
+                    pm.gateway.force_state(crate::mlx_runtime::MlxState::Stopped);
                 }
             }
         });
@@ -224,8 +231,9 @@ impl ProcessManager {
     }
 
     fn pids_on_port(port: u16) -> Vec<String> {
+        let self_pid = std::process::id().to_string();
         let Ok(output) = Command::new("lsof")
-            .args(["-ti", &format!("tcp:{port}")])
+            .args(["-sTCP:LISTEN", "-ti", &format!("tcp:{port}")])
             .output()
         else {
             return Vec::new();
@@ -233,23 +241,46 @@ impl ProcessManager {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && *s != self_pid)
             .map(String::from)
             .collect()
     }
 
-    fn kill_processes_on_port(port: u16, signal: &str) {
+    fn owned_mlx_pid(&self) -> Option<u32> {
+        self.mlx_child
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.id()))
+    }
+
+    fn kill_processes_on_port(port: u16, signal: &str, only_pid: Option<u32>) {
         for pid in Self::pids_on_port(port) {
+            if let Some(owned) = only_pid {
+                if pid.parse::<u32>().ok() != Some(owned) {
+                    warn!(%pid, port, "skipping unrelated process on service port");
+                    continue;
+                }
+            }
             info!(%pid, port, signal, "killing process on service port");
             let _ = Command::new("kill").args([signal, &pid]).status();
         }
     }
 
     fn clear_port(port: u16) {
-        Self::kill_processes_on_port(port, "-TERM");
+        Self::kill_processes_on_port(port, "-TERM", None);
         std::thread::sleep(std::time::Duration::from_millis(400));
         if !Self::pids_on_port(port).is_empty() {
-            Self::kill_processes_on_port(port, "-KILL");
+            Self::kill_processes_on_port(port, "-KILL", None);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    fn clear_owned_mlx_port(&self, port: u16) {
+        let owned = self.owned_mlx_pid();
+        Self::kill_processes_on_port(port, "-TERM", owned);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        if !Self::pids_on_port(port).is_empty() {
+            Self::kill_processes_on_port(port, "-KILL", owned);
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
@@ -413,9 +444,22 @@ impl ProcessManager {
             return Ok(());
         }
 
-        if let Some(health) = Self::fetch_brain_health(state).await {
+        let health = Self::fetch_brain_health(state).await;
+        let generating = self.gateway.state() == crate::mlx_runtime::MlxState::Generating
+            || self.gateway.state() == crate::mlx_runtime::MlxState::Cancelling;
+        if let Some(health) = health.as_ref() {
             if health.is_current() {
+                if generating {
+                    info!("brain /embed skipped while mlx is generating");
+                    return Ok(());
+                }
                 if Self::check_brain_embed_with_timeout(state, 60).await {
+                    return Ok(());
+                }
+                if inference_gateway::brain_action_after_embed_probe(true, false, generating)
+                    == inference_gateway::BrainAction::Keep
+                {
+                    info!("brain /embed failed but mlx generation is active — keeping brain");
                     return Ok(());
                 }
                 warn!("brain health current but /embed failed — recycling");
@@ -425,6 +469,16 @@ impl ProcessManager {
                     routes = health.routes.len(),
                     "stale brain — recycling for /chat/talk"
                 );
+            }
+        } else {
+            let pids = Self::pids_on_port(Self::brain_port(state));
+            if !pids.is_empty() {
+                info!(?pids, "brain listener present but /health not up — waiting");
+                if self.wait_brain_current(state).await.is_ok() {
+                    if Self::check_brain_embed_with_timeout(state, 60).await || generating {
+                        return Ok(());
+                    }
+                }
             }
         }
 
@@ -742,11 +796,33 @@ impl ProcessManager {
         self.set_loaded_mlx_model(None);
     }
 
-    /// Abort an in-flight generation (Stop). mlx_lm.server cannot cancel a request otherwise.
-    pub fn interrupt_mlx(&self, state: &AppState) {
-        info!("interrupting mlx generation");
+    /// Abort an in-flight generation. mlx_lm.server cannot cancel a request otherwise.
+    pub fn interrupt_mlx(&self, state: &AppState, reason: &str) {
+        info!(reason, "interrupting mlx generation");
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-472329.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                r#"{{"sessionId":"472329","hypothesisId":"A","location":"services/mod.rs:interrupt_mlx","message":"interrupt mlx","data":{{"reason":"{}","state":"{:?}","owned":{}}},"timestamp":{}}}"#,
+                reason,
+                self.gateway.state(),
+                self.mlx_owned.load(Ordering::SeqCst),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+        }
+        // #endregion
+        let port = Self::mlx_port(state);
+        self.clear_owned_mlx_port(port);
         self.stop_mlx();
-        Self::clear_port(Self::mlx_port(state));
+        self.gateway.force_state(crate::mlx_runtime::MlxState::Stopped);
     }
 
     pub fn stop_owned_services(&self) {

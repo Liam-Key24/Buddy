@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use buddy_core::Route;
+use buddy_core::{BuddyPlugin, Route};
 use buddy_database::{forecast_goal, propose_portfolio, Database, Goal, GoalForecast, UpsertGoal};
 use buddy_memory::MemoryManager;
-use buddy_plugins::PluginManager;
+use buddy_plugins::{GoalsPlugin, PluginManager};
 
 fn surface() -> (std::path::PathBuf, buddy_plugins::PluginSurface) {
     let dir = std::env::temp_dir().join(format!("buddy-goals-{}", uuid::Uuid::new_v4()));
@@ -97,4 +97,35 @@ fn canonical_goal_look() {
         Route::Tools(jobs) => assert_eq!(jobs[0].tool, "goal.look"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn v6_sentence_extracts_goal_intake() {
+    let (_dir, surface) = surface();
+    match surface.route("I want to climb V6 by the end of November") {
+        Route::Tools(jobs) => {
+            assert!(jobs.iter().any(|j| j.tool == "goal.intake"));
+            assert!(jobs[0].input.contains("Climb V6") || jobs[0].input.contains("climb V6"));
+            assert!(jobs[0].input.contains("11-30") || jobs[0].input.contains("deadline"));
+        }
+        other => panic!("expected extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn goal_intake_idempotency_key_does_not_create_two_goals() {
+    let dir = std::env::temp_dir().join(format!("buddy-goals-idem-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Arc::new(Database::open(&dir.join("buddy.db")).unwrap());
+    let intake = GoalsPlugin
+        .tools(db.clone())
+        .into_iter()
+        .find(|t| t.name() == "goal.intake")
+        .expect("goal.intake");
+    let input = r#"{"title":"Climb V6","deadline":"2026-11-30","idempotency_key":"turn-a:0"}"#;
+    let first = intake.execute(input).unwrap();
+    let second = intake.execute(input).unwrap();
+    assert!(!first.output.contains("\"scheduled\":true"));
+    assert!(second.output.contains("idempotent_reuse"));
+    assert_eq!(db.list_goals(None).unwrap().len(), 1);
 }

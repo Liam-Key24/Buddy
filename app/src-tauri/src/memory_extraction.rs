@@ -121,7 +121,7 @@ pub async fn run_memory_extraction(
     };
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(90))
         .build()
         .map_err(|e| e.to_string())?;
     let http_response = client

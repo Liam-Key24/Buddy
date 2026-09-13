@@ -77,6 +77,7 @@ fn detect_fitness(input: &SkillDetectIn<'_>) -> bool {
             "i eat",
             "climbed",
             "climbing",
+            "climb",
             "bouldering",
             "weigh in",
             "log weight",

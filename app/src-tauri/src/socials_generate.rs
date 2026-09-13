@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use buddy_database::{local_today, week_commencing_monday, SocialPost, SocialWeeklyPlan};
 use serde::Deserialize;
@@ -8,6 +7,8 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::inference_gateway::{self, CompleteKind};
+use crate::run_control::RunScope;
 use crate::runtime_policy::RuntimePolicy;
 use crate::services::ProcessManager;
 use crate::state::AppState;
@@ -30,11 +31,6 @@ pub struct GeneratedSlot {
     pub thread_id: Option<String>,
     #[serde(default)]
     pub idea_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteHttp {
-    content: Option<String>,
 }
 
 const SYSTEM_PROMPT: &str = r#"You write a week of social posts for one person.
@@ -123,10 +119,8 @@ pub async fn generate_week(
         .collect();
 
     let policy = RuntimePolicy::cool();
-    let client = reqwest::Client::builder()
-        .timeout(policy.model_timeout + Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let scope = RunScope::try_start(&state.runs, &format!("socials:{week}"))
+        .map_err(|e| format!("I'm still finishing the last request ({})", e.conversation_id))?;
 
     let mut batches: Vec<Vec<SocialPost>> = Vec::new();
     let linkedin: Vec<_> = writable
@@ -152,7 +146,7 @@ pub async fn generate_week(
 
     for batch in batches {
         let user = build_user_prompt(&context, &batch, remake, &notes);
-        match complete_posts(&client, &state.brain_url(), &user).await {
+        match complete_posts(app, state, &scope.guard, &policy, &user).await {
             Ok(generated) => {
                 apply_generated(
                     state,
@@ -220,34 +214,28 @@ fn build_user_prompt(context: &str, batch: &[SocialPost], remake: bool, notes: &
 }
 
 async fn complete_posts(
-    client: &reqwest::Client,
-    brain_url: &str,
+    app: &AppHandle,
+    state: &AppState,
+    run: &crate::run_control::RunGuard,
+    policy: &RuntimePolicy,
     user: &str,
 ) -> Result<Vec<GeneratedSlot>, String> {
-    let policy = RuntimePolicy::cool();
-    let resp = tokio::time::timeout(
-        policy.model_timeout,
-        client.post(format!("{brain_url}/v1/complete")).json(&json!({
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-            ],
-            "tools": [],
-            "max_tokens": policy.tokens_for_qwen(),
-            "temperature": TEMPERATURE,
-        })).send(),
+    let parsed = inference_gateway::complete_live(
+        app,
+        state,
+        run,
+        policy,
+        &[
+            json!({"role": "system", "content": SYSTEM_PROMPT}),
+            json!({"role": "user", "content": user}),
+        ],
+        &[],
+        CompleteKind::Socials,
+        "socials",
+        "socials-week",
     )
     .await
-    .map_err(|_| "model timed out".to_string())?
-    .map_err(|e| format!("brain complete request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("brain complete HTTP {}", resp.status()));
-    }
-    let parsed: CompleteHttp = resp
-        .json()
-        .await
-        .map_err(|e| format!("brain complete parse failed: {e}"))?;
+    .map_err(|e| e.as_str().to_string())?;
     parse_generated_posts(parsed.content.as_deref().unwrap_or(""))
 }
 

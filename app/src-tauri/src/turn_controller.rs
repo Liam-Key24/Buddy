@@ -190,8 +190,20 @@ impl TurnController {
         .await
     }
 
-    /// Only place the production turn picks a hidden inference lane.
+    /// Production lane. Llama is only available when the disabled-by-default cache flag is on.
     pub fn lane_for(text: &str, ui_context: Option<&str>, qwen_resident: bool) -> ModelLane {
+        Self::lane_for_policy(text, ui_context, qwen_resident, &RuntimePolicy::cool())
+    }
+
+    pub fn lane_for_policy(
+        text: &str,
+        ui_context: Option<&str>,
+        qwen_resident: bool,
+        policy: &RuntimePolicy,
+    ) -> ModelLane {
+        if !policy.llama_chat_cache {
+            return ModelLane::QwenComplete;
+        }
         ModelLane::select(crate::native_loop::is_trivial_chat(text, ui_context), qwen_resident)
     }
 }
@@ -225,11 +237,17 @@ mod tests {
     fn controller_picks_the_lane_from_text() {
         assert_eq!(
             TurnController::lane_for("hey", None, false),
-            ModelLane::LlamaTalk
+            ModelLane::QwenComplete
         );
         assert_eq!(
             TurnController::lane_for("book the dentist tomorrow at 2", None, false),
             ModelLane::QwenComplete
+        );
+        let mut llama_on = RuntimePolicy::cool();
+        llama_on.llama_chat_cache = true;
+        assert_eq!(
+            TurnController::lane_for_policy("hey", None, false, &llama_on),
+            ModelLane::LlamaTalk
         );
     }
 

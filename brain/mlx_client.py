@@ -12,7 +12,8 @@ AGENT_TEMPERATURE = 0.2
 
 class MLXClient:
     def __init__(self, base_url: str, model: str):
-        self.client = OpenAI(base_url=base_url, api_key="not-needed", timeout=15.0)
+        # Must be ≥ Rust cold_first_generation (180s).
+        self.client = OpenAI(base_url=base_url, api_key="not-needed", timeout=180.0)
         self.model = model
 
     def _create(self, **kwargs):
@@ -57,24 +58,33 @@ class MLXClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        used_tools = bool(tools)
+        used_tools = False
         if tools:
-            create_kwargs["tools"] = tools
+            # mlx_lm.server hangs on native tools=; always prompt-inject XML.
+            create_kwargs["messages"] = apply_no_think(
+                _inject_tools_into_messages(messages, tools)
+            )
+        # #region agent log
         try:
-            response = self._create(**create_kwargs)
-        except TypeError:
-            create_kwargs.pop("tools", None)
-            used_tools = False
-            response = self._create(**create_kwargs)
-        except Exception:
-            if "tools" not in create_kwargs:
-                raise
-            # Stock mlx_lm.server may reject tools= — prompt-inject and parse XML.
-            create_kwargs.pop("tools", None)
-            used_tools = False
-            injected = _inject_tools_into_messages(messages, tools or [])
-            create_kwargs["messages"] = apply_no_think(injected)
-            response = self._create(**create_kwargs)
+            import json as _json
+            import time as _time
+            with open("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-472329.log", "a") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "472329",
+                    "hypothesisId": "A",
+                    "location": "mlx_client.py:complete_with_tools",
+                    "message": "mlx create",
+                    "data": {
+                        "tools_mode": "prompt_inject" if tools else "plain",
+                        "tool_count": len(tools or []),
+                        "max_tokens": max_tokens,
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n")
+        except OSError:
+            pass
+        # #endregion
+        response = self._create(**create_kwargs)
 
         choice = response.choices[0]
         message = choice.message

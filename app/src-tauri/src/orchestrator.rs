@@ -241,6 +241,7 @@ pub async fn run_turn(
             &text,
             &personality,
             &mut session.trace,
+            &session.policy,
         )
         .await?
         {
@@ -275,9 +276,8 @@ pub async fn run_turn(
         }
     }
 
-    // Resume native transcript (no re-classify).
+    // Resume native transcript (no re-classify). Gateway owns MLX wake.
     if has_native {
-        wake_mlx(&app, state).await;
         match native_loop::run_native_turn(
             &app,
             state,
@@ -384,7 +384,12 @@ pub async fn run_turn(
     let qwen_resident = app
         .try_state::<Arc<ProcessManager>>()
         .is_some_and(|pm| pm.tool_model_loaded(state));
-    let lane = TurnController::lane_for(&text, ui_context.as_deref(), qwen_resident);
+    let lane = TurnController::lane_for_policy(
+        &text,
+        ui_context.as_deref(),
+        qwen_resident,
+        &session.policy,
+    );
     let chat_mode = lane.native_mode();
 
     // Llama is only a latency cache for short chitchat when Qwen is not already loaded.
@@ -437,7 +442,7 @@ pub async fn run_turn(
     }
 
     session.set_phase(TurnPhase::Execute);
-    wake_mlx(&app, state).await;
+    persist_pending_interpretation(state, &conversation_id, &text, &session.trace.skill_ids);
     match native_loop::run_native_turn(
         &app,
         state,
@@ -459,6 +464,7 @@ pub async fn run_turn(
     .await?
     {
         NativeOutcome::Stopped(content) => {
+            mark_work_interpretation(state, &conversation_id, "stopped");
             seal_session(&app, state, session, lane.path());
             persist_assistant_turn(
                 &app,
@@ -471,6 +477,11 @@ pub async fn run_turn(
             return Ok(());
         }
         NativeOutcome::Done(content) | NativeOutcome::Paused(content) => {
+            mark_work_interpretation(
+                state,
+                &conversation_id,
+                interpretation_status_for(&content),
+            );
             state
                 .db
                 .add_message_with_metadata(
@@ -493,6 +504,7 @@ pub async fn run_turn(
         }
         NativeOutcome::Fallback(err) => {
             info!(error = %err, "native loop failed");
+            mark_work_interpretation(state, &conversation_id, "service_unavailable");
             let content = style_response(
                 &personality,
                 "I couldn't reach the local model. Try again in a moment.",
@@ -705,13 +717,57 @@ async fn try_canonical_route(
     text: &str,
     personality: &PersonalityProfile,
     trace: &mut TurnTrace,
+    policy: &RuntimePolicy,
 ) -> Result<Option<String>, String> {
     let Route::Tools(jobs) = state.plugins.route(text) else {
+        // #region agent log
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-472329.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "{}",
+                json!({
+                    "sessionId": "472329",
+                    "hypothesisId": "E",
+                    "location": "orchestrator.rs:try_canonical_route",
+                    "message": "canonical miss",
+                    "data": {"text_len": text.len()},
+                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                })
+            );
+        }
+        // #endregion
         return Ok(None);
     };
     if jobs.is_empty() {
         return Ok(None);
     }
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-472329.log")
+    {
+        use std::io::Write;
+        let tools: Vec<&str> = jobs.iter().map(|j| j.tool.as_str()).collect();
+        let _ = writeln!(
+            f,
+            "{}",
+            json!({
+                "sessionId": "472329",
+                "hypothesisId": "E",
+                "location": "orchestrator.rs:try_canonical_route",
+                "message": "canonical hit",
+                "data": {"tools": tools, "first_input": jobs.first().map(|j| j.input.clone())},
+                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+            })
+        );
+    }
+    // #endregion
     emit_trace(app, "running", "Canonical tool");
     state.memory.clear_agent_turn(conversation_id);
     let mut turn = AgentTurn {
@@ -721,7 +777,6 @@ async fn try_canonical_route(
     let mut replies: Vec<String> = Vec::new();
     let mut used_tools: Vec<String> = Vec::new();
     let mut last_doc: Option<String> = None;
-    let policy = crate::runtime_policy::RuntimePolicy::cool();
     let mut seen = std::collections::HashSet::new();
     let planned = jobs.len() as u32;
     for job in jobs {
@@ -1291,7 +1346,7 @@ async fn try_stream_talk(
     let mut stream = resp.bytes_stream();
     let mut assistant_content = String::new();
     let mut got_token = false;
-    let first_token = tokio::time::sleep(RuntimePolicy::cool().model_timeout);
+    let first_token = tokio::time::sleep(RuntimePolicy::cool().warm_generation);
     tokio::pin!(first_token);
     loop {
         tokio::select! {
@@ -1385,7 +1440,7 @@ async fn stream_chat_reply(
     let mut stream = resp.bytes_stream();
     let mut assistant_content = String::new();
     let mut got_token = false;
-    let first_token = tokio::time::sleep(RuntimePolicy::cool().model_timeout);
+    let first_token = tokio::time::sleep(RuntimePolicy::cool().warm_generation);
     tokio::pin!(first_token);
     loop {
         tokio::select! {
@@ -1430,6 +1485,35 @@ async fn stream_chat_reply(
     Ok(assistant_content)
 }
 
+fn interpretation_status_for(content: &str) -> &'static str {
+    if content.contains("safe working time") || content.contains("took too long to start") {
+        "timed_out"
+    } else {
+        "done"
+    }
+}
+
+fn mark_work_interpretation(state: &AppState, conversation_id: &str, status: &str) {
+    if let Some(mut item) = state.memory.get_work_item(conversation_id) {
+        item.mark_interpretation(status);
+        state.memory.set_work_item(item);
+    }
+}
+
+fn persist_pending_interpretation(
+    state: &AppState,
+    conversation_id: &str,
+    text: &str,
+    skills: &[String],
+) {
+    let mut item = state
+        .memory
+        .get_work_item(conversation_id)
+        .unwrap_or_else(|| crate::work_item::WorkItem::new(conversation_id));
+    item.mark_pending_interpretation(text, skills.to_vec());
+    state.memory.set_work_item(item);
+}
+
 pub(crate) fn persist_assistant_turn(
     app: &AppHandle,
     state: &AppState,
@@ -1460,7 +1544,7 @@ fn persist_stopped(
     conversation_id: &str,
     personality: &PersonalityProfile,
 ) -> Result<(), String> {
-    let content = style_response(personality, "Stopped. Completed work is saved.");
+    let content = style_response(personality, crate::inference_gateway::stopped_copy(true));
     let _ = app.emit("chat-chunk", &content);
     persist_assistant_turn(
         app,

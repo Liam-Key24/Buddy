@@ -34,6 +34,7 @@ interface ChatState {
   streamingContent: string;
   traceSteps: TraceStep[];
   activeAsk: StructuredAsk | null;
+  canRetry: boolean;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
   beginSend: (text: string) => void;
@@ -45,6 +46,7 @@ interface ChatState {
   appendTrace: (step: string, detail: string) => void;
   clearTrace: () => void;
   setActiveAsk: (ask: StructuredAsk | null) => void;
+  setCanRetry: (canRetry: boolean) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -54,6 +56,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingContent: "",
   traceSteps: [],
   activeAsk: null,
+  canRetry: false,
   setMessages: (messages) => set({ messages }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
@@ -72,11 +75,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       isStreaming: true,
       traceSteps: [],
       activeAsk: null,
+      canRetry: false,
     })),
   appendStreaming: (chunk) =>
     set((state) => ({ streamingContent: state.streamingContent + chunk })),
   finalizeStreaming: () => {
     const { streamingContent } = get();
+    const canRetry = /request is saved|stopped safely/i.test(streamingContent);
     if (streamingContent) {
       set((state) => ({
         messages: [
@@ -91,9 +96,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streamingContent: "",
         isStreaming: false,
         traceSteps: [],
+        canRetry,
       }));
     } else {
-      set({ isStreaming: false, traceSteps: [] });
+      set({ isStreaming: false, traceSteps: [], canRetry });
     }
   },
   setActiveConversationId: (id) => set({ activeConversationId: id }),
@@ -109,4 +115,5 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
   clearTrace: () => set({ traceSteps: [] }),
   setActiveAsk: (ask) => set({ activeAsk: ask }),
+  setCanRetry: (canRetry) => set({ canRetry }),
 }));

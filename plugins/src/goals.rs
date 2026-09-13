@@ -8,6 +8,7 @@ use buddy_database::{
     catch_up_options, forecast_goal, local_today, propose_portfolio, Database, GoalForecast,
     UpsertGoal,
 };
+use chrono::Datelike;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -26,6 +27,112 @@ const GOAL_INTAKE_SCHEMA: ToolSchema = ToolSchema {
     tool: "goal.intake",
     fields: GOAL_INTAKE_FIELDS,
 };
+
+fn extract_goal_intake(text: &str) -> Option<String> {
+    if let Some(cap) = extract_spending_cap(text) {
+        return Some(cap);
+    }
+    extract_want_by_horizon(text)
+}
+
+fn extract_want_by_horizon(text: &str) -> Option<String> {
+    let lower = text.trim().to_ascii_lowercase();
+    if !lower.contains("i want to") && !lower.contains("my goal is") {
+        return None;
+    }
+    let deadline = deadline_from_text(&lower)?;
+    let title = title_from_want(text)?;
+    if title.len() < 2 {
+        return None;
+    }
+    Some(
+        json!({
+            "title": title,
+            "deadline": deadline,
+            "assumptions": ["No calendar time was reserved. Use goal.propose_plan when ready."],
+            "idempotency_key": format!("extract:{}:{deadline}", title.to_ascii_lowercase()),
+        })
+        .to_string(),
+    )
+}
+
+fn deadline_from_text(lower: &str) -> Option<String> {
+    const MONTHS: &[(&str, u32)] = &[
+        ("january", 1),
+        ("february", 2),
+        ("march", 3),
+        ("april", 4),
+        ("may", 5),
+        ("june", 6),
+        ("july", 7),
+        ("august", 8),
+        ("september", 9),
+        ("october", 10),
+        ("november", 11),
+        ("december", 12),
+    ];
+    let after_by = lower.splitn(2, " by ").nth(1)?;
+    let today = chrono::Local::now().date_naive();
+    for (name, month) in MONTHS {
+        if !after_by
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| w == *name)
+        {
+            continue;
+        }
+        let mut year = today.year();
+        if *month < today.month() {
+            year += 1;
+        }
+        let last = last_day(year, *month)?;
+        return Some(format!("{year:04}-{month:02}-{last:02}"));
+    }
+    None
+}
+
+fn last_day(year: i32, month: u32) -> Option<u32> {
+    use chrono::{Datelike, NaiveDate};
+    NaiveDate::from_ymd_opt(year, month, 1)?
+        .checked_add_months(chrono::Months::new(1))?
+        .pred_opt()
+        .map(|d| d.day())
+}
+
+fn title_from_want(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower
+        .find("i want to")
+        .map(|i| i + "i want to".len())
+        .or_else(|| lower.find("my goal is to").map(|i| i + "my goal is to".len()))
+        .or_else(|| lower.find("my goal is").map(|i| i + "my goal is".len()))?;
+    let mut rest = text.get(start..)?.trim();
+    let rest_l = rest.to_ascii_lowercase();
+    if let Some(i) = rest_l.find(" by ") {
+        rest = rest[..i].trim();
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some(pretty_goal_title(rest))
+}
+
+fn pretty_goal_title(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let l = w.to_ascii_lowercase();
+            if l.starts_with('v') && l.len() > 1 && l[1..].chars().all(|c| c.is_ascii_digit()) {
+                format!("V{}", &l[1..])
+            } else {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn extract_spending_cap(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
@@ -65,7 +172,7 @@ const GOAL_SPECS: &[ToolSpec] = &[
         permission: Permission::None,
         respond: buddy_core::RespondMode::Passthrough,
         likely: &["i want to", "my goal", "by december"],
-        extract: Some(extract_spending_cap),
+        extract: Some(extract_goal_intake),
         openai_properties_json: "",
     },
     ToolSpec::basic(
@@ -169,6 +276,8 @@ struct IntakeIn {
     motivation: Option<String>,
     #[serde(default)]
     assumptions: Option<Vec<String>>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 impl Tool for IntakeTool {
@@ -177,6 +286,28 @@ impl Tool for IntakeTool {
     }
     fn execute(&self, input: &str) -> Result<ToolResult, ToolError> {
         let parsed: IntakeIn = parse_tool_json(input, "goal.intake").unwrap_or_default();
+        if let Some(key) = parsed
+            .idempotency_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+        {
+            let marker = format!("idempotency:{key}");
+            if let Ok(existing) = self.db.list_goals(None) {
+                if let Some(goal) = existing.into_iter().find(|g| g.assumptions.iter().any(|a| a == &marker))
+                {
+                    return Ok(ToolResult {
+                        output: json!({
+                            "status": "idempotent_reuse",
+                            "goals": [goal],
+                            "questions": [],
+                            "scheduled": false,
+                            "note": "No calendar time was reserved. Use goal.propose_plan when ready."
+                        })
+                        .to_string(),
+                    });
+                }
+            }
+        }
         let mut drafts = parsed.goals.unwrap_or_default();
         if drafts.is_empty() {
             let title = parsed.title.unwrap_or_default();
@@ -207,6 +338,12 @@ impl Tool for IntakeTool {
             }
             if draft.deadline.is_none() {
                 questions.push(format!("Hard deadline for '{}'?", draft.title));
+            }
+            if let Some(key) = parsed.idempotency_key.as_deref() {
+                let marker = format!("idempotency:{key}");
+                if !assumptions.iter().any(|a| a == &marker) {
+                    assumptions.push(marker);
+                }
             }
             let mut input = draft;
             input.assumptions = assumptions;

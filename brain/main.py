@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Literal, Optional
@@ -20,15 +21,6 @@ from mlx_client import (
     NARRATE_MAX_TOKENS,
     MLXClient,
 )
-from parser import (
-    CALENDAR_SCHEDULE_TASK,
-    apply_respond_mode,
-    parse_extraction,
-    _looks_like_week_plan,
-    _matches_any,
-    _parse_multi_schedule_tasks,
-)
-from plan_pipeline import run_classify_fill
 from prompts import respond_system_prompt
 from prompts.memory import EXTRACTION_PROMPTS
 
@@ -40,6 +32,13 @@ MAX_EMBED_CHARS = 16_000
 
 def _schedule_source_text(req: "PlanRequest") -> str:
     """Prefer prior user content when the message is 'add this/these to my calendar'."""
+    from parser import (
+        CALENDAR_SCHEDULE_TASK,
+        _looks_like_week_plan,
+        _matches_any,
+        _parse_multi_schedule_tasks,
+    )
+
     msg = req.message.strip()
     lower = msg.lower()
     if not re.search(
@@ -129,7 +128,9 @@ BRAIN_ROUTES = [
 
 @app.on_event("startup")
 def _preload_embeddings():
-    preload_model()
+    # Do not block /health — a blocked startup made Rust treat Brain as dead
+    # and SIGTERM the process (and sometimes the Buddy app via lsof).
+    threading.Thread(target=preload_model, daemon=True, name="embed-preload").start()
 
 
 class HistoryMessage(BaseModel):
@@ -190,6 +191,7 @@ class CompleteRequest(BaseModel):
     tools: list[dict] = Field(default_factory=list, max_length=80)
     max_tokens: int = AGENT_MAX_TOKENS
     temperature: float = AGENT_TEMPERATURE
+    generation_id: Optional[str] = None
 
     @field_validator("messages")
     @classmethod
@@ -268,6 +270,8 @@ def health():
 
 
 def _plan_to_http(plan) -> PlanResponse:
+    from parser import apply_respond_mode
+
     plan = apply_respond_mode(plan)
     return PlanResponse(
         intent=plan.intent,
@@ -291,6 +295,8 @@ def _plan_to_http(plan) -> PlanResponse:
 @app.post("/chat/plan", response_model=PlanResponse)
 def chat_plan(req: PlanRequest):
     """Eval / repair only — production turns use Rust route() + `/v1/complete`."""
+    from plan_pipeline import run_classify_fill
+
     logger.info("plan request: %s", req.message[:80])
     start = time.time()
 
@@ -447,14 +453,48 @@ def chat_respond(req: RespondRequest):
     )
 
 
+def _dbg_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # #region agent log
+    try:
+        with open("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-472329.log", "a") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "472329",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+
 @app.post("/v1/complete", response_model=CompleteResponse)
 def v1_complete(req: CompleteRequest):
     logger.info(
-        "complete request messages=%d tools=%d",
+        "complete request messages=%d tools=%d generation_id=%s",
         len(req.messages or []),
         len(req.tools or []),
+        req.generation_id or "-",
     )
     start = time.time()
+    _dbg_log(
+        "C",
+        "brain/main.py:v1_complete",
+        "complete start",
+        {
+            "generation_id": req.generation_id,
+            "messages": len(req.messages or []),
+            "tools": len(req.tools or []),
+            "max_tokens": req.max_tokens,
+        },
+    )
     try:
         result = mlx.complete_with_tools(
             messages=req.messages,
@@ -464,6 +504,12 @@ def v1_complete(req: CompleteRequest):
         )
     except Exception as e:
         logger.warning("complete failed: %s", e)
+        _dbg_log(
+            "C",
+            "brain/main.py:v1_complete",
+            "complete failed",
+            {"error": str(e), "elapsed_ms": int((time.time() - start) * 1000)},
+        )
         raise
     content = strip_think(result.get("content"))
     tool_calls = [
@@ -480,6 +526,17 @@ def v1_complete(req: CompleteRequest):
         result.get("finish_reason"),
         len(tool_calls),
         int((time.time() - start) * 1000),
+    )
+    _dbg_log(
+        "C",
+        "brain/main.py:v1_complete",
+        "complete finish",
+        {
+            "generation_id": req.generation_id,
+            "tool_calls": len(tool_calls),
+            "elapsed_ms": int((time.time() - start) * 1000),
+            "finish_reason": result.get("finish_reason"),
+        },
     )
     return CompleteResponse(
         content=content or None,
@@ -507,6 +564,8 @@ def memory_extract(req: ExtractRequest):
     messages = [{"role": "user", "content": user_content}]
 
     try:
+        from parser import parse_extraction
+
         raw = mlx.complete(
             system=prompt,
             messages=messages,
@@ -515,6 +574,8 @@ def memory_extract(req: ExtractRequest):
         )
         data = parse_extraction(req.kind, raw)
     except Exception as e:
+        from parser import parse_extraction
+
         logger.warning("memory extract fallback: %s", e)
         data = parse_extraction(req.kind, "")
 

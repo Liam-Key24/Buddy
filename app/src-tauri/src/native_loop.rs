@@ -1,7 +1,7 @@
 //! Native tool-call agent loop: Brain `/v1/complete` + Core execution.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use buddy_calendar::parse_when_label;
 use buddy_memory::{HistoryMessage, MemoryContext};
@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
 use crate::calendar_look;
+use crate::inference_gateway::{self, CompleteHttp, CompleteKind};
 use crate::memory_extraction::BrainMemoryContext;
 use crate::orchestrator::{
     emit_trace, execute_tool_step, AgentTurn, ScratchStep, ToolStepOutcome,
@@ -47,23 +48,6 @@ pub struct WorkspaceFocus {
     pub focus_doc: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CompleteHttp {
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<CompleteToolCallHttp>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompleteToolCallHttp {
-    id: String,
-    name: String,
-    #[serde(default)]
-    arguments: Value,
-}
 
 pub enum NativeOutcome {
     Done(String),
@@ -182,45 +166,29 @@ fn arguments_string(args: &Value) -> String {
 }
 
 async fn brain_complete(
-    client: &reqwest::Client,
-    brain_url: &str,
+    app: &AppHandle,
+    state: &AppState,
     messages: &[Value],
     tools: &[Value],
     run: &RunGuard,
-    max_tokens: u32,
-    temperature: f32,
-    timeout: Duration,
+    policy: &RuntimePolicy,
+    kind: CompleteKind,
+    conversation_id: &str,
+    turn_id: &str,
 ) -> Result<CompleteHttp, String> {
-    info!("native complete waiting on /v1/complete");
-    let request = client
-        .post(format!("{brain_url}/v1/complete"))
-        .json(&json!({
-            "messages": messages,
-            "tools": tools,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }));
-    let http = async {
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| format!("brain complete request failed: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("brain complete HTTP {}", resp.status()));
-        }
-        resp.json::<CompleteHttp>()
-            .await
-            .map_err(|e| format!("brain complete parse failed: {e}"))
-    };
-    tokio::select! {
-        _ = run.cancelled() => {
-            Err("stopped".into())
-        }
-        _ = tokio::time::sleep(timeout) => {
-            Err("model timed out".into())
-        }
-        res = http => res,
-    }
+    inference_gateway::complete_live(
+        app,
+        state,
+        run,
+        policy,
+        messages,
+        tools,
+        kind,
+        conversation_id,
+        turn_id,
+    )
+    .await
+    .map_err(|e| e.as_str().to_string())
 }
 
 /// Run or resume the native tool loop.
@@ -228,7 +196,7 @@ async fn brain_complete(
 pub async fn run_native_turn(
     app: &AppHandle,
     state: &AppState,
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     ctx: &MemoryContext,
     conversation_id: &str,
     text: &str,
@@ -241,7 +209,7 @@ pub async fn run_native_turn(
     chat_mode: ChatMode,
     trace: &mut TurnTrace,
     policy: &RuntimePolicy,
-    started: Instant,
+    _started: Instant,
 ) -> Result<NativeOutcome, String> {
     let conv_kind = state
         .db
@@ -324,20 +292,28 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
     let mut seen_tools: HashSet<String> = HashSet::new();
     let max_steps = policy.max_model_calls.max(1) as usize;
     let planned_tools = 0u32;
+    let turn_id = state
+        .memory
+        .get_work_item(conversation_id)
+        .and_then(|w| w.turn_id)
+        .unwrap_or_else(|| format!("turn:{conversation_id}"));
+    let mut ready_at: Option<Instant> = None;
 
     for step in 0..max_steps {
         if run.is_cancelled() {
             save_transcript(state, conversation_id, &transcript);
             return Ok(stopped_outcome(app, state, conversation_id, personality));
         }
-        if started.elapsed() >= policy.turn_deadline {
-            trace.safety_budget = true;
-            trace.exit_reason = Some("deadline".into());
-            trace.set_path(TurnPath::Deadline);
-            save_transcript(state, conversation_id, &transcript);
-            let content = budget_message(personality, used_tools.len() as u32, planned_tools, "the time limit");
-            let _ = app.emit("chat-chunk", &content);
-            return Ok(NativeOutcome::Paused(content));
+        if let Some(ready) = ready_at {
+            if ready.elapsed() >= policy.turn_deadline() {
+                trace.safety_budget = true;
+                trace.exit_reason = Some("deadline".into());
+                trace.set_path(TurnPath::Deadline);
+                save_transcript(state, conversation_id, &transcript);
+                let content = budget_message(personality, used_tools.len() as u32, planned_tools, "the time limit");
+                let _ = app.emit("chat-chunk", &content);
+                return Ok(NativeOutcome::Paused(content));
+            }
         }
         if trace.model_call_count >= policy.max_model_calls {
             break;
@@ -347,40 +323,40 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
             "planning",
             &format!("Waiting on model ({}/{})", step + 1, max_steps),
         );
-        crate::orchestrator::wake_mlx(app, state).await;
-        let (max_tokens, temperature) = if chat_mode == ChatMode::Talk {
-            (policy.tokens_for_llama(), 0.7_f32)
+        let kind = if chat_mode == ChatMode::Talk {
+            CompleteKind::Chat
         } else {
-            (policy.tokens_for_qwen(), 0.2_f32)
+            CompleteKind::Interpret
         };
         let mut complete = match brain_complete(
-            client,
-            &state.brain_url(),
+            app,
+            state,
             &transcript.messages,
             &tools,
             run,
-            max_tokens,
-            temperature,
-            policy.model_timeout,
+            policy,
+            kind,
+            conversation_id,
+            &turn_id,
         )
         .await
         {
             Ok(c) => {
+                if ready_at.is_none() {
+                    ready_at = Some(Instant::now());
+                }
                 trace.model_call_count += 1;
                 c
             }
             Err(err) => {
                 warn!(error = %err, step, "native complete failed");
-                if run.is_cancelled() || err == "stopped" {
+                if run.is_cancelled() || err.contains("Stopped") {
                     save_transcript(state, conversation_id, &transcript);
                     return Ok(stopped_outcome(app, state, conversation_id, personality));
                 }
-                if err.contains("timed out") {
+                if err.contains("took too long") || err.contains("safe working time") {
                     save_transcript(state, conversation_id, &transcript);
-                    let content = style_response(
-                        personality,
-                        "That took too long. Stop next time, or try a shorter question.",
-                    );
+                    let content = style_response(personality, &err);
                     let _ = app.emit("chat-chunk", &content);
                     return Ok(NativeOutcome::Paused(content));
                 }
@@ -434,7 +410,7 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
 
             let mut capped = false;
             for call in &complete.tool_calls {
-                if started.elapsed() >= policy.turn_deadline {
+                if ready_at.is_some_and(|t| t.elapsed() >= policy.turn_deadline()) {
                     trace.safety_budget = true;
                     trace.exit_reason = Some("deadline".into());
                     trace.set_path(TurnPath::Deadline);
@@ -465,6 +441,22 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                     goal: transcript.goal.clone(),
                     scratchpad: transcript.scratchpad.clone(),
                 };
+                let idem = crate::runtime_policy::action_idempotency_key(&turn_id, trace.tool_steps);
+                input = inject_idempotency_key(&tool_name, &input, &idem);
+                if state
+                    .memory
+                    .get_work_item(conversation_id)
+                    .is_some_and(|w| w.already_did(&idem))
+                {
+                    info!(tool = %tool_name, %idem, "skipping duplicate mutation");
+                    transcript.messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": tool_name,
+                        "content": "{\"status\":\"idempotent_reuse\"}",
+                    }));
+                    continue;
+                }
                 let output = match execute_tool_step(
                     app,
                     state,
@@ -493,8 +485,14 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
                         save_transcript(state, conversation_id, &transcript);
                         return Ok(NativeOutcome::Paused(content));
                     }
-                    ToolStepOutcome::Done { output, .. }
-                    | ToolStepOutcome::Failed { output, .. } => output,
+                    ToolStepOutcome::Done { output, .. } => {
+                        if let Some(mut item) = state.memory.get_work_item(conversation_id) {
+                            item.remember_idempotency(idem.clone());
+                            state.memory.set_work_item(item);
+                        }
+                        output
+                    }
+                    ToolStepOutcome::Failed { output, .. } => output,
                 };
 
                 transcript.messages.push(json!({
@@ -524,6 +522,15 @@ Skip GitHub. Nothing goes to Calendar until the user approves, then socials.comm
             }
             emit_workspace_focus(app, &used_tools, last_doc_output.as_deref());
             save_transcript(state, conversation_id, &transcript);
+            if should_follow_up_complete(
+                &used_tools,
+                trace.model_call_count,
+                policy.max_model_calls,
+                capped,
+            ) && step + 1 < max_steps
+            {
+                continue;
+            }
             let mut content = if phrased.is_empty() {
                 style_response(personality, "I couldn't complete those actions.")
             } else {
@@ -585,13 +592,43 @@ fn budget_message(
     style_response(personality, &body)
 }
 
+pub fn should_follow_up_complete(
+    used_tools: &[String],
+    model_calls: u32,
+    max_model_calls: u32,
+    capped: bool,
+) -> bool {
+    !capped
+        && !used_tools.is_empty()
+        && used_tools
+            .iter()
+            .all(|n| inference_gateway::is_readonly_tool(n))
+        && model_calls < max_model_calls
+}
+
+fn inject_idempotency_key(tool_name: &str, input: &str, key: &str) -> String {
+    if tool_name != "goal.intake" {
+        return input.to_string();
+    }
+    match serde_json::from_str::<Value>(input) {
+        Ok(Value::Object(mut map)) => {
+            map.insert("idempotency_key".into(), Value::String(key.to_string()));
+            Value::Object(map).to_string()
+        }
+        _ => input.to_string(),
+    }
+}
+
 fn stopped_outcome(
     app: &AppHandle,
     _state: &AppState,
     _conversation_id: &str,
     personality: &PersonalityProfile,
 ) -> NativeOutcome {
-    let content = style_response(personality, "Stopped. Completed work is saved.");
+    let content = style_response(
+        personality,
+        inference_gateway::stopped_copy(true),
+    );
     let _ = app.emit("chat-chunk", &content);
     NativeOutcome::Stopped(content)
 }
@@ -1508,6 +1545,9 @@ pub fn selectors_for_turn(
     if chat_mode == ChatMode::Talk {
         return Vec::new();
     }
+    if looks_like_goal_intake(text) {
+        return vec!["goal.intake", "goal.look"];
+    }
     let mut out = tool_prefixes_for_turn(text, ui_context);
     let dump = classify_life_dump(text, ui_context);
     if dump.blocks_complete() {
@@ -1532,6 +1572,32 @@ pub fn selectors_for_turn(
         }
     }
     out
+}
+
+/// Goal sentences like V6 must not drag in the full fitness write kit.
+pub fn looks_like_goal_intake(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let wants = has_any(&lower, &["i want to", "my goal", "my goals"]);
+    let horizon = has_any(
+        &lower,
+        &[
+            "by ",
+            "end of",
+            "november",
+            "december",
+            "january",
+            "february",
+            "march",
+            "april",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "deadline",
+        ],
+    );
+    wants && horizon
 }
 
 pub(crate) fn looks_like_dump(text: &str) -> bool {
@@ -3919,6 +3985,62 @@ on Tue 11 Aug, 8:45 AM–4:45 PM"#;
             ChatMode::Talk
         )
         .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod gateway_loop_tests {
+    use super::{
+        inject_idempotency_key, looks_like_goal_intake, selectors_for_turn,
+        should_follow_up_complete, ChatMode,
+    };
+
+    #[test]
+    fn day_dump_independent_writes_stay_one_model_call() {
+        let tools = vec![
+            "fitness.log_food".into(),
+            "money.log".into(),
+            "save_spark".into(),
+        ];
+        assert!(!should_follow_up_complete(&tools, 1, 2, false));
+    }
+
+    #[test]
+    fn look_then_decide_allows_one_follow_up() {
+        let tools = vec!["calendar.look".into(), "goal.look".into()];
+        assert!(should_follow_up_complete(&tools, 1, 2, false));
+        assert!(!should_follow_up_complete(&tools, 2, 2, false));
+        assert!(!should_follow_up_complete(&tools, 1, 2, true));
+    }
+
+    #[test]
+    fn v6_goal_sentence_attaches_only_goal_tools() {
+        let sel = selectors_for_turn(
+            "I want to climb V6 by the end of November",
+            None,
+            ChatMode::Tool,
+        );
+        assert_eq!(sel, vec!["goal.intake", "goal.look"]);
+        assert!(looks_like_goal_intake(
+            "i want to climb v6 by end of november"
+        ));
+        assert!(!looks_like_goal_intake("i climbed a 6a today"));
+    }
+
+    #[test]
+    fn goal_intake_gets_turn_index_idempotency_key() {
+        let out = inject_idempotency_key(
+            "goal.intake",
+            r#"{"title":"Climb V6","deadline":"2026-11-30"}"#,
+            "turn-a:0",
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["idempotency_key"], "turn-a:0");
+        assert_eq!(v["title"], "Climb V6");
+        assert_eq!(
+            inject_idempotency_key("calendar.look", "{}", "turn-a:0"),
+            "{}"
+        );
     }
 }
 

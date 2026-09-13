@@ -187,6 +187,16 @@ export async function stopRun(conversationId: string) {
   await invoke("stop_run", { conversationId });
 }
 
+export async function retryLastTurn(conversationId: string) {
+  const chat = useChatStore.getState();
+  chat.setCanRetry(false);
+  chat.setIsStreaming(true);
+  chat.clearTrace();
+  await withChatStreamListeners(conversationId, async () => {
+    await invoke("retry_last_turn", { conversationId });
+  });
+}
+
 async function withChatStreamListeners(
   conversationId: string,
   run: () => Promise<void>,
@@ -227,8 +237,11 @@ async function withChatStreamListeners(
   const unlistenDone = await listen("chat-done", async () => {
     await loadMessages(conversationId, { force: true });
     const store = useChatStore.getState();
+    const last = [...store.messages].reverse().find((m) => m.role === "assistant");
+    const canRetry = /request is saved|stopped safely/i.test(last?.content ?? "");
     store.clearStreaming();
     store.clearTrace();
+    store.setCanRetry(canRetry);
     teardown();
   });
 
