@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   createSpark,
   dismissSpark,
@@ -12,6 +13,7 @@ export function SparksPage() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
 
   async function reload() {
     setSparks(await fetchSparks());
@@ -40,7 +42,7 @@ export function SparksPage() {
     <section>
       <h1 className="page-title">Sparks</h1>
       <p className="page-sub">Capture ideas without turning them into commitments.</p>
-      {error && <p className="muted">{error}</p>}
+      {error && <div className="error-banner">{error}</div>}
 
       <form className="composer" onSubmit={onSubmit}>
         <textarea
@@ -49,32 +51,33 @@ export function SparksPage() {
           placeholder="A loose idea…"
           rows={2}
         />
-        <button type="submit" disabled={busy || !draft.trim()}>
-          Save spark
+        <button className="btn primary" type="submit" disabled={busy || !draft.trim()}>
+          Save
         </button>
       </form>
 
-      <div className="panel">
+      <div className="panel" style={{ marginTop: "0.85rem" }}>
         <h2>Open sparks</h2>
-        {!sparks.length && <p className="muted">No sparks yet.</p>}
+        {!sparks.length && <p className="empty-state">No sparks yet.</p>}
         <ul className="list">
           {sparks.map((s) => (
             <li key={s.id}>
               <div>{s.content}</div>
-              <div className="spark-actions">
+              <div className="actions">
                 <button
                   type="button"
-                  className="primary"
+                  className="btn primary"
                   onClick={async () => {
                     await promoteSpark(s.id);
                     await reload();
+                    navigate("/chat");
                   }}
                 >
-                  Promote to goal chat
+                  Promote to Chat
                 </button>
                 <button
                   type="button"
-                  className="ghost"
+                  className="btn ghost"
                   onClick={async () => {
                     await dismissSpark(s.id);
                     await reload();

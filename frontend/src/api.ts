@@ -41,6 +41,7 @@ export type ChatResponse = {
   booked_sessions?: Session[];
   sparks?: Spark[];
   unresolved?: string[];
+  ai_available?: boolean;
 };
 
 export type TodayResponse = {
@@ -51,11 +52,13 @@ export type TodayResponse = {
   progress: Array<{
     goal_id: string;
     title: string;
+    summary?: string;
     scheduled: number;
     completed: number;
     missed: number;
     proposed: number;
   }>;
+  resurfaced_spark?: Spark | null;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
@@ -86,6 +89,44 @@ export async function fetchToday(): Promise<TodayResponse> {
 
 export async function fetchSessions(): Promise<Session[]> {
   return json(await fetch(`${API_BASE}/calendar/sessions`));
+}
+
+export async function fetchFixedBlocks(): Promise<
+  Array<{ id: string; title: string; weekday: number; start_minute: number; end_minute: number }>
+> {
+  return json(await fetch(`${API_BASE}/calendar/fixed`));
+}
+
+export async function decideProposal(
+  batchId: string,
+  decision: "approve" | "reject" | "adjust",
+): Promise<{ booked?: Session[]; rejected?: number }> {
+  return json(
+    await fetch(`${API_BASE}/calendar/proposals/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch_id: batchId, decision }),
+    }),
+  );
+}
+
+export async function markSessionOutcome(
+  sessionId: string,
+  outcome: "completed" | "missed",
+): Promise<Session> {
+  return json(
+    await fetch(`${API_BASE}/calendar/sessions/outcome`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, outcome }),
+    }),
+  );
+}
+
+export async function fetchMessages(
+  conversationId: string,
+): Promise<Array<{ role: string; content: string }>> {
+  return json(await fetch(`${API_BASE}/conversations/${conversationId}/messages`));
 }
 
 export async function fetchSparks(): Promise<Spark[]> {

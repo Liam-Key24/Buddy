@@ -3,48 +3,71 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
-import { fetchSessions, formatSessionWhen, type Session } from "../api";
+import {
+  fetchSessions,
+  formatSessionWhen,
+  markSessionOutcome,
+  type Session,
+} from "../api";
 
-const STATUS_COLOR: Record<string, string> = {
-  proposed: "#8eb5c8",
-  scheduled: "#c8e08a",
-  completed: "#9ecb8a",
-  missed: "#e8a598",
-  rejected: "#777",
-};
+function eventClass(status: string): string {
+  if (status === "proposed") return "evt-proposed";
+  if (status === "scheduled") return "evt-scheduled";
+  if (status === "completed") return "evt-completed";
+  if (status === "missed") return "evt-missed";
+  if (status === "fixed") return "evt-fixed";
+  return "evt-scheduled";
+}
 
 export function CalendarPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [selected, setSelected] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function reload() {
+    setSessions(await fetchSessions());
+  }
 
   useEffect(() => {
-    fetchSessions()
-      .then(setSessions)
-      .catch((e: Error) => setError(e.message));
+    reload().catch((e: Error) => setError(e.message));
   }, []);
 
   const events = useMemo(
     () =>
       sessions.map((s) => ({
         id: s.id,
-        title: `${s.title} (${s.status})`,
+        title: s.title,
         start: s.start_at,
         end: s.end_at,
-        backgroundColor: STATUS_COLOR[s.status] ?? "#c8e08a",
-        borderColor: "transparent",
-        textColor: "#1a2420",
+        classNames: [eventClass(s.status)],
+        extendedProps: { session: s },
       })),
     [sessions],
   );
+
+  async function onOutcome(outcome: "completed" | "missed") {
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      await markSessionOutcome(selected.id, outcome);
+      await reload();
+      setSelected(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <section>
       <h1 className="page-title">Calendar</h1>
       <p className="page-sub">
-        Buddy’s own calendar for fixed, flexible, proposed, completed, and missed sessions.
+        Fixed commitments, proposed goal sessions, and what you approved, completed, or missed.
       </p>
-      {error && <p className="muted">{error}</p>}
-      <div className="panel calendar-panel">
+      {error && <div className="error-banner">{error}</div>}
+      <div className="calendar-wrap">
         <FullCalendar
           plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
           initialView="timeGridWeek"
@@ -56,19 +79,54 @@ export function CalendarPage() {
           height="auto"
           events={events}
           nowIndicator
+          eventClick={(info) => {
+            const session = info.event.extendedProps.session as Session | undefined;
+            if (session) setSelected(session);
+          }}
         />
       </div>
+
+      {selected && (
+        <div className="panel" style={{ marginTop: "0.85rem" }}>
+          <h2>Session</h2>
+          <p style={{ margin: "0 0 0.35rem" }}>
+            <strong>{selected.title}</strong>
+          </p>
+          <p className="muted" style={{ margin: 0 }}>
+            {formatSessionWhen(selected)} · {selected.status}
+            {selected.goal_id ? ` · linked goal` : ""}
+          </p>
+          {selected.status === "scheduled" && (
+            <div className="actions">
+              <button type="button" className="btn primary" disabled={busy} onClick={() => onOutcome("completed")}>
+                Mark completed
+              </button>
+              <button type="button" className="btn danger" disabled={busy} onClick={() => onOutcome("missed")}>
+                Mark missed
+              </button>
+            </div>
+          )}
+          <div className="actions">
+            <button type="button" className="btn ghost" onClick={() => setSelected(null)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="panel">
         <h2>Session list</h2>
-        {!sessions.length && <p className="muted">No sessions yet — approve a proposal in Chat.</p>}
+        {!sessions.length && (
+          <p className="empty-state">No sessions yet — approve a proposal in Chat.</p>
+        )}
         <ul className="list">
           {sessions.map((s) => (
-            <li key={s.id}>
-              <strong>{s.title}</strong>
-              <div className="muted">
-                {formatSessionWhen(s)} · {s.status}
-                {s.goal_id ? ` · goal ${s.goal_id.slice(0, 8)}` : ""}
+            <li key={s.id} className="session-row">
+              <div>
+                <strong>{s.title}</strong>
+                <div className="muted">{formatSessionWhen(s)}</div>
               </div>
+              <span className={`badge ${s.status}`}>{s.status}</span>
             </li>
           ))}
         </ul>
