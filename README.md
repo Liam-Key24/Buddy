@@ -24,7 +24,8 @@ One frontend, one backend, one database, one model.
 Preserved on disk (not in Git):
 
 - `brain/models/Qwen3-14B-4bit` — Buddy v1 model, keep until Qwen3.5 acceptance passes
-- Intended replacement: compatible 4-bit MLX `Qwen3.5-4B` stored under `brain/models/`
+- `brain/models/Qwen3.5-4B-4bit` — `mlx-community/Qwen3.5-4B-4bit` @ `0e7ffd5c…` (~3 GB)
+- Download cache colocated at `brain/models/.hf` (do not use a second `~/.cache` copy)
 
 ## Development
 
