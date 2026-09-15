@@ -20,14 +20,9 @@ export function AppShell() {
   return (
     <div className="app-shell">
       <nav className="nav-rail" aria-label="Primary">
-        <img
-          className="brand-mark"
-          src="/buddy-icon.png"
-          alt="Buddy"
-          title="Buddy"
-          width={30}
-          height={30}
-        />
+        <div className="brand-mark" title="Buddy">
+          B
+        </div>
         {links.map((link) => {
           const Icon = link.icon;
           return (
@@ -43,13 +38,18 @@ export function AppShell() {
           );
         })}
         <div className="nav-spacer" />
-        <NavLink
-          to="/settings"
+        <button
+          type="button"
+          className="nav-link"
           title="Settings"
-          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
+          onClick={() =>
+            window.alert(
+              "Settings stay secondary. Configure Cloud AI via GROQ_API_KEY on the local backend / Keychain in the Mac app.",
+            )
+          }
         >
-          <GearSix size={20} weight="regular" />
-        </NavLink>
+          <GearSix size={20} />
+        </button>
       </nav>
       <main className="content">
         <Outlet />
