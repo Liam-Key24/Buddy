@@ -38,18 +38,13 @@ export function AppShell() {
           );
         })}
         <div className="nav-spacer" />
-        <button
-          type="button"
-          className="nav-link"
+        <NavLink
+          to="/settings"
           title="Settings"
-          onClick={() =>
-            window.alert(
-              "Settings stay secondary. Configure Cloud AI via GROQ_API_KEY on the local backend / Keychain in the Mac app.",
-            )
-          }
+          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
         >
-          <GearSix size={20} />
-        </button>
+          <GearSix size={20} weight="regular" />
+        </NavLink>
       </nav>
       <main className="content">
         <Outlet />
