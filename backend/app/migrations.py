@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -144,5 +144,27 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 2)
         version = 2
+
+    if version < 3:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS categories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#93c5fd',
+                icon TEXT NOT NULL DEFAULT 'circle',
+                keywords TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "category_id" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN category_id TEXT")
+        conn.commit()
+        set_schema_version(conn, 3)
+        version = 3
 
     return version
