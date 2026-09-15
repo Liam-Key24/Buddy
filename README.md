@@ -1,131 +1,70 @@
 # Buddy
 
-A lightweight, local-first AI desktop assistant for macOS.
+Buddy turns unclear goals into realistic actions in its calendar, tracks what actually happens, and helps adjust the plan through natural conversation, with the user retaining final control.
 
-Buddy is a **thin orchestrator**. Capabilities live in plugins; intelligence
-lives in the Brain; persistence lives in Memory.
+## Experience
 
-```text
-                UI
-                 |
-              Buddy
-           (route only)
-                 |
-    --------------------------------
-    |              |               |
- Memory          Brain            Core
-    |                              |
-Intelligence                   PluginManager
- (internal)            Filesystem · Git · Calendar · Terminal · Coder · Notes
-```
+Four primary destinations:
 
-Clarification validates plans before Core. Personality only styles presentation.
+- **Today** — agreed sessions, active goals, items needing attention
+- **Chat** — natural discussion that owns goal intake
+- **Calendar** — fixed, flexible, proposed, completed, and missed sessions
+- **Sparks** — ideas without turning them into commitments
 
-## Turn flow
+Settings stay secondary. The interface refers to language understanding as **Cloud AI** (Groq).
 
-```text
-User → Buddy → Memory.get_context (soft-fail)
-            → Brain.plan
-            → Clarification (pending state in Memory)
-                 ├── missing → Personality question → UI
-                 └── ready → Core TaskRunner → Plugin
-            → Memory events → Personality style → UI
-```
+## Stack
 
-One execution pipeline: every capability is a Core tool (`coder.run`,
-`memory.handover`, `calendar.*`, …). The Code Agent page also runs through
-`coder.run` — there is no separate execution world.
+- `frontend/` — React, TypeScript, Vite, FullCalendar
+- `backend/` — FastAPI on `127.0.0.1`, SQLite, one Groq provider
+- One control plane: user message → one Groq request → validated `BuddyTurn` → deterministic handlers
 
-Buddy injects only generic session context (`conversation_id`, `workspace_path`,
-`user_message`). Tools decide which fields they need.
+## Cloud AI setup
 
-## Responsibilities
-
-| System | Owns |
-|---|---|
-| **Buddy** | Routing only (`orchestrator.rs`) |
-| **Brain** | Intent, plans, tool args, replies, heuristics |
-| **Clarification** | Schema gaps, Memory fills, ask facts |
-| **Personality** | Tone / phrasing / emoji policy (never truncates meaning) |
-| **Core** | Registry, TaskRunner, session merge, panic isolation |
-| **PluginManager** | Discovery, registration, catalog, schemas |
-| **Memory** | Context, pending tasks, events, handover (`MemoryApi`) |
-
-## Adding a plugin
-
-1. Implement `Tool` (+ optional `ToolSchema` fields) under `plugins/`.
-2. Register in `all_builtin_plugins` (or `PluginManager::register_extra` for shell tools).
-3. Do **not** edit Buddy’s orchestrator or AppState for domain logic.
-
-## Prerequisites
-
-- macOS (Apple Silicon recommended)
-- Rust, Node 18+, Python 3.10+
-
-## Setup
+1. Create a Groq API key.
+2. Enable **Zero Data Retention** in the Groq console for that key (Buddy cannot verify ZDR via API).
+3. Copy `backend/.env.example` to `backend/.env` and set:
 
 ```bash
-cd app && npm install
-python3 -m venv brain/venv && source brain/venv/bin/activate
-pip install -r brain/requirements.txt
+GROQ_API_KEY=...
+GROQ_MODEL=openai/gpt-oss-120b   # default; override only if your account exposes another model
+BUDDY_AI_ENABLED=1
+BUDDY_DB_PATH=                    # optional; defaults to backend/data/buddy.db
 ```
 
-Keep the repo on disk (Brain + MLX run from `brain/venv`).
+Retired Llama free-tier IDs must not be hardcoded. If `GROQ_MODEL` is unavailable, Buddy returns a configuration error and does not silently switch models.
 
-## Run (dev)
+When Cloud AI is offline, Today / Calendar / Sparks keep working; Chat explains that conversational understanding is temporarily unavailable.
+
+## Development
 
 ```bash
-cd app && npm run tauri dev
+# Backend
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+set -a && source .env && set +a   # if present
+PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
+
+# Frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-With **Auto-start MLX** enabled (default), Buddy starts MLX (`:8001`) and Brain
-(`:8002`) on launch. No separate terminal is required.
+## Database
 
-To start MLX manually instead:
+Development uses `backend/data/buddy.db` (gitignored). TablePlus is a viewer for this file.
 
-```bash
-./brain/scripts/start_mlx.sh   # optional if auto-start is off
-cd app && npm run tauri dev
-```
+Packaged builds should set `BUDDY_DB_PATH` to a stable Application Support location. Never store the writable database inside the signed app bundle.
 
-## Desktop build (out of dev)
+## Personal data
 
-```bash
-cd app && npm run tauri build
-```
+Buddy v1 user data may still exist at:
 
-The app is at:
+`~/Library/Application Support/com.liamgk.buddy/`
 
-`app/src-tauri/target/release/bundle/macos/Buddy.app`
+It is preserved until migration or deletion is explicitly agreed.
 
-### First launch tips
-
-1. Prefer launching once from the repo tree (or set `BUDDY_PROJECT_ROOT` to this
-   repo) so Buddy can find `brain/venv` and persist `project_root` in settings.
-2. Copy `Buddy.app` to Applications / Dock after that — later launches reuse the
-   saved path (also tries `~/Desktop/BUDDY`, etc.).
-3. Enable **Settings → Auto-start MLX** (on by default for new installs).
-4. First MLX boot may download/load the model and take several minutes; watch
-   the MLX status indicator in the sidebar.
-
-Override the repo path any time:
-
-```bash
-export BUDDY_PROJECT_ROOT=/Users/you/Desktop/BUDDY
-open /path/to/Buddy.app
-```
-
-Or after a release build:
-
-```bash
-./scripts/open-buddy.sh
-```
-
-## Testing
-
-```bash
-cargo test -p buddy-core -p buddy-clarification -p buddy-personality -p buddy-plugins
-cargo test -p buddy-calendar
-cargo test -p buddy-app --lib
-cd app && npm test
-```
+Local Qwen/MLX weights under `brain/models/` have been removed from the project (moved to Trash). Buddy uses Cloud AI (Groq) only.
