@@ -1,4 +1,6 @@
 import {
+  ArrowRight,
+  ArrowUp,
   CaretLeft,
   CaretRight,
   CheckCircle,
@@ -7,17 +9,23 @@ import {
   PencilSimple,
   Trash,
   Stop,
-  ArrowUp,
 } from "@phosphor-icons/react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { ProposalCards } from "../components/ProposalCards";
 import {
   createConversation,
   decideProposal,
   deleteConversation,
   fetchMessages,
   fetchUsage,
-  formatSessionWhen,
   listConversations,
   renameConversation,
   restoreConversation,
@@ -36,6 +44,8 @@ import {
 type Msg = { role: "user" | "assistant"; content: string };
 
 const STORAGE_KEY = "buddy.conversationId";
+const EDIT_HINT_KEY = "buddy.editGoalHint";
+const COMPOSER_MAX_PX = 180;
 
 export function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -46,8 +56,7 @@ export function ChatPage() {
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: "assistant",
-      content:
-        "Tell me a goal in plain language. I'll ask what matters in one go, then we can shape calendar sessions you control.",
+      content: "Tell me a goal. I’ll ask a few things, then propose calendar sessions you control.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -57,7 +66,8 @@ export function ChatPage() {
   const [questions, setQuestions] = useState<ClarificationQuestion[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [activity, setActivity] = useState<ActivityStep[]>([]);
-  const [activityOpen, setActivityOpen] = useState(true);
+  const [stepsCollapsed, setStepsCollapsed] = useState(false);
+  const [focusStep, setFocusStep] = useState(0);
   const [whyOpen, setWhyOpen] = useState(false);
   const [undoBatchId, setUndoBatchId] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -70,6 +80,7 @@ export function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const stepsPanelRef = useRef<HTMLDivElement | null>(null);
 
   const refreshSidebar = useCallback(async () => {
     const rows = await listConversations();
@@ -78,13 +89,37 @@ export function ChatPage() {
     if (u) setUsage(u);
   }, []);
 
+  const resizeComposer = useCallback(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+  }, []);
+
   useEffect(() => {
     refreshSidebar().catch(() => undefined);
   }, [refreshSidebar]);
 
   useEffect(() => {
+    const raw = localStorage.getItem(EDIT_HINT_KEY);
+    if (!raw) return;
+    try {
+      const hint = JSON.parse(raw) as { title?: string; at?: number };
+      localStorage.removeItem(EDIT_HINT_KEY);
+      if (hint.at && Date.now() - hint.at > 60_000) return;
+      const title = hint.title?.trim();
+      if (!title) return;
+      setToast(`Editing “${title}” — tell Buddy what to change.`);
+      setInput((prev) => prev || `I'd like to update my goal “${title}”: `);
+      composerRef.current?.focus();
+    } catch {
+      localStorage.removeItem(EDIT_HINT_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, busy, questions, proposals]);
+  }, [messages, busy, proposals]);
 
   useEffect(() => {
     if (!conversationId) return;
@@ -108,6 +143,23 @@ export function ChatPage() {
     return () => window.clearTimeout(t);
   }, [input, answers, conversationId]);
 
+  useEffect(() => {
+    resizeComposer();
+  }, [input, resizeComposer]);
+
+  useEffect(() => {
+    if (busy) {
+      setStepsCollapsed(true);
+      return;
+    }
+    if (questions.length) {
+      setStepsCollapsed(false);
+      setFocusStep(0);
+    } else {
+      setStepsCollapsed(true);
+    }
+  }, [busy, questions.length]);
+
   async function selectConversation(id: string) {
     setConversationId(id);
     localStorage.setItem(STORAGE_KEY, id);
@@ -118,6 +170,7 @@ export function ChatPage() {
     setUndoBatchId(null);
     setError(null);
     setActivity([]);
+    setStepsCollapsed(true);
     composerRef.current?.focus();
   }
 
@@ -128,8 +181,7 @@ export function ChatPage() {
     setMessages([
       {
         role: "assistant",
-        content:
-          "New chat. Tell me what you want to work toward — no Cloud AI was used to open this.",
+        content: "New chat. What do you want to work toward?",
       },
     ]);
     setInput("");
@@ -142,7 +194,6 @@ export function ChatPage() {
     localStorage.setItem(STORAGE_KEY, res.conversation_id);
     setGoal(res.goal);
     setActivity(res.activity || []);
-    setActivityOpen(true);
     if (res.proposed_sessions?.length) {
       setProposals(res.proposed_sessions);
       setProposalSummary(res.proposal_summary ?? null);
@@ -176,6 +227,7 @@ export function ChatPage() {
     setMessages((m) => [...m, { role: "user", content: text }]);
     setBusy(true);
     setActivity([{ stage: "started", label: "Understanding your goal", detail: null }]);
+    setStepsCollapsed(true);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -206,6 +258,7 @@ export function ChatPage() {
     const text = input.trim();
     if (!text || busy) return;
     setInput("");
+    requestAnimationFrame(resizeComposer);
     await sendMessage(text);
   }
 
@@ -227,8 +280,7 @@ export function ChatPage() {
         ...m,
         {
           role: "assistant",
-          content:
-            "What should change? Example: “move Thursday to 19:00” or “drop one climbing night”. Deterministic tweaks won’t use Cloud AI when possible.",
+          content: "What should change? e.g. “move Thursday to 19:00” or “drop one session”.",
         },
       ]);
       return;
@@ -280,144 +332,185 @@ export function ChatPage() {
     (q) => q.required && !(answers[q.id] || "").trim(),
   );
 
+  const showStepsPanel = busy || activity.length > 0 || questions.length > 0;
+  const stepsExpanded = !busy && questions.length > 0 && !stepsCollapsed;
+  const activityLabel = activity[activity.length - 1]?.label || (busy ? "Generating…" : "Ready");
+
+  function focusQuestionControl(index: number) {
+    const root = stepsPanelRef.current;
+    if (!root) return;
+    const controls = root.querySelectorAll<HTMLElement>("[data-step-control]");
+    controls[index]?.focus();
+  }
+
+  function onStepsKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (!stepsExpanded || !questions.length) return;
+    const target = e.target as HTMLElement;
+    const inField = target.matches("input, textarea, select");
+
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setStepsCollapsed(true);
+      composerRef.current?.focus();
+      return;
+    }
+
+    if (inField && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
+
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const next =
+        e.key === "ArrowDown"
+          ? Math.min(questions.length - 1, focusStep + 1)
+          : Math.max(0, focusStep - 1);
+      setFocusStep(next);
+      focusQuestionControl(next);
+      return;
+    }
+
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !requiredMissing && !busy) {
+      e.preventDefault();
+      submitQuestionStack();
+    }
+  }
+
   return (
     <section className={`chat-workspace${sidebarOpen ? "" : " sidebar-collapsed"}`}>
-      <aside className="chat-sidebar" aria-label="Conversations">
-        <div className="chat-sidebar-top">
-          <button type="button" className="btn primary block" onClick={onNewChat}>
-            <Plus size={16} /> New chat
-          </button>
-          <button
-            type="button"
-            className="icon-btn"
-            title={sidebarOpen ? "Collapse" : "Expand"}
-            onClick={() => setSidebarOpen((v) => !v)}
-          >
-            {sidebarOpen ? <CaretLeft size={16} /> : <CaretRight size={16} />}
-          </button>
-        </div>
-        <div className="chat-list">
-          {conversations.map((c) => (
-            <div
-              key={c.id}
-              className={`chat-list-item${c.id === conversationId ? " active" : ""}`}
-            >
-              {renamingId === c.id ? (
-                <form
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    await renameConversation(c.id, renameValue);
-                    setRenamingId(null);
-                    await refreshSidebar();
-                  }}
-                >
-                  <input
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    autoFocus
-                    aria-label="Rename chat"
-                  />
-                </form>
-              ) : (
-                <button type="button" className="chat-title-btn" onClick={() => selectConversation(c.id)}>
-                  {c.title}
-                </button>
-              )}
-              <div className="chat-item-actions">
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="Rename"
-                  onClick={() => {
-                    setRenamingId(c.id);
-                    setRenameValue(c.title);
-                  }}
-                >
-                  <PencilSimple size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="Delete"
-                  onClick={async () => {
-                    await deleteConversation(c.id);
-                    setToast("Moved to Recently Deleted. Undo?");
-                    const deletedId = c.id;
-                    await refreshSidebar();
-                    if (conversationId === deletedId) await onNewChat();
-                    window.setTimeout(() => setToast(null), 6000);
-                    (window as unknown as { __buddyRestore?: string }).__buddyRestore = deletedId;
-                  }}
-                >
-                  <Trash size={14} />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="chat-sidebar-foot">
-          {toast?.includes("Undo") && (
+      {sidebarOpen && (
+        <aside className="chat-panel chat-sidebar" aria-label="Conversations">
+          <div className="chat-sidebar-top">
+            <button type="button" className="btn primary block" onClick={onNewChat}>
+              <Plus size={16} /> New chat
+            </button>
             <button
               type="button"
-              className="btn ghost block"
-              onClick={async () => {
-                const id = (window as unknown as { __buddyRestore?: string }).__buddyRestore;
-                if (id) {
-                  await restoreConversation(id);
-                  await refreshSidebar();
-                  setToast("Chat restored");
-                }
-              }}
+              className="icon-btn"
+              title="Collapse"
+              onClick={() => setSidebarOpen(false)}
             >
-              Undo delete
+              <CaretLeft size={16} />
             </button>
-          )}
-          <div className="usage-block" title="Only actual Cloud AI calls count. Retries count too.">
-            <div className="usage-label">{usage?.label || "Cloud requests — / — today"}</div>
-            <div className="usage-bar" aria-hidden>
-              <span style={{ width: `${usagePct}%` }} />
-            </div>
-            <div className="privacy-label">Local data · Cloud reasoning</div>
           </div>
-        </div>
-      </aside>
+          <div className="chat-list">
+            {conversations.map((c) => (
+              <div
+                key={c.id}
+                className={`chat-list-item${c.id === conversationId ? " active" : ""}`}
+              >
+                {renamingId === c.id ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      await renameConversation(c.id, renameValue);
+                      setRenamingId(null);
+                      await refreshSidebar();
+                    }}
+                  >
+                    <input
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      autoFocus
+                      aria-label="Rename chat"
+                    />
+                  </form>
+                ) : (
+                  <button type="button" className="chat-title-btn" onClick={() => selectConversation(c.id)}>
+                    {c.title}
+                  </button>
+                )}
+                <div className="chat-item-actions">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="Rename"
+                    onClick={() => {
+                      setRenamingId(c.id);
+                      setRenameValue(c.title);
+                    }}
+                  >
+                    <PencilSimple size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="Delete"
+                    onClick={async () => {
+                      await deleteConversation(c.id);
+                      setToast("Moved to Recently Deleted. Undo?");
+                      const deletedId = c.id;
+                      await refreshSidebar();
+                      if (conversationId === deletedId) await onNewChat();
+                      window.setTimeout(() => setToast(null), 6000);
+                      (window as unknown as { __buddyRestore?: string }).__buddyRestore = deletedId;
+                    }}
+                  >
+                    <Trash size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="chat-sidebar-foot">
+            {toast?.includes("Undo") && (
+              <button
+                type="button"
+                className="btn ghost block"
+                onClick={async () => {
+                  const id = (window as unknown as { __buddyRestore?: string }).__buddyRestore;
+                  if (id) {
+                    await restoreConversation(id);
+                    await refreshSidebar();
+                    setToast("Chat restored");
+                  }
+                }}
+              >
+                Undo delete
+              </button>
+            )}
+            <div className="usage-block" title="Only Cloud AI calls count">
+              <div className="usage-label">{usage?.label || "Cloud requests — / — today"}</div>
+              <div className="usage-bar" aria-hidden>
+                <span style={{ width: `${usagePct}%` }} />
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
 
-      <div className="chat-main">
+      <div className="chat-panel chat-main">
         <header className="chat-header">
-          <div>
+          <div className="chat-title-row">
+            {!sidebarOpen && (
+              <button
+                type="button"
+                className="chat-chats-btn"
+                onClick={() => setSidebarOpen(true)}
+                title="Open chats"
+              >
+                <CaretRight size={16} />
+                <span>Chats</span>
+              </button>
+            )}
             <h1 className="page-title">Chat</h1>
-            <p className="page-sub">Plan with Buddy, then approve what hits the calendar.</p>
+            {!sidebarOpen && (
+              <button type="button" className="chat-chats-btn" onClick={onNewChat} title="New chat">
+                <Plus size={16} />
+                <span>New</span>
+              </button>
+            )}
           </div>
           {goal && (
             <div className="goal-chip tight">
-              Tracking <strong>{goal.title}</strong>
-              {goal.baseline ? ` · from ${goal.baseline}` : ""}
+              <strong>{goal.title}</strong>
               {goal.frequency ? ` · ${goal.frequency}` : ""}
             </div>
           )}
         </header>
 
-        {error && <div className="error-banner">{error}</div>}
-        {toast && !toast.includes("Undo") && <div className="toast-banner">{toast}</div>}
-
-        {!!activity.length && (
-          <div className="activity-path">
-            <button type="button" className="activity-toggle" onClick={() => setActivityOpen((v) => !v)}>
-              {busy ? <CircleNotch className="spin" size={14} /> : <CheckCircle size={14} />}
-              {activity[activity.length - 1]?.label || "Working"}
-            </button>
-            {activityOpen && (
-              <ol>
-                {activity.map((a, i) => (
-                  <li key={`${a.stage}-${i}`}>
-                    <strong>{a.label}</strong>
-                    {a.detail ? <span className="muted"> — {a.detail}</span> : null}
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
-        )}
+        <div className="chat-banners">
+          {error && <div className="error-banner">{error}</div>}
+          {toast && !toast.includes("Undo") && <div className="toast-banner">{toast}</div>}
+        </div>
 
         <div className="messages frosted-scroll">
           {messages.map((m, i) => (
@@ -426,117 +519,16 @@ export function ChatPage() {
             </div>
           ))}
 
-          {!!questions.length && (
-            <div className="frost-card question-stack">
-              <h2>A few details will shape this properly</h2>
-              {questions.map((q) => (
-                <label key={q.id} className="q-field">
-                  <span>
-                    {q.label}
-                    {q.required ? "" : " (optional)"}
-                  </span>
-                  {q.help_text && <small className="muted">{q.help_text}</small>}
-                  {q.answer_type === "yes_no" || q.answer_type === "single_choice" ? (
-                    <select
-                      value={answers[q.id] || ""}
-                      onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                    >
-                      <option value="">Choose…</option>
-                      {(q.options.length ? q.options : ["Yes", "No"]).map((o) => (
-                        <option key={o} value={o}>
-                          {o}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      value={answers[q.id] || ""}
-                      onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                      placeholder={q.suggested_answer || ""}
-                    />
-                  )}
-                  {q.reason && <small className="muted">{q.reason}</small>}
-                </label>
-              ))}
-              <div className="actions">
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={busy || requiredMissing}
-                  onClick={() => submitQuestionStack()}
-                >
-                  Continue · 1 request
-                </button>
-                <button type="button" className="btn ghost" onClick={() => setQuestions([])}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-
           {!!proposals.length && proposalSummary && (
-            <div className="proposal-duo">
-              <div className="frost-card">
-                <h2>Goal & approach</h2>
-                <p>
-                  <strong>{proposalSummary.goal_card?.title || goal?.title}</strong>
-                </p>
-                <ul className="meta-list">
-                  {proposalSummary.goal_card?.outcome && (
-                    <li>Outcome: {proposalSummary.goal_card.outcome}</li>
-                  )}
-                  {proposalSummary.goal_card?.baseline && (
-                    <li>Starting from: {proposalSummary.goal_card.baseline}</li>
-                  )}
-                  {proposalSummary.goal_card?.deadline && (
-                    <li>Deadline: {proposalSummary.goal_card.deadline}</li>
-                  )}
-                  {proposalSummary.pattern && <li>Weekly rhythm: {proposalSummary.pattern}</li>}
-                </ul>
-                <p className="muted">{proposalSummary.goal_card?.realistic_note}</p>
-              </div>
-              <div className="frost-card accent">
-                <h2>Calendar placement</h2>
-                <p className="muted">
-                  First week · then through {proposalSummary.through} · {proposalSummary.total}{" "}
-                  sessions
-                </p>
-                <ul className="list">
-                  {(proposalSummary.sample || proposals.slice(0, 7)).map((s) => (
-                    <li key={s.id}>
-                      {formatSessionWhen(s)} · {s.title}
-                    </li>
-                  ))}
-                </ul>
-                <button type="button" className="linkish" onClick={() => setWhyOpen((v) => !v)}>
-                  {whyOpen ? "Hide" : "Why these times?"}
-                </button>
-                {whyOpen && (
-                  <ul className="meta-list">
-                    {(proposalSummary.why_lines || []).map((line) => (
-                      <li key={line}>{line}</li>
-                    ))}
-                    {!proposalSummary.why_lines?.length && (
-                      <li>Placed around your availability and protected commitments.</li>
-                    )}
-                  </ul>
-                )}
-                <div className="actions">
-                  <button type="button" className="btn primary" disabled={busy} onClick={() => onDecide("approve")}>
-                    Approve plan
-                  </button>
-                  <button type="button" className="btn" disabled={busy} onClick={() => onDecide("adjust")}>
-                    Adjust
-                  </button>
-                  <button type="button" className="btn danger" disabled={busy} onClick={() => onDecide("reject")}>
-                    Reject
-                  </button>
-                  <Link className="btn ghost" to="/calendar">
-                    View in Calendar
-                  </Link>
-                </div>
-              </div>
-            </div>
+            <ProposalCards
+              goal={goal}
+              summary={proposalSummary}
+              proposals={proposals}
+              whyOpen={whyOpen}
+              busy={busy}
+              onToggleWhy={() => setWhyOpen((v) => !v)}
+              onDecide={(decision) => onDecide(decision)}
+            />
           )}
 
           {undoBatchId && !proposals.length && (
@@ -547,46 +539,148 @@ export function ChatPage() {
             </div>
           )}
 
-          {busy && <div className="bubble assistant muted">Working…</div>}
           <div ref={endRef} />
         </div>
 
-        <form className="composer frost-composer" onSubmit={onSubmit}>
-          <textarea
-            ref={composerRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="What do you want to work toward?"
-            rows={2}
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              composingRef.current = false;
-            }}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              if (composingRef.current || e.nativeEvent.isComposing) return;
-              if (e.shiftKey) return;
-              e.preventDefault();
-              if (!busy && input.trim()) onSubmit(e);
-            }}
-          />
-          {busy ? (
-            <button
-              type="button"
-              className="btn danger"
-              onClick={() => abortRef.current?.abort()}
-              title="Stop"
+        <div className="composer-dock">
+          {showStepsPanel && (
+            <div
+              ref={stepsPanelRef}
+              className={`thinking-panel${stepsExpanded ? " expanded" : " compact"}`}
+              onKeyDown={onStepsKeyDown}
             >
-              <Stop size={16} /> Stop
-            </button>
-          ) : (
-            <button className="btn primary" type="submit" disabled={!input.trim()}>
-              <ArrowUp size={16} /> Send
-            </button>
+              <div className="thinking-panel-head">
+                <button
+                  type="button"
+                  className="thinking-toggle"
+                  onClick={() => {
+                    if (busy) return;
+                    if (questions.length) setStepsCollapsed((v) => !v);
+                  }}
+                  aria-expanded={stepsExpanded}
+                >
+                  {busy ? (
+                    <CircleNotch className="spin" size={14} />
+                  ) : (
+                    <CheckCircle size={14} />
+                  )}
+                  <span>{busy ? activityLabel || "Generating…" : stepsExpanded ? "Next steps" : activityLabel}</span>
+                </button>
+              </div>
+
+              {stepsExpanded && (
+                <>
+                  <ul className="next-steps-list">
+                    {questions.map((q, i) => (
+                      <li
+                        key={q.id}
+                        className={`next-step-item${i === focusStep ? " active" : ""}`}
+                        onMouseEnter={() => setFocusStep(i)}
+                      >
+                        <div className="next-step-label">
+                          <ArrowRight size={12} />
+                          <span>
+                            {q.label}
+                            {!q.required ? " (optional)" : ""}
+                          </span>
+                        </div>
+                        {q.answer_type === "yes_no" || q.answer_type === "single_choice" ? (
+                          <select
+                            data-step-control
+                            value={answers[q.id] || ""}
+                            onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+                            onFocus={() => setFocusStep(i)}
+                          >
+                            <option value="">Choose…</option>
+                            {(q.options.length ? q.options : ["Yes", "No"]).map((o) => (
+                              <option key={o} value={o}>
+                                {o}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            data-step-control
+                            value={answers[q.id] || ""}
+                            onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+                            onFocus={() => setFocusStep(i)}
+                            placeholder={q.suggested_answer || q.help_text || ""}
+                          />
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="thinking-actions">
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={busy || requiredMissing}
+                      onClick={() => submitQuestionStack()}
+                    >
+                      Continue
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => {
+                        setQuestions([]);
+                        setStepsCollapsed(true);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           )}
-        </form>
+
+          <form className="composer frost-composer" onSubmit={onSubmit}>
+            <textarea
+              ref={composerRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="What do you want to work toward?"
+              rows={1}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
+              onInput={resizeComposer}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                if (composingRef.current || e.nativeEvent.isComposing) return;
+                if (e.shiftKey) return;
+                e.preventDefault();
+                if (!busy && input.trim()) onSubmit(e);
+              }}
+            />
+            <div className="composer-toolbar">
+              {busy ? (
+                <button
+                  type="button"
+                  className="composer-send danger"
+                  onClick={() => abortRef.current?.abort()}
+                  aria-label="Stop"
+                  title="Stop"
+                >
+                  <Stop size={18} weight="bold" />
+                </button>
+              ) : (
+                <button
+                  className="composer-send"
+                  type="submit"
+                  disabled={!input.trim()}
+                  aria-label="Send"
+                >
+                  <ArrowUp size={18} weight="bold" />
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
       </div>
     </section>
   );
