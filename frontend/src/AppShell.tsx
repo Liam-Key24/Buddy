@@ -4,12 +4,14 @@ import {
   Lightning,
   SquaresFour,
   GearSix,
+  Target,
 } from "@phosphor-icons/react";
 import { NavLink, Outlet } from "react-router-dom";
 
 const links = [
   { to: "/", label: "Today", icon: SquaresFour, end: true },
   { to: "/chat", label: "Chat", icon: ChatCircle },
+  { to: "/goals", label: "Goals", icon: Target },
   { to: "/calendar", label: "Calendar", icon: CalendarBlank },
   { to: "/sparks", label: "Sparks", icon: Lightning },
 ];
