@@ -20,9 +20,14 @@ export function AppShell() {
   return (
     <div className="app-shell">
       <nav className="nav-rail" aria-label="Primary">
-        <div className="brand-mark" title="Buddy">
-          B
-        </div>
+        <img
+          className="brand-mark"
+          src="/buddy-icon.png"
+          alt="Buddy"
+          title="Buddy"
+          width={30}
+          height={30}
+        />
         {links.map((link) => {
           const Icon = link.icon;
           return (
