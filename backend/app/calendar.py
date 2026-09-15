@@ -7,7 +7,8 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .schemas import SessionOut
+from .categories import CategoryStore
+from .schemas import CategoryBrief, SessionOut
 
 
 def _now() -> str:
@@ -75,8 +76,9 @@ def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: date
 
 
 class CalendarService:
-    def __init__(self, conn):
+    def __init__(self, conn, categories: CategoryStore | None = None):
         self.conn = conn
+        self.categories = categories or CategoryStore(conn)
 
     def list_sessions(
         self,
@@ -85,6 +87,7 @@ class CalendarService:
         end: str | None = None,
         statuses: list[str] | None = None,
     ) -> list[SessionOut]:
+        self.categories.ensure_defaults()
         sql = "SELECT * FROM sessions WHERE 1=1"
         params: list[Any] = []
         if start:
@@ -98,13 +101,53 @@ class CalendarService:
             params.extend(statuses)
         sql += " ORDER BY start_at ASC"
         rows = self.conn.execute(sql, params).fetchall()
-        return [self._row_to_session(r) for r in rows]
+        sessions = [self._row_to_session(r) for r in rows]
+        dirty = False
+        for i, s in enumerate(sessions):
+            if s.category_id:
+                continue
+            cid = self.categories.match_title(s.title)
+            if not cid:
+                continue
+            self.conn.execute("UPDATE sessions SET category_id=? WHERE id=?", (cid, s.id))
+            dirty = True
+            sessions[i] = self._row_to_session(
+                {**dict(rows[i]), "category_id": cid}
+            )
+        if dirty:
+            self.conn.commit()
+        return sessions
 
     def list_fixed_blocks(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM fixed_blocks ORDER BY weekday, start_minute"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _category_for_title(self, title: str) -> tuple[str | None, CategoryBrief | None]:
+        cat = self.categories.classify_session_title(title)
+        if not cat:
+            return None, None
+        brief = CategoryBrief(
+            id=cat["id"],
+            name=cat["name"],
+            color=cat["color"],
+            icon=cat.get("icon") or "circle",
+            keywords=cat.get("keywords") or "",
+        )
+        return cat["id"], brief
+
+    def reclassify_all(self) -> int:
+        """Re-run title matching for every session. Returns updated count."""
+        self.categories.ensure_defaults()
+        rows = self.conn.execute("SELECT id, title FROM sessions").fetchall()
+        n = 0
+        for r in rows:
+            cid = self.categories.match_title(r["title"])
+            self.conn.execute("UPDATE sessions SET category_id=? WHERE id=?", (cid, r["id"]))
+            n += 1
+        self.conn.commit()
+        return n
 
     def _busy_intervals(self, day: date) -> list[tuple[datetime, datetime]]:
         busy: list[tuple[datetime, datetime]] = []
@@ -329,14 +372,25 @@ class CalendarService:
         sessions: list[SessionOut] = []
         for start, end, title in chosen:
             sid = _new_id()
+            category_id, category = self._category_for_title(title)
             self.conn.execute(
                 """
                 INSERT INTO sessions (
                     id, goal_id, title, start_at, end_at, kind, status,
-                    proposal_batch_id, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?)
+                    proposal_batch_id, notes, created_at, updated_at, category_id
+                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?, ?)
                 """,
-                (sid, goal.id, title, start.isoformat(), end.isoformat(), batch_id, now, now),
+                (
+                    sid,
+                    goal.id,
+                    title,
+                    start.isoformat(),
+                    end.isoformat(),
+                    batch_id,
+                    now,
+                    now,
+                    category_id,
+                ),
             )
             sessions.append(
                 SessionOut(
@@ -349,6 +403,8 @@ class CalendarService:
                     status="proposed",
                     proposal_batch_id=batch_id,
                     notes=None,
+                    category_id=category_id,
+                    category=category,
                 )
             )
         return sessions
@@ -366,14 +422,25 @@ class CalendarService:
         for start, end in chosen:
             sid = _new_id()
             title = title_for(start, end)
+            category_id, category = self._category_for_title(title)
             self.conn.execute(
                 """
                 INSERT INTO sessions (
                     id, goal_id, title, start_at, end_at, kind, status,
-                    proposal_batch_id, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?)
+                    proposal_batch_id, notes, created_at, updated_at, category_id
+                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?, ?)
                 """,
-                (sid, goal.id, title, start.isoformat(), end.isoformat(), batch_id, now, now),
+                (
+                    sid,
+                    goal.id,
+                    title,
+                    start.isoformat(),
+                    end.isoformat(),
+                    batch_id,
+                    now,
+                    now,
+                    category_id,
+                ),
             )
             sessions.append(
                 SessionOut(
@@ -386,6 +453,8 @@ class CalendarService:
                     status="proposed",
                     proposal_batch_id=batch_id,
                     notes=None,
+                    category_id=category_id,
+                    category=category,
                 )
             )
         self.conn.commit()
@@ -575,8 +644,69 @@ class CalendarService:
             out[r["status"]] = r["c"]
         return out
 
+    def create_manual_session(
+        self,
+        *,
+        title: str,
+        start_at: str,
+        end_at: str,
+        category_id: str | None = None,
+    ) -> SessionOut:
+        """Create a scheduled session without Cloud AI."""
+        title = title.strip()
+        if not title:
+            raise ValueError("Title required")
+        try:
+            start = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
+        except Exception as exc:
+            raise ValueError("Invalid start/end time") from exc
+        if end <= start:
+            raise ValueError("End must be after start")
+
+        if category_id and not self.categories.get(category_id):
+            category_id = None
+        if not category_id:
+            category_id, _ = self._category_for_title(title)
+
+        sid = _new_id()
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO sessions (
+                id, goal_id, title, start_at, end_at, kind, status,
+                proposal_batch_id, notes, created_at, updated_at, category_id
+            ) VALUES (?, NULL, ?, ?, ?, 'flexible', 'scheduled', NULL, NULL, ?, ?, ?)
+            """,
+            (sid, title, start.isoformat(), end.isoformat(), now, now, category_id),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+        return self._row_to_session(row)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Hard-delete a session by id. Returns False if missing."""
+        row = self.conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return False
+        self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self.conn.commit()
+        return True
+
     def _row_to_session(self, row) -> SessionOut:
         d = dict(row)
+        category_id = d.get("category_id")
+        category = None
+        if category_id:
+            cat = self.categories.get(category_id)
+            if cat:
+                category = CategoryBrief(
+                    id=cat["id"],
+                    name=cat["name"],
+                    color=cat["color"],
+                    icon=cat.get("icon") or "circle",
+                    keywords=cat.get("keywords") or "",
+                )
         return SessionOut(
             id=d["id"],
             goal_id=d.get("goal_id"),
@@ -587,4 +717,6 @@ class CalendarService:
             status=d["status"],
             proposal_batch_id=d.get("proposal_batch_id"),
             notes=d.get("notes"),
+            category_id=category_id,
+            category=category,
         )

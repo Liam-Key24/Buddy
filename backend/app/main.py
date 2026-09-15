@@ -97,6 +97,89 @@ def session_outcome(body: OutcomeRequest):
     return updated
 
 
+class SessionCreate(BaseModel):
+    title: str
+    start_at: str
+    end_at: str
+    category_id: str | None = None
+
+
+@app.post("/calendar/sessions")
+def create_session(body: SessionCreate):
+    try:
+        return plane.calendar.create_manual_session(
+            title=body.title,
+            start_at=body.start_at,
+            end_at=body.end_at,
+            category_id=body.category_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/calendar/sessions/{session_id}")
+def delete_session(session_id: str):
+    if not plane.calendar.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True}
+
+
+class CategoryCreate(BaseModel):
+    name: str
+    color: str = "#93c5fd"
+    icon: str = "circle"
+    keywords: str = ""
+
+
+class CategoryUpdate(BaseModel):
+    name: str | None = None
+    color: str | None = None
+    icon: str | None = None
+    keywords: str | None = None
+
+
+@app.get("/categories")
+def list_categories():
+    return plane.categories.list()
+
+
+@app.post("/categories")
+def create_category(body: CategoryCreate):
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Name required")
+    cat = plane.categories.create(
+        name=body.name,
+        color=body.color,
+        icon=body.icon,
+        keywords=body.keywords,
+    )
+    plane.calendar.reclassify_all()
+    return cat
+
+
+@app.patch("/categories/{category_id}")
+def update_category(category_id: str, body: CategoryUpdate):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    cat = plane.categories.update(category_id, **fields)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    plane.calendar.reclassify_all()
+    return cat
+
+
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: str):
+    if not plane.categories.delete(category_id):
+        raise HTTPException(status_code=404, detail="Category not found")
+    plane.calendar.reclassify_all()
+    return {"ok": True}
+
+
+@app.post("/categories/reclassify")
+def reclassify_sessions():
+    return {"updated": plane.calendar.reclassify_all()}
+
+
 @app.get("/sparks")
 def list_sparks(open_only: bool = True):
     return plane.sparks.list_open() if open_only else plane.sparks.list_all()
@@ -191,9 +274,22 @@ def ai_usage():
     return plane.usage_today()
 
 
+@app.get("/goals")
+def list_goals():
+    return plane.list_goals()
+
+
 @app.get("/goals/{goal_id}")
 def get_goal(goal_id: str):
     goal = plane.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return goal
+
+
+@app.delete("/goals/{goal_id}")
+def delete_goal(goal_id: str):
+    goal = plane.remove_goal(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
     return goal

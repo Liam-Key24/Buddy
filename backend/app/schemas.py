@@ -67,6 +67,14 @@ class Message(BaseModel):
     created_at: str
 
 
+class CategoryBrief(BaseModel):
+    id: str
+    name: str
+    color: str
+    icon: str = "circle"
+    keywords: str = ""
+
+
 class SessionOut(BaseModel):
     id: str
     goal_id: str | None = None
@@ -77,6 +85,8 @@ class SessionOut(BaseModel):
     status: str
     proposal_batch_id: str | None = None
     notes: str | None = None
+    category_id: str | None = None
+    category: CategoryBrief | None = None
 
 
 class Spark(BaseModel):
