@@ -15,6 +15,12 @@ load_dotenv(_BACKEND_ROOT / ".env", override=False)
 DEFAULT_DB = _BACKEND_ROOT / "data" / "buddy.db"
 DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "tauri://localhost",
+    "https://tauri.localhost",
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -32,6 +38,14 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _env_cors(default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get("BUDDY_CORS_ORIGINS", "").strip()
+    if not raw:
+        return default
+    extras = [part.strip() for part in raw.split(",") if part.strip()]
+    return tuple(dict.fromkeys([*default, *extras]))
 
 
 def _env_int(name: str, default: int) -> int:
@@ -55,6 +69,7 @@ class Settings:
     ai_enabled: bool
     request_timeout_s: float
     max_output_tokens: int
+    cors_origins: tuple[str, ...]
 
     @property
     def groq_configured(self) -> bool:
@@ -77,4 +92,5 @@ def load_settings() -> Settings:
         ai_enabled=_env_bool("BUDDY_AI_ENABLED", default=True),
         request_timeout_s=_env_float("BUDDY_GROQ_TIMEOUT_S", 45.0),
         max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 1024),
+        cors_origins=_env_cors(DEFAULT_CORS_ORIGINS),
     )
