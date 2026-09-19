@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.config import Settings
+from app.config import DEFAULT_CORS_ORIGINS, Settings
 from app.control_plane import ControlPlane
 
 
@@ -19,6 +19,7 @@ def _plane(tmp_path: Path) -> ControlPlane:
         ai_enabled=True,
         request_timeout_s=5,
         max_output_tokens=256,
+        cors_origins=DEFAULT_CORS_ORIGINS,
     )
     return ControlPlane(db_path=tmp_path / "c.db", settings=settings, ai=None)
 

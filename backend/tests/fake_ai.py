@@ -231,6 +231,86 @@ class FakeGroq:
                     "confidence": 0.91,
                 }
 
+        calendar_sessions = payload.get("calendar_sessions") or []
+
+        if "delete" in lower and calendar_sessions:
+            if "all proposed" in lower or "proposed sessions" in lower:
+                return {
+                    "assistant_text": "Removed the proposed sessions from your calendar.",
+                    "intents": ["calendar_delete"],
+                    "goal_updates": [],
+                    "calendar_actions": [
+                        {
+                            "op": "delete",
+                            "statuses": ["proposed"],
+                            "all_matching": True,
+                        }
+                    ],
+                    "requested_action": {"type": "none"},
+                    "confidence": 0.92,
+                }
+            target = calendar_sessions[0]
+            return {
+                "assistant_text": f"Removed {target['title']} from your calendar.",
+                "intents": ["calendar_delete"],
+                "goal_updates": [],
+                "calendar_actions": [{"op": "delete", "session_id": target["id"]}],
+                "requested_action": {"type": "none"},
+                "confidence": 0.92,
+            }
+
+        if "rename" in lower and calendar_sessions:
+            target = calendar_sessions[0]
+            new_title = "Updated climb session"
+            if "to " in lower:
+                new_title = lower.split("to ", 1)[1].strip().title() or new_title
+            return {
+                "assistant_text": f"Renamed {target['title']} to {new_title}.",
+                "intents": ["calendar_update"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {
+                        "op": "update",
+                        "session_id": target["id"],
+                        "new_title": new_title,
+                    }
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
+
+        if ("move" in lower or "reschedule" in lower) and calendar_sessions:
+            target = calendar_sessions[0]
+            return {
+                "assistant_text": f"Moved {target['title']} to Friday at 6pm.",
+                "intents": ["calendar_move"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {
+                        "op": "move",
+                        "session_id": target["id"],
+                        "new_start_at": "2026-12-05T18:00:00+00:00",
+                        "new_end_at": "2026-12-05T19:30:00+00:00",
+                    }
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
+
+        if ("completed" in lower or "missed" in lower) and calendar_sessions:
+            target = calendar_sessions[0]
+            outcome = "missed" if "missed" in lower else "completed"
+            return {
+                "assistant_text": f"Marked {target['title']} as {outcome}.",
+                "intents": ["session_outcome"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {"op": "mark_outcome", "session_id": target["id"], "outcome": outcome}
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
+
         # Plan request
         if any(
             p in lower

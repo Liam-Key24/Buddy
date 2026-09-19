@@ -107,6 +107,11 @@ export function CalendarPage() {
 
   useEffect(() => {
     reload().catch((e: Error) => setError(e.message));
+    const onCalendarChanged = () => {
+      reload().catch((e: Error) => setError(e.message));
+    };
+    window.addEventListener("buddy.calendar-changed", onCalendarChanged);
+    return () => window.removeEventListener("buddy.calendar-changed", onCalendarChanged);
   }, []);
 
   const filtered = useMemo(() => {

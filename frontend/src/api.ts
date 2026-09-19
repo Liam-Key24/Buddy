@@ -102,7 +102,14 @@ export type ChatResponse = {
   clarification_questions?: ClarificationQuestion[];
   activity?: ActivityStep[];
   undo_batch_id?: string | null;
+  deleted_session_ids?: string[];
+  updated_sessions?: Session[];
 };
+
+/** Notify Calendar/Today views to reload sessions after Chat changes the calendar. */
+export function notifyCalendarChanged() {
+  window.dispatchEvent(new CustomEvent("buddy.calendar-changed"));
+}
 
 export type TodayResponse = {
   goals: Goal[];

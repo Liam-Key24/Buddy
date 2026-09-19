@@ -17,11 +17,16 @@ Intent = Literal[
     "goal_progress",
     "goal_plan_request",
     "calendar_proposal_decision",
+    "calendar_delete",
+    "calendar_update",
+    "calendar_move",
     "session_outcome",
     "spark_capture",
     "spark_promote",
     "spark_dismiss",
 ]
+
+CalendarOp = Literal["delete", "update", "move", "mark_outcome"]
 
 AnswerType = Literal[
     "short_text",
@@ -110,6 +115,23 @@ class GoalUpdate(BaseModel):
     facts: dict[str, Any] = Field(default_factory=dict)
 
 
+class CalendarAction(BaseModel):
+    """One calendar mutation requested from Chat."""
+
+    op: CalendarOp
+    session_id: str | None = None
+    title_contains: str | None = None
+    date: str | None = None  # YYYY-MM-DD
+    goal_id: str | None = None
+    statuses: list[str] = Field(default_factory=list)  # empty = any status
+    all_matching: bool = False
+    new_title: str | None = None
+    new_start_at: str | None = None
+    new_end_at: str | None = None
+    outcome: Literal["completed", "missed"] | None = None
+    notes: str | None = None
+
+
 class RequestedAction(BaseModel):
     type: Literal[
         "propose_sessions",
@@ -133,6 +155,7 @@ class BuddyTurn(BaseModel):
     clarification: str | None = None
     clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
     requested_action: RequestedAction | None = None
+    calendar_actions: list[CalendarAction] = Field(default_factory=list)
     confidence: float = 0.5
 
 
@@ -156,6 +179,15 @@ class ChatResponse(BaseModel):
     activity: list[dict[str, Any]] = Field(default_factory=list)
     undo_batch_id: str | None = None
     request_id: str | None = None
+    deleted_session_ids: list[str] = Field(default_factory=list)
+    updated_sessions: list[SessionOut] = Field(default_factory=list)
+
+
+class SessionUpdate(BaseModel):
+    title: str | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    category_id: str | None = None
 
 
 class TodayResponse(BaseModel):

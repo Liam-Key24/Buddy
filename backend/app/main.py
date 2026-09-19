@@ -15,6 +15,7 @@ from .schemas import (
     ChatResponse,
     OutcomeRequest,
     ProposalDecision,
+    SessionUpdate,
     SparkCreate,
     SparkPromote,
     TodayResponse,
@@ -117,6 +118,23 @@ def delete_session(session_id: str):
     if not plane.calendar.delete_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True}
+
+
+@app.patch("/calendar/sessions/{session_id}")
+def update_session(session_id: str, body: SessionUpdate):
+    try:
+        updated = plane.calendar.update_session(
+            session_id,
+            title=body.title,
+            start_at=body.start_at,
+            end_at=body.end_at,
+            category_id=body.category_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return updated
 
 
 class CategoryCreate(BaseModel):

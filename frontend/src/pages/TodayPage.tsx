@@ -77,22 +77,28 @@ export function TodayPage() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      fetchToday(),
-      fetchUsage().catch(() => null),
-      fetchSessions().catch(() => [] as Session[]),
-    ])
-      .then(([today, usageRow, sessionRows]) => {
-        if (cancelled) return;
-        setData(today);
-        setUsage(usageRow);
-        setSessions(sessionRows);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message);
-      });
+    function loadDashboard() {
+      Promise.all([
+        fetchToday(),
+        fetchUsage().catch(() => null),
+        fetchSessions().catch(() => [] as Session[]),
+      ])
+        .then(([today, usageRow, sessionRows]) => {
+          if (cancelled) return;
+          setData(today);
+          setUsage(usageRow);
+          setSessions(sessionRows);
+        })
+        .catch((e: Error) => {
+          if (!cancelled) setError(e.message);
+        });
+    }
+    loadDashboard();
+    const onCalendarChanged = () => loadDashboard();
+    window.addEventListener("buddy.calendar-changed", onCalendarChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener("buddy.calendar-changed", onCalendarChanged);
     };
   }, []);
 

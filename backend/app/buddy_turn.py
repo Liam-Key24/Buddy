@@ -27,6 +27,16 @@ INTENT_ALIASES = {
     "complete": "session_outcome",
     "missed": "session_outcome",
     "outcome": "session_outcome",
+    "delete_session": "calendar_delete",
+    "delete_sessions": "calendar_delete",
+    "remove_session": "calendar_delete",
+    "cancel_session": "calendar_delete",
+    "edit_session": "calendar_update",
+    "update_session": "calendar_update",
+    "rename_session": "calendar_update",
+    "move_session": "calendar_move",
+    "reschedule": "calendar_move",
+    "reschedule_session": "calendar_move",
     "spark": "spark_capture",
     "capture_spark": "spark_capture",
     "promote": "spark_promote",
@@ -56,6 +66,24 @@ VALID_INTENTS = {
     "spark_capture",
     "spark_promote",
     "spark_dismiss",
+    "calendar_delete",
+    "calendar_update",
+    "calendar_move",
+}
+
+CALENDAR_OP_ALIASES = {
+    "delete": "delete",
+    "remove": "delete",
+    "cancel": "delete",
+    "update": "update",
+    "edit": "update",
+    "rename": "update",
+    "move": "move",
+    "reschedule": "move",
+    "mark_outcome": "mark_outcome",
+    "complete": "mark_outcome",
+    "completed": "mark_outcome",
+    "missed": "mark_outcome",
 }
 
 
@@ -179,6 +207,41 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
             }
         )
     data["clarification_questions"] = clean_qs
+
+    raw_actions = data.get("calendar_actions") or []
+    if isinstance(raw_actions, dict):
+        raw_actions = [raw_actions]
+    clean_actions = []
+    for item in raw_actions:
+        if not isinstance(item, dict):
+            continue
+        op_raw = str(item.get("op") or item.get("action") or item.get("type") or "").lower().replace(" ", "_")
+        op = CALENDAR_OP_ALIASES.get(op_raw)
+        if not op:
+            continue
+        statuses = item.get("statuses") or item.get("status_in") or []
+        if isinstance(statuses, str):
+            statuses = [statuses]
+        match_title = item.get("title_contains") or item.get("match_title")
+        if not match_title and op != "update":
+            match_title = item.get("title")
+        clean_actions.append(
+            {
+                "op": op,
+                "session_id": item.get("session_id"),
+                "title_contains": match_title,
+                "date": item.get("date"),
+                "goal_id": item.get("goal_id"),
+                "statuses": [str(s) for s in statuses if s],
+                "all_matching": bool(item.get("all_matching", False)),
+                "new_title": item.get("new_title"),
+                "new_start_at": item.get("new_start_at") or item.get("start_at"),
+                "new_end_at": item.get("new_end_at") or item.get("end_at"),
+                "outcome": item.get("outcome"),
+                "notes": item.get("notes"),
+            }
+        )
+    data["calendar_actions"] = clean_actions
 
     return data
 

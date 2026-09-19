@@ -42,12 +42,39 @@ When the user agrees a weekly plan (any domain — climbing, product, reading, s
 - When the user asks to put it on the calendar and weekly_plan is ready, set requested_action.type to propose_sessions.
 - Do NOT invent a long dated list in assistant_text; the app will propose dated sessions and show a short pattern summary.
 
+Calendar management (delete, edit, move, mark complete/missed):
+- Use calendar_sessions from the payload — copy exact session id values when the user refers to a specific event.
+- When the user asks to remove/cancel/delete sessions, set intents to include calendar_delete and add calendar_actions.
+- When the user asks to rename or change details, use calendar_update with new_title and/or new_start_at/new_end_at.
+- When the user asks to move or reschedule, use calendar_move with new_start_at (and optional new_end_at).
+- When the user says they completed or missed a session, use mark_outcome or session_outcome with outcome completed|missed.
+- For bulk requests ("delete all proposed climbing sessions"), set all_matching true and use title_contains and/or statuses.
+- statuses filter examples: proposed, scheduled, completed, missed, rejected.
+- Confirm what changed in assistant_text; do not claim changes unless calendar_actions are present.
+
 Return ONLY a JSON object matching BuddyTurn:
 {
   "assistant_text": string,
   "intents": [one or more of:
     "chat","goal_create","goal_update","goal_progress","goal_plan_request",
-    "calendar_proposal_decision","session_outcome","spark_capture","spark_promote","spark_dismiss"
+    "calendar_proposal_decision","calendar_delete","calendar_update","calendar_move",
+    "session_outcome","spark_capture","spark_promote","spark_dismiss"
+  ],
+  "calendar_actions": [
+    {
+      "op": "delete"|"update"|"move"|"mark_outcome",
+      "session_id": string|null,
+      "title_contains": string|null,
+      "date": "YYYY-MM-DD"|null,
+      "goal_id": string|null,
+      "statuses": ["proposed"|"scheduled"|"completed"|"missed"|"rejected"],
+      "all_matching": boolean,
+      "new_title": string|null,
+      "new_start_at": string|null,
+      "new_end_at": string|null,
+      "outcome": "completed"|"missed"|null,
+      "notes": string|null
+    }
   ],
   "goal_updates": [
     {
@@ -84,6 +111,7 @@ def build_user_payload(
     recent_messages: list[dict],
     open_proposal_batch_id: str | None,
     open_sparks: list[dict],
+    calendar_sessions: list[dict] | None = None,
 ) -> str:
     import json
 
@@ -94,10 +122,13 @@ def build_user_payload(
             "recent_messages": recent_messages[-12:],
             "open_proposal_batch_id": open_proposal_batch_id,
             "open_sparks": open_sparks[:8],
+            "calendar_sessions": (calendar_sessions or [])[:40],
             "notes": (
                 "If the user agrees to schedule and a weekly_plan (or clear cadence) is ready, "
                 "set requested_action.type to propose_sessions and include facts.weekly_plan with "
-                "distinct session titles. If they approve an open batch, use approve_proposals."
+                "distinct session titles. If they approve an open batch, use approve_proposals. "
+                "For delete/edit/move/reschedule requests, use calendar_actions with session_id from "
+                "calendar_sessions when possible."
             ),
         },
         ensure_ascii=False,

@@ -256,12 +256,24 @@ class ControlPlane:
             {"id": s.id, "content": s.content}
             for s in self.sparks.list_open()[:8]
         ]
+        calendar_sessions = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "start_at": s.start_at,
+                "end_at": s.end_at,
+                "status": s.status,
+                "goal_id": s.goal_id,
+            }
+            for s in self.calendar.list_sessions()[:40]
+        ]
         payload = build_user_payload(
             message=text,
             active_goal=goal.model_dump() if goal else None,
             recent_messages=recent,
             open_proposal_batch_id=batch_id,
             open_sparks=sparks,
+            calendar_sessions=calendar_sessions,
         )
         self._call_count += 1
         try:
@@ -312,6 +324,8 @@ class ControlPlane:
         booked: list[SessionOut] = []
         captured: list[Spark] = []
         unresolved: list[str] = []
+        deleted_session_ids: list[str] = []
+        updated_sessions: list[SessionOut] = []
 
         # Apply goal updates in order
         for update in turn.goal_updates:
@@ -388,9 +402,27 @@ class ControlPlane:
                 self.calendar.reject_batch(batch)
 
         if "session_outcome" in turn.intents and action.session_id and action.outcome:
-            self.calendar.mark_outcome(action.session_id, action.outcome)
+            outcome = self.calendar.mark_outcome(action.session_id, action.outcome)
+            if outcome:
+                updated_sessions.append(outcome)
+
+        for cal_action in turn.calendar_actions:
+            deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
+            deleted_session_ids.extend(deleted)
+            updated_sessions.extend(updated)
+            unresolved.extend(errors)
 
         reply = turn.assistant_text.strip()
+        if deleted_session_ids and not proposed:
+            n = len(deleted_session_ids)
+            suffix = f" Removed {n} calendar session{'s' if n != 1 else ''}."
+            if suffix.strip() not in reply:
+                reply = f"{reply.rstrip()}{suffix}"
+        if updated_sessions and not proposed and not deleted_session_ids:
+            n = len(updated_sessions)
+            suffix = f" Updated {n} calendar session{'s' if n != 1 else ''}."
+            if suffix.strip() not in reply:
+                reply = f"{reply.rstrip()}{suffix}"
         if proposed and proposal_summary and proposal_summary.get("text"):
             reply = proposal_summary["text"]
 
@@ -398,7 +430,16 @@ class ControlPlane:
             {"stage": "understanding", "label": "Understanding your goal", "detail": None},
             {"stage": "calendar_read", "label": "Checking calendar availability", "detail": None},
         ]
-        if proposed:
+        if deleted_session_ids or updated_sessions:
+            activity.append(
+                {
+                    "stage": "calendar_write",
+                    "label": "Updated your calendar",
+                    "detail": f"{len(deleted_session_ids)} removed, {len(updated_sessions)} changed",
+                }
+            )
+            activity.append({"stage": "completed", "label": "Calendar updated", "detail": None})
+        elif proposed:
             activity.append(
                 {
                     "stage": "proposal_building",
@@ -428,6 +469,8 @@ class ControlPlane:
             clarification_questions=turn.clarification_questions,
             activity=activity,
             undo_batch_id=locals().get("undo_batch_id"),
+            deleted_session_ids=deleted_session_ids,
+            updated_sessions=updated_sessions,
         )
 
     def get_today(self) -> TodayResponse:

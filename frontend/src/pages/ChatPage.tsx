@@ -30,6 +30,7 @@ import {
   renameConversation,
   restoreConversation,
   saveDraft,
+  notifyCalendarChanged,
   sendChat,
   type ActivityStep,
   type ChatResponse,
@@ -211,6 +212,12 @@ export function ChatPage() {
       setProposals([]);
       setProposalSummary(null);
       setUndoBatchId(res.undo_batch_id ?? null);
+    }
+    if (res.deleted_session_ids?.length || res.updated_sessions?.length) {
+      setProposals((current) =>
+        current.filter((s) => !(res.deleted_session_ids || []).includes(s.id)),
+      );
+      notifyCalendarChanged();
     }
     if (res.undo_batch_id) setUndoBatchId(res.undo_batch_id);
     setMessages((m) => [...m, { role: "assistant", content: res.reply }]);

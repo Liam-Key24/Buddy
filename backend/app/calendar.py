@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .categories import CategoryStore
-from .schemas import CategoryBrief, SessionOut
+from .schemas import CalendarAction, CategoryBrief, SessionOut
 
 
 def _now() -> str:
@@ -683,6 +683,149 @@ class CalendarService:
         self.conn.commit()
         row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
         return self._row_to_session(row)
+
+    def get_session(self, session_id: str) -> SessionOut | None:
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        return self._row_to_session(row)
+
+    def resolve_action_targets(self, action: CalendarAction) -> list[SessionOut]:
+        if action.session_id:
+            session = self.get_session(action.session_id)
+            return [session] if session else []
+
+        sessions = self.list_sessions(
+            statuses=list(action.statuses) if action.statuses else None,
+        )
+        matches: list[SessionOut] = []
+        for session in sessions:
+            if action.goal_id and session.goal_id != action.goal_id:
+                continue
+            if action.title_contains and action.title_contains.lower() not in session.title.lower():
+                continue
+            if action.date and not session.start_at.startswith(action.date):
+                continue
+            matches.append(session)
+
+        if not matches:
+            return []
+        if action.all_matching:
+            return matches
+        return [matches[0]]
+
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        start_at: str | None = None,
+        end_at: str | None = None,
+        category_id: str | None = None,
+    ) -> SessionOut | None:
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        new_title = title.strip() if title else current["title"]
+        new_start = start_at or current["start_at"]
+        new_end = end_at or current["end_at"]
+        try:
+            start = datetime.fromisoformat(new_start.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(new_end.replace("Z", "+00:00"))
+        except Exception as exc:
+            raise ValueError("Invalid start/end time") from exc
+        if end <= start:
+            raise ValueError("End must be after start")
+
+        new_category_id = category_id if category_id is not None else current.get("category_id")
+        if title and category_id is None:
+            matched, _ = self._category_for_title(new_title)
+            if matched:
+                new_category_id = matched
+
+        now = _now()
+        self.conn.execute(
+            """
+            UPDATE sessions
+            SET title=?, start_at=?, end_at=?, category_id=?, updated_at=?
+            WHERE id=?
+            """,
+            (new_title, start.isoformat(), end.isoformat(), new_category_id, now, session_id),
+        )
+        self.conn.commit()
+        updated = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return self._row_to_session(updated)
+
+    def move_session(
+        self,
+        session_id: str,
+        *,
+        new_start_at: str,
+        new_end_at: str | None = None,
+    ) -> SessionOut | None:
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        start = datetime.fromisoformat(new_start_at.replace("Z", "+00:00"))
+        if new_end_at:
+            end = datetime.fromisoformat(new_end_at.replace("Z", "+00:00"))
+        else:
+            old_start = datetime.fromisoformat(current["start_at"].replace("Z", "+00:00"))
+            old_end = datetime.fromisoformat(current["end_at"].replace("Z", "+00:00"))
+            duration = old_end - old_start
+            end = start + duration
+        return self.update_session(
+            session_id,
+            start_at=start.isoformat(),
+            end_at=end.isoformat(),
+        )
+
+    def apply_calendar_action(self, action: CalendarAction) -> tuple[list[str], list[SessionOut], list[str]]:
+        deleted: list[str] = []
+        updated: list[SessionOut] = []
+        errors: list[str] = []
+        targets = self.resolve_action_targets(action)
+        if not targets:
+            errors.append("No matching calendar session found")
+            return deleted, updated, errors
+
+        for session in targets:
+            try:
+                if action.op == "delete":
+                    if self.delete_session(session.id):
+                        deleted.append(session.id)
+                elif action.op == "update":
+                    result = self.update_session(
+                        session.id,
+                        title=action.new_title,
+                        start_at=action.new_start_at,
+                        end_at=action.new_end_at,
+                    )
+                    if result:
+                        updated.append(result)
+                elif action.op == "move":
+                    if not action.new_start_at:
+                        errors.append(f"Move for {session.title} needs new_start_at")
+                        continue
+                    result = self.move_session(
+                        session.id,
+                        new_start_at=action.new_start_at,
+                        new_end_at=action.new_end_at,
+                    )
+                    if result:
+                        updated.append(result)
+                elif action.op == "mark_outcome":
+                    if not action.outcome:
+                        errors.append(f"Outcome for {session.title} needs completed or missed")
+                        continue
+                    result = self.mark_outcome(session.id, action.outcome, action.notes)
+                    if result:
+                        updated.append(result)
+            except ValueError as exc:
+                errors.append(str(exc))
+        return deleted, updated, errors
 
     def delete_session(self, session_id: str) -> bool:
         """Hard-delete a session by id. Returns False if missing."""
