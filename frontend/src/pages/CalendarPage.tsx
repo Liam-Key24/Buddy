@@ -180,6 +180,7 @@ export function CalendarPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>(loadCategoryFilters);
   const [view, setView] = useState<CalView>("timeGridWeek");
+  const [calTitle, setCalTitle] = useState("");
   const [selected, setSelected] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -387,13 +388,22 @@ export function CalendarPage() {
     calendarRef.current?.getApi().changeView(next);
   }
 
+  function calNav(action: "prev" | "next" | "today") {
+    const api = calendarRef.current?.getApi();
+    if (!api) return;
+    if (action === "prev") api.prev();
+    else if (action === "next") api.next();
+    else api.today();
+  }
+
   function renderDayHeader(arg: DayHeaderContentArg) {
-    const date = arg.date;
-    const weekday = date.toLocaleDateString(undefined, { weekday: "short" });
-    const dayNum = date.getDate();
-    const today = arg.isToday;
+    const weekday = arg.date.toLocaleDateString(undefined, { weekday: "short" });
+    if (arg.view.type === "dayGridMonth") {
+      return <span className="cal-day-name">{weekday}</span>;
+    }
+    const dayNum = arg.date.getDate();
     return (
-      <div className={`cal-day-head${today ? " is-today" : ""}`}>
+      <div className={`cal-day-head${arg.isToday ? " is-today" : ""}`}>
         <span className="cal-day-name">{weekday}</span>
         <span className="cal-day-num">{dayNum}</span>
       </div>
@@ -612,55 +622,74 @@ export function CalendarPage() {
   return (
     <section className="flex h-full min-h-0 gap-4 bg-page p-4">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="mb-3 flex flex-wrap items-center gap-2">
-          <Button
-            tone="ghost"
-            className={sidebarOpen ? "xl:hidden" : ""}
-            onClick={() => setSidebarOpen((v) => !v)}
-            aria-label={sidebarOpen ? "Close calendar panel" : "Open calendar panel"}
-          >
-            <FunnelSimple size={18} />
-          </Button>
-          <div
-            className="flex rounded-pill bg-raised-soft p-0.5"
-            role="tablist"
-            aria-label="Calendar view"
-          >
-            {VIEW_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={view === tab.id}
-                className={cn(
-                  "rounded-pill px-3 py-1 text-sm",
-                  view === tab.id ? "bg-mint text-page-deep" : "text-ink-soft",
-                )}
-                onClick={() => setCalView(tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
+        <header className="cal-head relative mb-3 flex items-center gap-2">
+          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5">
+            <Button
+              tone="ghost"
+              className={sidebarOpen ? "xl:hidden" : ""}
+              onClick={() => setSidebarOpen((v) => !v)}
+              aria-label={sidebarOpen ? "Close calendar panel" : "Open calendar panel"}
+            >
+              <FunnelSimple size={18} />
+            </Button>
+            <IconButton label="Previous" size="sm" onClick={() => calNav("prev")}>
+              <CaretLeft size={16} />
+            </IconButton>
+            <IconButton label="Next" size="sm" onClick={() => calNav("next")}>
+              <CaretRight size={16} />
+            </IconButton>
+            <Button tone="ghost" className="!rounded-lg px-2.5 py-1 text-sm" onClick={() => calNav("today")}>
+              Today
+            </Button>
+            <div
+              className="ml-1 flex rounded-xl bg-raised-soft/90 p-0.5 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]"
+              role="tablist"
+              aria-label="Calendar view"
+            >
+              {VIEW_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={view === tab.id}
+                  className={cn(
+                    "rounded-lg px-2.5 py-1 text-sm transition-colors",
+                    view === tab.id ? "bg-mint text-page-deep shadow-sm" : "text-ink-soft",
+                  )}
+                  onClick={() => setCalView(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <Button tone="primary" className="ml-auto" onClick={openEventModal}>
-            <Plus size={16} weight="bold" /> Add
-          </Button>
+
+          <h1 className="pointer-events-none absolute inset-x-0 z-0 m-0 text-center font-display text-lg font-medium tracking-tight text-ink">
+            {calTitle}
+          </h1>
+
+          <div className="relative z-10 flex flex-1 justify-end">
+            <Button tone="primary" className="!rounded-xl" onClick={openEventModal}>
+              <Plus size={16} weight="bold" /> Add
+            </Button>
+          </div>
         </header>
 
         {error && (
           <div className="mb-2 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
         )}
 
-        <div className="cal-grid-wrap min-h-0 flex-1">
+        <div
+          className={cn(
+            "cal-grid-wrap min-h-0 flex-1",
+            view === "dayGridMonth" && "is-month",
+          )}
+        >
           <FullCalendar
             ref={calendarRef}
             plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
             initialView={view}
-            headerToolbar={{
-              left: "prev,next today",
-              center: "title",
-              right: "",
-            }}
+            headerToolbar={false}
             firstDay={1}
             height="100%"
             expandRows
@@ -675,7 +704,8 @@ export function CalendarPage() {
             events={events}
             nowIndicator
             eventContent={renderEvent}
-            datesSet={() => {
+            datesSet={(arg) => {
+              setCalTitle(arg.view.title);
               requestAnimationFrame(() => {
                 const line = document.querySelector(
                   ".cal-grid-wrap .fc-timegrid-now-indicator-line",
