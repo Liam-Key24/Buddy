@@ -67,6 +67,8 @@ export type Conversation = {
   updated_at: string;
   deleted_at?: string | null;
   folder_id?: string | null;
+  sort_order?: number;
+  user_message_count?: number;
   draft?: Record<string, unknown>;
 };
 
@@ -443,6 +445,20 @@ export async function moveConversation(
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder_id: folderId }),
+    }),
+  );
+}
+
+export async function placeConversation(
+  id: string,
+  folderId: string | null,
+  beforeId?: string | null,
+): Promise<Conversation> {
+  return json(
+    await fetch(`${API_BASE}/conversations/${id}/place`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_id: folderId, before_id: beforeId ?? null }),
     }),
   );
 }

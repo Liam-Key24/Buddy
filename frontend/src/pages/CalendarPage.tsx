@@ -6,7 +6,9 @@ import interactionPlugin from "@fullcalendar/interaction";
 import type { DayHeaderContentArg, EventContentArg } from "@fullcalendar/core";
 import {
   CaretLeft,
+  CaretRight,
   CheckCircle,
+  Clock,
   FunnelSimple,
   Plus,
   Trash,
@@ -17,6 +19,7 @@ import { CategoryIcon } from "../components/CategoryIcon";
 import { Button } from "../components/ui/Button";
 import { FrostFloat } from "../components/ui/FrostFloat";
 import { IconButton } from "../components/ui/IconButton";
+import { Surface } from "../components/ui/Surface";
 import { Tag } from "../components/ui/Tag";
 import { cn } from "../lib/cn";
 import {
@@ -96,6 +99,71 @@ function formatRange(session: Session): string {
   return `${a} – ${b}`;
 }
 
+function groupFixedBlocks(blocks: FixedBlock[]) {
+  const map = new Map<
+    string,
+    { title: string; start_minute: number; end_minute: number; weekdays: number[]; ids: string[] }
+  >();
+  for (const b of blocks) {
+    const key = `${b.title.toLowerCase()}|${b.start_minute}|${b.end_minute}`;
+    const row = map.get(key);
+    if (row) {
+      row.weekdays.push(b.weekday);
+      row.ids.push(b.id);
+    } else {
+      map.set(key, {
+        title: b.title,
+        start_minute: b.start_minute,
+        end_minute: b.end_minute,
+        weekdays: [b.weekday],
+        ids: [b.id],
+      });
+    }
+  }
+  return [...map.values()].map((g) => ({
+    ...g,
+    weekdays: [...new Set(g.weekdays)].sort((a, b) => a - b),
+  }));
+}
+
+function weekdayRangeLabel(days: number[]): string {
+  if (!days.length) return "";
+  if (days.length === 7) return "Every day";
+  const labels = days.map((d) => WEEKDAY_LABELS[d]);
+  if (days.length === 1) return labels[0];
+  const consecutive = days.every((d, i) => i === 0 || d === days[i - 1] + 1);
+  if (consecutive) return `${labels[0]}–${labels[labels.length - 1]}`;
+  return labels.join(", ");
+}
+
+function buildMonthCells(year: number, month: number) {
+  const first = new Date(year, month, 1);
+  const startPad = (first.getDay() + 6) % 7; // Monday-first
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const prevDays = new Date(year, month, 0).getDate();
+  const cells: Array<{ day: number; inMonth: boolean; date: Date }> = [];
+  for (let i = startPad - 1; i >= 0; i--) {
+    const day = prevDays - i;
+    cells.push({ day, inMonth: false, date: new Date(year, month - 1, day) });
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push({ day: d, inMonth: true, date: new Date(year, month, d) });
+  }
+  while (cells.length % 7 !== 0) {
+    const day = cells.length - (startPad + daysInMonth) + 1;
+    cells.push({ day, inMonth: false, date: new Date(year, month + 1, day) });
+  }
+  return cells;
+}
+
+function sameDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
 export function CalendarPage() {
   const calendarRef = useRef<FullCalendar | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -128,6 +196,11 @@ export function CalendarPage() {
   const [fixedStart, setFixedStart] = useState("09:00");
   const [fixedEnd, setFixedEnd] = useState("17:00");
   const [editingFixedId, setEditingFixedId] = useState<string | null>(null);
+  const [miniCursor, setMiniCursor] = useState(() => {
+    const n = new Date();
+    return { year: n.getFullYear(), month: n.getMonth() };
+  });
+  const [selectedDay, setSelectedDay] = useState(() => new Date());
 
   async function reload() {
     const [s, c, f] = await Promise.all([
@@ -173,6 +246,60 @@ export function CalendarPage() {
     }
     return map;
   }, [sessions]);
+
+  const uniqueCategories = useMemo(() => {
+    const seen = new Set<string>();
+    return categories.filter((c) => {
+      const key = c.name.trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [categories]);
+
+  const categoryTotals = useMemo(() => {
+    return Math.max(
+      1,
+      uniqueCategories.reduce((sum, c) => sum + (counts[c.id] || 0), 0),
+    );
+  }, [uniqueCategories, counts]);
+
+  const minutesUntil = (session: Session | null) => {
+    if (!session) return null;
+    const ms = new Date(session.start_at).getTime() - Date.now();
+    if (ms <= 0) return "Now";
+    const mins = Math.round(ms / 60_000);
+    if (mins < 60) return `${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h}h ${m}m` : `${h}h`;
+  };
+
+  const nextUp = useMemo(() => {
+    const now = Date.now();
+    return (
+      [...filtered]
+        .filter((s) => new Date(s.end_at).getTime() >= now - 60_000)
+        .filter((s) => s.status !== "missed" && s.status !== "rejected")
+        .sort((a, b) => a.start_at.localeCompare(b.start_at))[0] || null
+    );
+  }, [filtered]);
+
+  const busyGroups = useMemo(() => groupFixedBlocks(fixedBlocks), [fixedBlocks]);
+
+  const miniCells = useMemo(
+    () => buildMonthCells(miniCursor.year, miniCursor.month),
+    [miniCursor],
+  );
+
+  const miniLabel = useMemo(
+    () =>
+      new Date(miniCursor.year, miniCursor.month, 1).toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      }),
+    [miniCursor],
+  );
 
   const events = useMemo(() => {
     const sessionEvents = filtered.map((s) => {
@@ -358,17 +485,26 @@ export function CalendarPage() {
     }
   }
 
-  async function onDeleteFixed(id: string) {
-    if (busy) return;
+  async function onDeleteFixedGroup(ids: string[]) {
+    if (busy || !ids.length) return;
     setBusy(true);
     try {
-      await deleteFixedBlock(id);
+      for (const id of ids) {
+        await deleteFixedBlock(id);
+      }
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete fixed block");
     } finally {
       setBusy(false);
     }
+  }
+
+  function jumpToDay(date: Date) {
+    setSelectedDay(date);
+    setMiniCursor({ year: date.getFullYear(), month: date.getMonth() });
+    const api = calendarRef.current?.getApi();
+    if (api) api.gotoDate(date);
   }
 
   async function confirmDeleteSession() {
@@ -434,144 +570,14 @@ export function CalendarPage() {
 
 
   return (
-    <section className="flex h-full min-h-0 bg-page">
-      {sidebarOpen && (
-        <aside
-          className="fixed inset-y-0 left-0 z-20 h-full w-64 overflow-y-auto bg-sidebar p-3 lg:static lg:z-0"
-          aria-label="Categories"
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="m-0 text-sm font-medium">Categories</h2>
-            <IconButton label="Close categories" onClick={() => setSidebarOpen(false)}>
-              <CaretLeft size={16} />
-            </IconButton>
-          </div>
-
-          <ul className="m-0 flex list-none flex-col gap-1 p-0">
-            {categories.map((cat) => (
-              <li key={cat.id} className="flex items-center gap-1">
-                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-xl px-1 py-1 hover:bg-sidebar-hover">
-                  <input
-                    type="checkbox"
-                    checked={enabled[cat.id] !== false}
-                    onChange={(e) =>
-                      setEnabled((prev) => ({ ...prev, [cat.id]: e.target.checked }))
-                    }
-                  />
-                  <Tag icon={<CategoryIcon name={cat.icon || cat.name} size={12} />} color={cat.color}>
-                    {cat.name}
-                  </Tag>
-                  <span className="ml-auto text-[10px] text-muted-dim">{counts[cat.id] || 0}</span>
-                </label>
-                {cat.name !== "Other" && cat.name !== "Fixed" && (
-                  <IconButton
-                    label="Delete category"
-                    size="sm"
-                    onClick={() => onDeleteCategory(cat.id)}
-                  >
-                    <Trash size={14} />
-                  </IconButton>
-                )}
-              </li>
-            ))}
-          </ul>
-
-          <div className="mt-3">
-            {!addCategoryOpen ? (
-              <Button tone="ghost" block onClick={() => setAddCategoryOpen(true)}>
-                <Plus size={16} weight="bold" /> Add
-              </Button>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder="Name"
-                  autoFocus
-                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
-                />
-                <input
-                  value={newKeywords}
-                  onChange={(e) => setNewKeywords(e.target.value)}
-                  placeholder="Keywords"
-                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
-                />
-                <div className="flex flex-wrap gap-1.5">
-                  {COLOR_PRESETS.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      className={cn(
-                        "size-5 rounded-full",
-                        newColor === c && "ring-2 ring-mint ring-offset-1 ring-offset-sidebar",
-                      )}
-                      style={{ background: c }}
-                      onClick={() => setNewColor(c)}
-                      aria-label={c}
-                    />
-                  ))}
-                </div>
-                <div className="flex gap-2">
-                  <Button tone="ghost" onClick={closeAddCategory}>
-                    Cancel
-                  </Button>
-                  <Button
-                    tone="primary"
-                    disabled={busy || !newName.trim()}
-                    onClick={onAddCategory}
-                  >
-                    Add
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="mt-5">
-            <div className="mb-1 flex items-center justify-between">
-              <h2 className="m-0 text-sm font-medium">Busy hours</h2>
-              <IconButton label="Add fixed block" onClick={() => openFixedEditor()}>
-                <Plus size={16} weight="bold" />
-              </IconButton>
-            </div>
-            <p className="mt-0 mb-2 text-xs text-muted">Skipped when proposing.</p>
-            <ul className="m-0 flex list-none flex-col gap-2 p-0">
-              {fixedBlocks.map((b) => (
-                <li key={b.id} className="flex items-start justify-between gap-2">
-                  <div>
-                    <strong className="text-sm">{b.title}</strong>
-                    <div className="text-xs text-muted">
-                      {WEEKDAY_LABELS[b.weekday]} ·{" "}
-                      {minutesToTime(b.start_minute).slice(0, 5)}–
-                      {minutesToTime(b.end_minute).slice(0, 5)}
-                    </div>
-                  </div>
-                  <div className="flex">
-                    <Button tone="ghost" disabled={busy} onClick={() => openFixedEditor(b)}>
-                      Edit
-                    </Button>
-                    <IconButton
-                      label="Delete"
-                      disabled={busy}
-                      onClick={() => onDeleteFixed(b.id)}
-                    >
-                      <Trash size={14} />
-                    </IconButton>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </aside>
-      )}
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col p-4">
+    <section className="flex h-full min-h-0 gap-4 bg-page p-4">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="mb-3 flex flex-wrap items-center gap-2">
           <Button
             tone="ghost"
-            className={sidebarOpen ? "lg:hidden" : ""}
+            className={sidebarOpen ? "xl:hidden" : ""}
             onClick={() => setSidebarOpen((v) => !v)}
-            aria-label={sidebarOpen ? "Close categories" : "Open categories"}
+            aria-label={sidebarOpen ? "Close calendar panel" : "Open calendar panel"}
           >
             <FunnelSimple size={18} />
           </Button>
@@ -603,91 +609,6 @@ export function CalendarPage() {
 
         {error && (
           <div className="mb-2 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
-        )}
-
-        {eventOpen && (
-          <div
-            className="fixed inset-0 z-30 grid place-items-center bg-overlay p-4"
-            onClick={() => setEventOpen(false)}
-          >
-            <FrostFloat
-              className="w-full max-w-md p-5"
-              role="dialog"
-              aria-label="Add event"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="m-0 font-display text-lg">Add event</h2>
-                <IconButton label="Close" onClick={() => setEventOpen(false)}>
-                  <X size={16} />
-                </IconButton>
-              </div>
-              <div className="flex flex-col gap-2 text-sm">
-                <label className="flex flex-col gap-1">
-                  Title
-                  <input
-                    value={eventTitle}
-                    onChange={(e) => setEventTitle(e.target.value)}
-                    placeholder="Title"
-                    autoFocus
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  Date
-                  <input
-                    type="date"
-                    value={eventDate}
-                    onChange={(e) => setEventDate(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                  />
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="flex flex-col gap-1">
-                    Start
-                    <input
-                      type="time"
-                      value={eventStart}
-                      onChange={(e) => setEventStart(e.target.value)}
-                      className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    End
-                    <input
-                      type="time"
-                      value={eventEnd}
-                      onChange={(e) => setEventEnd(e.target.value)}
-                      className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                    />
-                  </label>
-                </div>
-                <label className="flex flex-col gap-1">
-                  Category
-                  <select
-                    value={eventCategoryId}
-                    onChange={(e) => setEventCategoryId(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                  >
-                    <option value="">Auto</option>
-                    {categories.map((cat) => (
-                      <option key={cat.id} value={cat.id}>
-                        {cat.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <Button
-                  tone="primary"
-                  block
-                  disabled={busy || !eventTitle.trim()}
-                  onClick={onAddEvent}
-                >
-                  <Plus size={16} weight="bold" /> Add event
-                </Button>
-              </div>
-            </FrostFloat>
-          </div>
         )}
 
         <div className="cal-grid-wrap min-h-0 flex-1">
@@ -786,6 +707,363 @@ export function CalendarPage() {
           </FrostFloat>
         )}
       </div>
+
+      {sidebarOpen && (
+        <aside
+          className="fixed inset-y-0 right-0 z-20 flex h-full w-[22rem] flex-col gap-3 overflow-y-auto bg-page p-3 xl:static xl:z-0 xl:w-80 xl:shrink-0 xl:bg-transparent xl:p-0"
+          aria-label="Calendar panel"
+        >
+          <div className="mb-1 flex items-center justify-between xl:hidden">
+            <h2 className="m-0 text-sm font-medium">Calendar</h2>
+            <IconButton label="Close panel" onClick={() => setSidebarOpen(false)}>
+              <X size={16} />
+            </IconButton>
+          </div>
+
+          <Surface className="rounded-3xl border-0 bg-raised/90">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="m-0 text-sm font-medium capitalize">{miniLabel}</h3>
+              <div className="flex gap-1">
+                <IconButton
+                  label="Previous month"
+                  size="sm"
+                  onClick={() =>
+                    setMiniCursor((c) => {
+                      const d = new Date(c.year, c.month - 1, 1);
+                      return { year: d.getFullYear(), month: d.getMonth() };
+                    })
+                  }
+                >
+                  <CaretLeft size={14} />
+                </IconButton>
+                <IconButton
+                  label="Next month"
+                  size="sm"
+                  onClick={() =>
+                    setMiniCursor((c) => {
+                      const d = new Date(c.year, c.month + 1, 1);
+                      return { year: d.getFullYear(), month: d.getMonth() };
+                    })
+                  }
+                >
+                  <CaretRight size={14} />
+                </IconButton>
+              </div>
+            </div>
+            <div className="mb-1 grid grid-cols-7 text-center text-[10px] text-muted">
+              {WEEKDAY_LABELS.map((d) => (
+                <span key={d} className="py-1">
+                  {d.slice(0, 2)}
+                </span>
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-y-1 text-center text-sm">
+              {(() => {
+                const weekStart = new Date(selectedDay);
+                const offset = (weekStart.getDay() + 6) % 7;
+                weekStart.setDate(weekStart.getDate() - offset);
+                weekStart.setHours(0, 0, 0, 0);
+                const weekEnd = new Date(weekStart);
+                weekEnd.setDate(weekEnd.getDate() + 6);
+                return miniCells.map((cell, i) => {
+                  const selected = sameDay(cell.date, selectedDay);
+                  const t = cell.date.getTime();
+                  const inWeek = t >= weekStart.getTime() && t <= weekEnd.getTime();
+                  const col = i % 7;
+                  const isWeekStart = inWeek && col === 0;
+                  const isWeekEnd = inWeek && col === 6;
+                  return (
+                    <button
+                      key={`${cell.date.toISOString()}-${i}`}
+                      type="button"
+                      onClick={() => jumpToDay(cell.date)}
+                      className={cn(
+                        "relative flex h-8 items-center justify-center text-sm transition-colors",
+                        !cell.inMonth && "text-muted-dim",
+                        inWeek && "bg-raised-soft",
+                        isWeekStart && "rounded-l-full",
+                        isWeekEnd && "rounded-r-full",
+                        cell.inMonth && !selected && "text-ink hover:text-mint",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "flex size-7 items-center justify-center rounded-full",
+                          selected && "bg-mint font-medium text-page-deep",
+                        )}
+                      >
+                        {cell.day}
+                      </span>
+                    </button>
+                  );
+                });
+              })()}
+            </div>
+          </Surface>
+
+          <Surface className="rounded-3xl border-0 bg-raised/90">
+            {nextUp ? (
+              <>
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <span className="text-xs text-muted">{formatRange(nextUp)}</span>
+                  <span className="inline-flex items-center gap-1 rounded-pill bg-mint/15 px-2 py-0.5 text-[10px] text-mint">
+                    <Clock size={11} />
+                    {minutesUntil(nextUp)}
+                  </span>
+                </div>
+                <strong className="block text-sm leading-snug">{nextUp.title}</strong>
+                <div className="mt-3 flex gap-2">
+                  <Button tone="ghost" onClick={() => setSelected(null)}>
+                    Later
+                  </Button>
+                  <Button tone="primary" onClick={() => setSelected(nextUp)}>
+                    Details
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="m-0 text-sm text-muted">Nothing upcoming.</p>
+            )}
+          </Surface>
+
+          <Surface className="rounded-3xl border-0 bg-raised/90">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="m-0 text-sm font-medium">Categories</h3>
+              <IconButton label="Add category" size="sm" onClick={() => setAddCategoryOpen(true)}>
+                <Plus size={14} weight="bold" />
+              </IconButton>
+            </div>
+            <ul className="m-0 flex list-none flex-col gap-3 p-0">
+              {uniqueCategories.map((cat) => {
+                const count = counts[cat.id] || 0;
+                const pct = Math.min(100, Math.round((count / categoryTotals) * 100));
+                return (
+                  <li key={cat.id} className="flex items-center gap-2">
+                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="sr-only"
+                        checked={enabled[cat.id] !== false}
+                        onChange={(e) =>
+                          setEnabled((prev) => ({ ...prev, [cat.id]: e.target.checked }))
+                        }
+                      />
+                      <span
+                        className={cn(
+                          "size-2.5 shrink-0 rounded-full",
+                          enabled[cat.id] === false && "opacity-30",
+                        )}
+                        style={{ background: cat.color }}
+                      />
+                      <span
+                        className={cn(
+                          "w-20 shrink-0 truncate text-sm",
+                          enabled[cat.id] === false && "text-muted",
+                        )}
+                      >
+                        {cat.name}
+                      </span>
+                      <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-raised-soft">
+                        <span
+                          className="block h-full rounded-full transition-[width]"
+                          style={{
+                            width: `${enabled[cat.id] === false ? 0 : Math.max(pct, count ? 12 : 0)}%`,
+                            background: cat.color,
+                          }}
+                        />
+                      </span>
+                    </label>
+                    {cat.name !== "Other" && cat.name !== "Fixed" && (
+                      <IconButton
+                        label="Delete category"
+                        size="sm"
+                        onClick={() => onDeleteCategory(cat.id)}
+                      >
+                        <Trash size={14} />
+                      </IconButton>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            {addCategoryOpen && (
+              <div className="mt-3 flex flex-col gap-2 border-t border-white/5 pt-3">
+                <input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="Name"
+                  autoFocus
+                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
+                />
+                <input
+                  value={newKeywords}
+                  onChange={(e) => setNewKeywords(e.target.value)}
+                  placeholder="Keywords"
+                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {COLOR_PRESETS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={cn(
+                        "size-5 rounded-full",
+                        newColor === c && "ring-2 ring-mint ring-offset-1 ring-offset-raised",
+                      )}
+                      style={{ background: c }}
+                      onClick={() => setNewColor(c)}
+                      aria-label={c}
+                    />
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Button tone="ghost" onClick={closeAddCategory}>
+                    Cancel
+                  </Button>
+                  <Button
+                    tone="primary"
+                    disabled={busy || !newName.trim()}
+                    onClick={onAddCategory}
+                  >
+                    Add
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Surface>
+
+          <Surface className="rounded-3xl border-0 bg-raised/90">
+            <div className="mb-1 flex items-center justify-between">
+              <h3 className="m-0 text-sm font-medium">Busy hours</h3>
+              <IconButton label="Add busy hours" size="sm" onClick={() => openFixedEditor()}>
+                <Plus size={14} weight="bold" />
+              </IconButton>
+            </div>
+            <p className="mt-0 mb-3 text-xs text-muted">Skipped when proposing.</p>
+            <ul className="m-0 flex list-none flex-col gap-3 p-0">
+              {busyGroups.map((g) => (
+                <li key={g.ids.join("-")} className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <strong className="text-sm">{g.title}</strong>
+                    <div className="text-xs text-muted">
+                      {weekdayRangeLabel(g.weekdays)} ·{" "}
+                      {minutesToTime(g.start_minute).slice(0, 5)}–
+                      {minutesToTime(g.end_minute).slice(0, 5)}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0">
+                    <Button
+                      tone="ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        const block = fixedBlocks.find((b) => b.id === g.ids[0]);
+                        if (block) openFixedEditor(block);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                    <IconButton
+                      label="Delete"
+                      disabled={busy}
+                      onClick={() => onDeleteFixedGroup(g.ids)}
+                    >
+                      <Trash size={14} />
+                    </IconButton>
+                  </div>
+                </li>
+              ))}
+              {!busyGroups.length && (
+                <li className="text-xs text-muted">No busy hours yet.</li>
+              )}
+            </ul>
+          </Surface>
+        </aside>
+      )}
+
+      {eventOpen && (
+        <div
+          className="fixed inset-0 z-30 grid place-items-center bg-overlay p-4"
+          onClick={() => setEventOpen(false)}
+        >
+          <FrostFloat
+            className="w-full max-w-md p-5"
+            role="dialog"
+            aria-label="Add event"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="m-0 font-display text-lg">Add event</h2>
+              <IconButton label="Close" onClick={() => setEventOpen(false)}>
+                <X size={16} />
+              </IconButton>
+            </div>
+            <div className="flex flex-col gap-2 text-sm">
+              <label className="flex flex-col gap-1">
+                Title
+                <input
+                  value={eventTitle}
+                  onChange={(e) => setEventTitle(e.target.value)}
+                  placeholder="Title"
+                  autoFocus
+                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                Date
+                <input
+                  type="date"
+                  value={eventDate}
+                  onChange={(e) => setEventDate(e.target.value)}
+                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  Start
+                  <input
+                    type="time"
+                    value={eventStart}
+                    onChange={(e) => setEventStart(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  End
+                  <input
+                    type="time"
+                    value={eventEnd}
+                    onChange={(e) => setEventEnd(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  />
+                </label>
+              </div>
+              <label className="flex flex-col gap-1">
+                Category
+                <select
+                  value={eventCategoryId}
+                  onChange={(e) => setEventCategoryId(e.target.value)}
+                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                >
+                  <option value="">Auto</option>
+                  {uniqueCategories.map((cat) => (
+                    <option key={cat.id} value={cat.id}>
+                      {cat.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button
+                tone="primary"
+                block
+                disabled={busy || !eventTitle.trim()}
+                onClick={onAddEvent}
+              >
+                <Plus size={16} weight="bold" /> Add event
+              </Button>
+            </div>
+          </FrostFloat>
+        </div>
+      )}
 
       {fixedOpen && (
         <div

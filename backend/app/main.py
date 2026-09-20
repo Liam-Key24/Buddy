@@ -293,6 +293,11 @@ class ConversationPatch(BaseModel):
     folder_id: str | None = None
 
 
+class ConversationPlace(BaseModel):
+    folder_id: str | None = None
+    before_id: str | None = None
+
+
 class FolderCreate(BaseModel):
     title: str
 
@@ -328,6 +333,14 @@ def patch_conversation(conversation_id: str, body: ConversationPatch):
             raise HTTPException(status_code=404, detail="Conversation or folder not found")
     if row is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
+    return row
+
+
+@app.post("/conversations/{conversation_id}/place")
+def place_conversation(conversation_id: str, body: ConversationPlace):
+    row = plane.place_conversation(conversation_id, body.folder_id, body.before_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation or folder not found")
     return row
 
 

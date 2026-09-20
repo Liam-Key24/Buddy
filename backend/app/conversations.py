@@ -33,12 +33,18 @@ class ConversationStore:
     def create(self) -> dict[str, Any]:
         cid = _new_id()
         now = _now()
+        min_order = self.conn.execute(
+            "SELECT COALESCE(MIN(sort_order), 1) AS n FROM conversations WHERE deleted_at IS NULL"
+        ).fetchone()
+        sort_order = int(min_order["n"] if min_order else 1) - 1
         self.conn.execute(
             """
-            INSERT INTO conversations (id, created_at, updated_at, title, deleted_at, draft_json)
-            VALUES (?, ?, ?, ?, NULL, '{}')
+            INSERT INTO conversations (
+                id, created_at, updated_at, title, deleted_at, draft_json, sort_order
+            )
+            VALUES (?, ?, ?, ?, NULL, '{}', ?)
             """,
-            (cid, now, now, "New chat"),
+            (cid, now, now, "New chat", sort_order),
         )
         self.conn.commit()
         return self.get(cid)
@@ -52,9 +58,13 @@ class ConversationStore:
     def list_active(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT * FROM conversations
-            WHERE deleted_at IS NULL
-            ORDER BY updated_at DESC
+            SELECT c.*, (
+                SELECT COUNT(*) FROM messages m
+                WHERE m.conversation_id = c.id AND m.role = 'user'
+            ) AS user_message_count
+            FROM conversations c
+            WHERE c.deleted_at IS NULL
+            ORDER BY c.sort_order ASC, c.updated_at DESC
             """
         ).fetchall()
         return [self._row(r) for r in rows]
@@ -77,6 +87,46 @@ class ConversationStore:
             "UPDATE conversations SET folder_id=?, updated_at=? WHERE id=?",
             (folder_id, _now(), conversation_id),
         )
+        self.conn.commit()
+        return self.get(conversation_id)
+
+    def place(
+        self,
+        conversation_id: str,
+        folder_id: str | None,
+        before_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        row = self.get(conversation_id)
+        if not row or row.get("deleted_at"):
+            return None
+        self.conn.execute(
+            "UPDATE conversations SET folder_id=? WHERE id=?",
+            (folder_id, conversation_id),
+        )
+        if folder_id:
+            siblings = self.conn.execute(
+                """
+                SELECT id FROM conversations
+                WHERE deleted_at IS NULL AND folder_id=?
+                ORDER BY sort_order ASC, updated_at DESC
+                """,
+                (folder_id,),
+            ).fetchall()
+        else:
+            siblings = self.conn.execute(
+                """
+                SELECT id FROM conversations
+                WHERE deleted_at IS NULL AND folder_id IS NULL
+                ORDER BY sort_order ASC, updated_at DESC
+                """
+            ).fetchall()
+        ids = [r["id"] for r in siblings if r["id"] != conversation_id]
+        if before_id and before_id in ids:
+            ids.insert(ids.index(before_id), conversation_id)
+        else:
+            ids.append(conversation_id)
+        for i, cid in enumerate(ids):
+            self.conn.execute("UPDATE conversations SET sort_order=? WHERE id=?", (i, cid))
         self.conn.commit()
         return self.get(conversation_id)
 
@@ -144,5 +194,7 @@ class ConversationStore:
             "updated_at": d["updated_at"],
             "deleted_at": d.get("deleted_at"),
             "folder_id": d.get("folder_id"),
+            "sort_order": d.get("sort_order") or 0,
+            "user_message_count": int(d.get("user_message_count") or 0),
             "draft": draft if isinstance(draft, dict) else {},
         }

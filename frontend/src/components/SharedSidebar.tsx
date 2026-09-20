@@ -5,6 +5,7 @@ import {
   ChatCircle,
   FolderPlus,
   FolderSimple,
+  FunnelSimple,
   GearSix,
   Lightning,
   MagnifyingGlass,
@@ -16,12 +17,24 @@ import {
   Trash,
   X,
 } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type DragEvent } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useChatNav } from "../chatNav";
 import { cn } from "../lib/cn";
+import type { Conversation } from "../api";
 import { IconButton } from "./ui/IconButton";
 import { IconNavItem } from "./ui/IconNavItem";
+
+const CHAT_DRAG = "application/x-buddy-chat";
+
+type ChatFilter = "newest" | "oldest" | "name" | "unfinished";
+
+const FILTERS: Array<{ id: ChatFilter; label: string }> = [
+  { id: "newest", label: "Newest" },
+  { id: "oldest", label: "Oldest" },
+  { id: "name", label: "Name A–Z" },
+  { id: "unfinished", label: "Unfinished" },
+];
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -32,6 +45,23 @@ function relativeTime(iso: string): string {
   if (h < 48) return `${h}h`;
   const d = Math.round(h / 24);
   return `${d}d`;
+}
+
+function sortChats(rows: Conversation[], filter: ChatFilter): Conversation[] {
+  const copy = [...rows];
+  if (filter === "oldest") {
+    copy.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+  } else if (filter === "name") {
+    copy.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+  } else {
+    copy.sort((a, b) => {
+      const ao = a.sort_order ?? 0;
+      const bo = b.sort_order ?? 0;
+      if (ao !== bo) return ao - bo;
+      return b.updated_at.localeCompare(a.updated_at);
+    });
+  }
+  return copy;
 }
 
 const routes = [
@@ -106,6 +136,7 @@ function SidebarPanel({
     renameChat,
     deleteChat,
     moveChat,
+    placeChat,
     addFolder,
     renameFolderTitle,
     removeFolder,
@@ -116,16 +147,23 @@ function SidebarPanel({
   const [renameValue, setRenameValue] = useState("");
   const [folderDraft, setFolderDraft] = useState<string | null>(null);
   const [moveFor, setMoveFor] = useState<string | null>(null);
+  const [filter, setFilter] = useState<ChatFilter>("newest");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
 
   const q = search.trim().toLowerCase();
-  const filtered = useMemo(
-    () => conversations.filter((c) => !q || c.title.toLowerCase().includes(q)),
-    [conversations, q],
-  );
+  const filtered = useMemo(() => {
+    let rows = conversations.filter((c) => !q || c.title.toLowerCase().includes(q));
+    if (filter === "unfinished") {
+      rows = rows.filter((c) => (c.user_message_count ?? 0) === 0);
+    }
+    return sortChats(rows, filter);
+  }, [conversations, q, filter]);
 
   const unfiled = filtered.filter((c) => !c.folder_id);
   const byFolder = useMemo(() => {
-    const map = new Map<string, typeof filtered>();
+    const map = new Map<string, Conversation[]>();
     for (const f of folders) map.set(f.id, []);
     for (const c of filtered) {
       if (!c.folder_id) continue;
@@ -143,6 +181,69 @@ function SidebarPanel({
     if (kind === "chat") await renameChat(id, title);
     else await renameFolderTitle(id, title);
   }
+
+  function onDragStart(e: DragEvent, id: string) {
+    e.dataTransfer.setData(CHAT_DRAG, id);
+    e.dataTransfer.setData("text/plain", id);
+    e.dataTransfer.effectAllowed = "move";
+    setDraggingId(id);
+  }
+
+  function onDragEnd() {
+    setDraggingId(null);
+    setDropTarget(null);
+  }
+
+  async function dropChat(folderId: string | null, beforeId?: string | null, fromEvent?: DragEvent) {
+    const id =
+      fromEvent?.dataTransfer.getData(CHAT_DRAG) ||
+      fromEvent?.dataTransfer.getData("text/plain") ||
+      draggingId;
+    if (!id) return;
+    setDropTarget(null);
+    setDraggingId(null);
+    if (id === beforeId) return;
+    await placeChat(id, folderId, beforeId);
+  }
+
+  const rowProps = (c: Conversation) => ({
+    title: c.title,
+    time: relativeTime(c.updated_at),
+    active: c.id === conversationId && location.pathname === "/chat",
+    renaming: renamingId === c.id,
+    renameValue,
+    moving: moveFor === c.id,
+    folders,
+    dragging: draggingId === c.id,
+    dropActive: dropTarget === c.id,
+    onSelect: () => {
+      selectConversation(c.id);
+      onCloseMobile();
+    },
+    onRenameStart: () => {
+      setRenamingId(c.id);
+      setRenameValue(c.title);
+    },
+    onRenameChange: setRenameValue,
+    onRenameCommit: () => void commitRename(c.id, "chat"),
+    onDelete: () => void deleteChat(c.id),
+    onToggleMove: () => setMoveFor((id) => (id === c.id ? null : c.id)),
+    onMove: (folderId: string | null) => {
+      void moveChat(c.id, folderId);
+      setMoveFor(null);
+    },
+    onDragStart: (e: DragEvent) => onDragStart(e, c.id),
+    onDragEnd,
+    onDragOver: (e: DragEvent) => {
+      e.preventDefault();
+      setDropTarget(c.id);
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+              void dropChat(c.folder_id ?? null, c.id, e);
+    },
+  });
 
   return (
     <aside
@@ -219,13 +320,42 @@ function SidebarPanel({
             <span className="text-[11px] font-medium tracking-wide text-muted-dim uppercase">
               Chats
             </span>
-            <IconButton
-              label="New folder"
-              size="sm"
-              onClick={() => setFolderDraft("")}
-            >
-              <FolderPlus size={14} />
-            </IconButton>
+            <div className="relative flex items-center">
+              <IconButton
+                label="Filter chats"
+                size="sm"
+                onClick={() => setFilterOpen((v) => !v)}
+              >
+                <FunnelSimple size={14} weight={filter === "newest" ? "regular" : "fill"} />
+              </IconButton>
+              <IconButton label="New folder" size="sm" onClick={() => setFolderDraft("")}>
+                <FolderPlus size={14} />
+              </IconButton>
+              {filterOpen && (
+                <div
+                  className="absolute top-full right-8 z-20 mt-1 min-w-36 rounded-xl bg-raised p-1 shadow-[0_8px_24px_rgb(10_16_14/0.3)]"
+                  role="menu"
+                >
+                  {FILTERS.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      role="menuitem"
+                      className={cn(
+                        "block w-full rounded-lg px-2 py-1 text-left text-xs hover:bg-raised-soft",
+                        filter === f.id && "text-mint",
+                      )}
+                      onClick={() => {
+                        setFilter(f.id);
+                        setFilterOpen(false);
+                      }}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {folderDraft !== null && (
@@ -255,9 +385,26 @@ function SidebarPanel({
           {folders.map((folder) => {
             const open = expanded[folder.id] !== false;
             const chats = byFolder.get(folder.id) || [];
+            const folderDrop = dropTarget === `folder:${folder.id}`;
             return (
-              <div key={folder.id} className="mb-1">
-                <div className="flex items-center gap-0.5">
+              <div
+                key={folder.id}
+                className="mb-1"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDropTarget(`folder:${folder.id}`);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  void dropChat(folder.id, undefined, e);
+                }}
+              >
+                <div
+                  className={cn(
+                    "flex items-center gap-0.5 rounded-lg",
+                    folderDrop && "bg-raised-soft ring-1 ring-mint/40",
+                  )}
+                >
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1 text-left text-sm text-ink-soft hover:bg-sidebar-hover"
@@ -300,67 +447,29 @@ function SidebarPanel({
                     <Trash size={12} />
                   </IconButton>
                 </div>
-                {open &&
-                  chats.map((c) => (
-                    <ChatRow
-                      key={c.id}
-                      title={c.title}
-                      time={relativeTime(c.updated_at)}
-                      active={c.id === conversationId && location.pathname === "/chat"}
-                      renaming={renamingId === c.id}
-                      renameValue={renameValue}
-                      moving={moveFor === c.id}
-                      folders={folders}
-                      onSelect={() => {
-                        selectConversation(c.id);
-                        onCloseMobile();
-                      }}
-                      onRenameStart={() => {
-                        setRenamingId(c.id);
-                        setRenameValue(c.title);
-                      }}
-                      onRenameChange={setRenameValue}
-                      onRenameCommit={() => void commitRename(c.id, "chat")}
-                      onDelete={() => void deleteChat(c.id)}
-                      onToggleMove={() => setMoveFor((id) => (id === c.id ? null : c.id))}
-                      onMove={(folderId) => {
-                        void moveChat(c.id, folderId);
-                        setMoveFor(null);
-                      }}
-                    />
-                  ))}
+                {open && chats.map((c) => <ChatRow key={c.id} {...rowProps(c)} />)}
               </div>
             );
           })}
 
-          {unfiled.map((c) => (
-            <ChatRow
-              key={c.id}
-              title={c.title}
-              time={relativeTime(c.updated_at)}
-              active={c.id === conversationId && location.pathname === "/chat"}
-              renaming={renamingId === c.id}
-              renameValue={renameValue}
-              moving={moveFor === c.id}
-              folders={folders}
-              onSelect={() => {
-                selectConversation(c.id);
-                onCloseMobile();
-              }}
-              onRenameStart={() => {
-                setRenamingId(c.id);
-                setRenameValue(c.title);
-              }}
-              onRenameChange={setRenameValue}
-              onRenameCommit={() => void commitRename(c.id, "chat")}
-              onDelete={() => void deleteChat(c.id)}
-              onToggleMove={() => setMoveFor((id) => (id === c.id ? null : c.id))}
-              onMove={(folderId) => {
-                void moveChat(c.id, folderId);
-                setMoveFor(null);
-              }}
-            />
-          ))}
+          <div
+            className={cn(
+              "min-h-8 rounded-lg",
+              dropTarget === "unfiled" && "bg-raised-soft/80 ring-1 ring-mint/40",
+            )}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDropTarget("unfiled");
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              void dropChat(null, undefined, e);
+            }}
+          >
+            {unfiled.map((c) => (
+              <ChatRow key={c.id} {...rowProps(c)} />
+            ))}
+          </div>
         </div>
       )}
 
@@ -387,6 +496,8 @@ function ChatRow({
   renameValue,
   moving,
   folders,
+  dragging,
+  dropActive,
   onSelect,
   onRenameStart,
   onRenameChange,
@@ -394,6 +505,10 @@ function ChatRow({
   onDelete,
   onToggleMove,
   onMove,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
 }: {
   title: string;
   time: string;
@@ -402,6 +517,8 @@ function ChatRow({
   renameValue: string;
   moving: boolean;
   folders: { id: string; title: string }[];
+  dragging: boolean;
+  dropActive: boolean;
   onSelect: () => void;
   onRenameStart: () => void;
   onRenameChange: (v: string) => void;
@@ -409,20 +526,28 @@ function ChatRow({
   onDelete: () => void;
   onToggleMove: () => void;
   onMove: (folderId: string | null) => void;
+  onDragStart: (e: DragEvent) => void;
+  onDragEnd: () => void;
+  onDragOver: (e: DragEvent) => void;
+  onDrop: (e: DragEvent) => void;
 }) {
   return (
     <div className="relative">
       <div
+        draggable={!renaming}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
         className={cn(
-          "group flex items-center gap-1 rounded-xl px-2 py-1.5",
+          "group flex cursor-grab items-center gap-1 rounded-xl px-2 py-1.5 active:cursor-grabbing",
           active ? "bg-raised-soft text-mint" : "text-ink-soft hover:bg-sidebar-hover",
+          dragging && "opacity-40",
+          dropActive && "ring-1 ring-mint/50",
         )}
       >
         <span
-          className={cn(
-            "size-1.5 shrink-0 rounded-full",
-            active ? "bg-mint" : "bg-muted-dim",
-          )}
+          className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-mint" : "bg-muted-dim")}
         />
         {renaming ? (
           <input
@@ -514,10 +639,7 @@ export function MobileNav({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             end={item.end}
             aria-label={item.label}
             className={({ isActive }) =>
-              cn(
-                "grid size-10 place-items-center text-muted",
-                isActive && "text-mint",
-              )
+              cn("grid size-10 place-items-center text-muted", isActive && "text-mint")
             }
           >
             <Icon size={22} />

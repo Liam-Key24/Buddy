@@ -113,15 +113,15 @@
   }
 }
 
-/* FullCalendar — dark green canvas, colored event chips */
+/* FullCalendar — borderless dark canvas */
 .cal-grid-wrap {
   min-height: 0;
   flex: 1;
   overflow: hidden;
-  --fc-border-color: rgb(234 246 203 / 0.08);
+  --fc-border-color: transparent;
   --fc-page-bg-color: transparent;
   --fc-neutral-bg-color: transparent;
-  --fc-today-bg-color: rgb(234 246 203 / 0.06);
+  --fc-today-bg-color: rgb(234 246 203 / 0.07);
   --fc-now-indicator-color: var(--color-mint);
   --fc-page-text-color: var(--color-ink);
   --fc-neutral-text-color: var(--color-muted);
@@ -134,8 +134,40 @@
 
 .cal-grid-wrap .fc-theme-standard td,
 .cal-grid-wrap .fc-theme-standard th,
-.cal-grid-wrap .fc-theme-standard .fc-scrollgrid {
-  border-color: var(--fc-border-color);
+.cal-grid-wrap .fc-theme-standard .fc-scrollgrid,
+.cal-grid-wrap .fc-theme-standard .fc-scrollgrid-section > td,
+.cal-grid-wrap .fc-scrollgrid,
+.cal-grid-wrap .fc-scrollgrid td,
+.cal-grid-wrap .fc-scrollgrid-sync-table,
+.cal-grid-wrap .fc-timegrid-slot,
+.cal-grid-wrap .fc-timegrid-axis,
+.cal-grid-wrap .fc-timegrid-divider,
+.cal-grid-wrap .fc-col-header,
+.cal-grid-wrap .fc-col-header-cell,
+.cal-grid-wrap .fc-daygrid-day,
+.cal-grid-wrap .fc-scrollgrid-section-header > th {
+  border: 0 !important;
+}
+
+.cal-grid-wrap .fc-scrollgrid {
+  border: 0 !important;
+}
+
+.cal-grid-wrap .fc-scrollgrid-section > * {
+  border: 0 !important;
+}
+
+.cal-grid-wrap .fc-timegrid-slot-lane {
+  border-top: 1px solid rgb(234 246 203 / 0.05) !important;
+}
+
+.cal-grid-wrap .fc-timegrid-axis-frame,
+.cal-grid-wrap .fc-timegrid-slot-label {
+  border: 0 !important;
+}
+
+.cal-grid-wrap .fc-timegrid-col.fc-day-today {
+  background: rgb(234 246 203 / 0.05);
 }
 
 .cal-grid-wrap .fc-toolbar {
@@ -177,8 +209,9 @@
 
 .cal-grid-wrap .fc-event {
   border: 0;
-  border-radius: 0.7rem;
+  border-radius: 0.85rem;
   overflow: hidden;
+  box-shadow: none;
 }
 
 .evt-soft-inner {

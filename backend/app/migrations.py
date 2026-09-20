@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -187,5 +187,24 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 4)
         version = 4
+
+    if version < 5:
+        if not _column_exists(conn, "conversations", "sort_order"):
+            conn.execute(
+                "ALTER TABLE conversations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            )
+        rows = conn.execute(
+            """
+            SELECT id FROM conversations
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        for i, r in enumerate(rows):
+            cid = r["id"] if isinstance(r, sqlite3.Row) else r[0]
+            conn.execute("UPDATE conversations SET sort_order=? WHERE id=?", (i, cid))
+        conn.commit()
+        set_schema_version(conn, 5)
+        version = 5
 
     return version

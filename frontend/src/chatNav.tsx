@@ -15,7 +15,7 @@ import {
   deleteFolder,
   fetchFolders,
   listConversations,
-  moveConversation,
+  placeConversation,
   renameConversation,
   renameFolder,
   restoreConversation,
@@ -39,6 +39,7 @@ type ChatNavValue = {
   deleteChat: (id: string) => Promise<void>;
   restoreChat: (id: string) => Promise<void>;
   moveChat: (id: string, folderId: string | null) => Promise<void>;
+  placeChat: (id: string, folderId: string | null, beforeId?: string | null) => Promise<void>;
   addFolder: (title: string) => Promise<ChatFolder>;
   renameFolderTitle: (id: string, title: string) => Promise<void>;
   removeFolder: (id: string) => Promise<void>;
@@ -139,12 +140,19 @@ export function ChatNavProvider({ children }: { children: ReactNode }) {
     [refresh],
   );
 
-  const moveChat = useCallback(
-    async (id: string, folderId: string | null) => {
-      await moveConversation(id, folderId);
+  const placeChat = useCallback(
+    async (id: string, folderId: string | null, beforeId?: string | null) => {
+      await placeConversation(id, folderId, beforeId);
       await refresh();
     },
     [refresh],
+  );
+
+  const moveChat = useCallback(
+    async (id: string, folderId: string | null) => {
+      await placeChat(id, folderId);
+    },
+    [placeChat],
   );
 
   const addFolder = useCallback(
@@ -187,6 +195,7 @@ export function ChatNavProvider({ children }: { children: ReactNode }) {
       deleteChat,
       restoreChat,
       moveChat,
+      placeChat,
       addFolder,
       renameFolderTitle,
       removeFolder,
@@ -204,6 +213,7 @@ export function ChatNavProvider({ children }: { children: ReactNode }) {
       deleteChat,
       restoreChat,
       moveChat,
+      placeChat,
       addFolder,
       renameFolderTitle,
       removeFolder,

@@ -3,7 +3,6 @@ import {
   ArrowUp,
   CheckCircle,
   CircleNotch,
-  Plus,
   Stop,
   Target,
 } from "@phosphor-icons/react";
@@ -55,7 +54,7 @@ function activityIcon(stage: string) {
 }
 
 export function ChatPage() {
-  const { conversationId, setConversationId, newChat, refresh } = useChatNav();
+  const { conversationId, conversations, setConversationId, renameChat, refresh } = useChatNav();
   const { pushToast } = useToast();
   const [messages, setMessages] = useState<Msg[]>([GREETING]);
   const [input, setInput] = useState("");
@@ -73,6 +72,8 @@ export function ChatPage() {
   const [modeTag, setModeTag] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const composingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
@@ -378,9 +379,52 @@ export function ChatPage() {
     }
   }
 
+  const currentChat = conversations.find((c) => c.id === conversationId) || null;
+  const chatTitle = currentChat?.title || "New chat";
+
+  async function commitTitle() {
+    setEditingTitle(false);
+    const next = titleDraft.trim();
+    if (!conversationId || !next || next === chatTitle) return;
+    await renameChat(conversationId, next);
+  }
+
   return (
     <section className="relative flex h-full min-h-0 flex-col bg-page">
-      <header className="flex items-center gap-2 px-5 pt-3 pb-1">
+      <header className="flex flex-wrap items-center gap-2 px-5 pt-3 pb-1">
+        {editingTitle && conversationId ? (
+          <input
+            autoFocus
+            value={titleDraft}
+            aria-label="Chat title"
+            className="min-w-0 flex-1 bg-transparent font-display text-xl font-medium outline-none"
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={() => void commitTitle()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void commitTitle();
+              }
+              if (e.key === "Escape") {
+                setEditingTitle(false);
+                setTitleDraft(chatTitle);
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="min-w-0 truncate text-left font-display text-xl font-medium text-ink"
+            onClick={() => {
+              if (!conversationId) return;
+              setTitleDraft(chatTitle);
+              setEditingTitle(true);
+            }}
+            title={conversationId ? "Rename chat" : undefined}
+          >
+            {chatTitle}
+          </button>
+        )}
         {goal && (
           <Tag icon={<Target size={12} weight="duotone" />} tone="mint">
             {goal.title}
@@ -544,14 +588,6 @@ export function ChatPage() {
           className="flex items-end gap-2 rounded-float border border-hairline bg-raised-soft/70 px-3 py-2"
           onSubmit={onSubmit}
         >
-          <button
-            type="button"
-            className="mb-1 grid size-8 place-items-center rounded-full text-muted hover:bg-raised hover:text-ink"
-            aria-label="New chat"
-            onClick={() => void newChat()}
-          >
-            <Plus size={16} weight="bold" />
-          </button>
           <div className="min-w-0 flex-1">
             {modeTag && (
               <div className="mb-1">

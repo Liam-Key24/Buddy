@@ -18,25 +18,25 @@ def _new_id() -> str:
 DEFAULT_CATEGORIES = [
     {
         "name": "Climbing",
-        "color": "#c4b5fd",
+        "color": "#c5d9a0",
         "icon": "mountain",
         "keywords": "climb,boulder,technique,endurance,power,route",
     },
     {
         "name": "Strength",
-        "color": "#a7f3d0",
+        "color": "#9dde9a",
         "icon": "barbell",
         "keywords": "strength,hangboard,fingerboard,pull-up,workout,core,antagonist",
     },
     {
         "name": "Fixed",
-        "color": "#e7e5e4",
+        "color": "#8fb9a8",
         "icon": "lock",
         "keywords": "work,sleep,fixed,commitment",
     },
     {
         "name": "Other",
-        "color": "#bfdbfe",
+        "color": "#eaf6cb",
         "icon": "circle",
         "keywords": "",
     },
@@ -74,10 +74,35 @@ class CategoryStore:
 
     def list(self) -> list[dict[str, Any]]:
         self.ensure_defaults()
+        self.dedupe_by_name()
         rows = self.conn.execute(
             "SELECT * FROM categories ORDER BY sort_order ASC, name ASC"
         ).fetchall()
         return [self._row(r) for r in rows]
+
+    def dedupe_by_name(self) -> None:
+        """Keep one category per name (case-insensitive); remapping sessions to the keeper."""
+        rows = self.conn.execute(
+            "SELECT id, name, sort_order, created_at FROM categories ORDER BY sort_order ASC, created_at ASC"
+        ).fetchall()
+        keep: dict[str, str] = {}
+        removed = False
+        for r in rows:
+            key = (r["name"] or "").strip().lower()
+            if not key:
+                continue
+            if key not in keep:
+                keep[key] = r["id"]
+                continue
+            keeper = keep[key]
+            self.conn.execute(
+                "UPDATE sessions SET category_id=? WHERE category_id=?",
+                (keeper, r["id"]),
+            )
+            self.conn.execute("DELETE FROM categories WHERE id=?", (r["id"],))
+            removed = True
+        if removed:
+            self.conn.commit()
 
     def create(
         self,
@@ -88,6 +113,20 @@ class CategoryStore:
         keywords: str = "",
     ) -> dict[str, Any]:
         self.ensure_defaults()
+        clean = name.strip()
+        existing = self.conn.execute(
+            "SELECT id FROM categories WHERE lower(name)=lower(?) LIMIT 1",
+            (clean,),
+        ).fetchone()
+        if existing:
+            updated = self.update(
+                existing["id"],
+                name=clean,
+                color=color,
+                icon=icon,
+                keywords=keywords,
+            )
+            return updated  # type: ignore[return-value]
         cid = _new_id()
         now = _now()
         sort = self.conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 AS s FROM categories").fetchone()[
@@ -99,7 +138,7 @@ class CategoryStore:
                 id, name, color, icon, keywords, sort_order, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (cid, name.strip(), color, icon, keywords.strip().lower(), sort, now, now),
+            (cid, clean, color, icon, keywords.strip().lower(), sort, now, now),
         )
         self.conn.commit()
         return self.get(cid)  # type: ignore[return-value]
