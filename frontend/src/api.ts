@@ -137,10 +137,21 @@ export function notifyCalendarChanged() {
   window.dispatchEvent(new CustomEvent("buddy.calendar-changed"));
 }
 
+export type TodayNeed = {
+  id: string;
+  kind: "gathering" | "approve";
+  title: string;
+  detail?: string | null;
+  goal_id: string;
+  conversation_id: string;
+  proposal_batch_id?: string | null;
+};
+
 export type TodayResponse = {
   goals: Goal[];
   attention: string[];
   pending_questions: string[];
+  needs?: TodayNeed[];
   todays_sessions: Session[];
   progress: Array<{
     goal_id: string;
@@ -297,6 +308,7 @@ export async function createSession(input: {
     }),
   );
 }
+
 
 export async function deleteSession(id: string): Promise<void> {
   await json(await fetch(`${API_BASE}/calendar/sessions/${id}`, { method: "DELETE" }));

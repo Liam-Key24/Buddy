@@ -22,9 +22,14 @@ import {
   fetchUsage,
   notifyCalendarChanged,
   type Session,
+  type TodayNeed,
   type TodayResponse,
   type UsageSummary,
 } from "../api";
+import { useChatNav } from "../chatNav";
+import { useNavigate } from "react-router-dom";
+
+const CONTINUE_HINT_KEY = "buddy.continueHint";
 
 const GOAL_BAR_COLORS = ["#eaf6cb", "#9dde9a", "#e8c56b", "#c5d9a0", "#f0a0a0", "#a8c5a0"];
 
@@ -70,6 +75,8 @@ function barColorForRatio(ratio: number, index: number) {
 }
 
 export function TodayPage() {
+  const navigate = useNavigate();
+  const { setConversationId } = useChatNav();
   const [data, setData] = useState<TodayResponse | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -135,27 +142,10 @@ export function TodayPage() {
       .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
   }, [sessions, data?.todays_sessions, now]);
 
-  const proposedBatches = useMemo(() => {
-    const source = sessions.length ? sessions : data?.todays_sessions ?? [];
-    const map = new Map<string, Session[]>();
-    for (const s of source.filter((row) => row.status === "proposed")) {
-      const key = s.proposal_batch_id || s.id;
-      const list = map.get(key) || [];
-      list.push(s);
-      map.set(key, list);
-    }
-    return [...map.entries()].map(([batchId, rows]) => ({
-      batchId,
-      sessions: rows,
-      title: rows[0]?.title || "Proposed sessions",
-      count: rows.length,
-    }));
-  }, [sessions, data?.todays_sessions]);
-
-  const proposedSessions = useMemo(
-    () => proposedBatches.flatMap((b) => b.sessions),
-    [proposedBatches],
-  );
+  const needs = useMemo(() => {
+    if (data?.needs?.length) return data.needs;
+    return [] as TodayNeed[];
+  }, [data?.needs]);
 
   async function onApproveBatch(batchId: string) {
     if (busyBatch) return;
@@ -172,10 +162,21 @@ export function TodayPage() {
     }
   }
 
-  const pendingCount =
-    (data?.pending_questions.length ?? 0) +
-    (data?.attention.length ?? 0) +
-    proposedSessions.length;
+  function continueNeed(need: TodayNeed) {
+    setConversationId(need.conversation_id);
+    localStorage.setItem(
+      CONTINUE_HINT_KEY,
+      JSON.stringify({
+        title: need.title,
+        detail: need.detail,
+        kind: need.kind,
+        at: Date.now(),
+      }),
+    );
+    navigate("/chat");
+  }
+
+  const pendingCount = needs.length;
 
   const todaySessionCount = data?.todays_sessions.length ?? 0;
   const activeGoals = data?.goals.length ?? 0;
@@ -305,37 +306,29 @@ export function TodayPage() {
             <EmptyState icon={<CheckCircle size={22} />}>All clear.</EmptyState>
           )}
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
-            {proposedBatches.slice(0, 4).map((batch) => (
-              <li key={batch.batchId} className="flex items-center gap-2">
-                <CheckCircle size={18} weight="duotone" className="text-mint-dim" />
+            {needs.map((need) => (
+              <li key={need.id} className="flex items-start gap-2">
+                <WarningCircle size={18} weight="duotone" className="mt-0.5 text-warn" />
                 <div className="min-w-0 flex-1">
-                  <strong className="text-sm">{batch.title}</strong>
-                  <div className="text-xs text-muted">
-                    Waiting · {batch.count} session{batch.count === 1 ? "" : "s"}
-                  </div>
-                </div>
-                <Button
-                  tone="primary"
-                  disabled={!!busyBatch}
-                  onClick={() => onApproveBatch(batch.batchId)}
-                >
-                  {busyBatch === batch.batchId ? "…" : "Approve"}
-                </Button>
-              </li>
-            ))}
-            {data?.attention.map((item) => (
-              <li key={`att-${item}`} className="flex items-center gap-2">
-                <WarningCircle size={18} weight="duotone" className="text-warn" />
-                <strong className="text-sm">{item}</strong>
-              </li>
-            ))}
-            {data?.pending_questions.map((q) => (
-              <li key={`q-${q}`} className="flex items-center gap-2">
-                <ChatCircle size={18} weight="duotone" className="text-mint-dim" />
-                <div className="min-w-0 flex-1">
-                  <strong className="text-sm">{q}</strong>
-                  <div className="text-xs">
-                    <Link to="/chat">Continue in Chat</Link>
+                  <strong className="text-sm">{need.title}</strong>
+                  {need.detail && <div className="text-xs text-muted">{need.detail}</div>}
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {need.kind === "approve" && need.proposal_batch_id && (
+                      <Button
+                        tone="primary"
+                        disabled={!!busyBatch}
+                        onClick={() => onApproveBatch(need.proposal_batch_id!)}
+                      >
+                        {busyBatch === need.proposal_batch_id ? "…" : "Approve"}
+                      </Button>
+                    )}
+                    <button
+                      type="button"
+                      className="text-xs text-mint underline"
+                      onClick={() => continueNeed(need)}
+                    >
+                      Continue in Chat
+                    </button>
                   </div>
                 </div>
               </li>

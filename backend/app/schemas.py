@@ -195,10 +195,21 @@ class SessionUpdate(BaseModel):
     category_id: str | None = None
 
 
+class TodayNeed(BaseModel):
+    id: str
+    kind: Literal["gathering", "approve"]
+    title: str
+    detail: str | None = None
+    goal_id: str
+    conversation_id: str
+    proposal_batch_id: str | None = None
+
+
 class TodayResponse(BaseModel):
     goals: list[Goal]
     attention: list[str]
     pending_questions: list[str]
+    needs: list[TodayNeed] = Field(default_factory=list)
     todays_sessions: list[SessionOut] = Field(default_factory=list)
     progress: list[dict[str, Any]] = Field(default_factory=list)
     resurfaced_spark: Spark | None = None

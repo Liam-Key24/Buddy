@@ -40,6 +40,7 @@ import { cn } from "../lib/cn";
 type Msg = { role: "user" | "assistant"; content: string };
 
 const EDIT_HINT_KEY = "buddy.editGoalHint";
+const CONTINUE_HINT_KEY = "buddy.continueHint";
 const COMPOSER_MAX_PX = 180;
 
 const GREETING: Msg = {
@@ -102,6 +103,32 @@ export function ChatPage() {
       composerRef.current?.focus();
     } catch {
       localStorage.removeItem(EDIT_HINT_KEY);
+    }
+  }, [pushToast]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(CONTINUE_HINT_KEY);
+    if (!raw) return;
+    try {
+      const hint = JSON.parse(raw) as {
+        title?: string;
+        detail?: string | null;
+        kind?: string;
+        at?: number;
+      };
+      localStorage.removeItem(CONTINUE_HINT_KEY);
+      if (hint.at && Date.now() - hint.at > 60_000) return;
+      const detail = hint.detail?.trim();
+      const title = hint.title?.trim();
+      if (title) pushToast(title);
+      if (hint.kind === "gathering" && detail) {
+        setInput((prev) => prev || `${detail} `);
+      } else if (hint.kind === "approve") {
+        setInput((prev) => prev || "Approve");
+      }
+      composerRef.current?.focus();
+    } catch {
+      localStorage.removeItem(CONTINUE_HINT_KEY);
     }
   }, [pushToast]);
 

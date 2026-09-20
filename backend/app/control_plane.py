@@ -29,6 +29,7 @@ from .schemas import (
     RequestedAction,
     SessionOut,
     Spark,
+    TodayNeed,
     TodayResponse,
 )
 from .sparks import SparkService
@@ -605,8 +606,7 @@ class ControlPlane:
 
     def get_today(self) -> TodayResponse:
         goals = self.goals.list_open()
-        attention: list[str] = []
-        pending: list[str] = []
+        needs: list[TodayNeed] = []
         progress = []
         today = datetime.now().date().isoformat()
         todays = self.calendar.list_sessions(start=today, end=today + "T23:59:59")
@@ -618,12 +618,28 @@ class ControlPlane:
             progress.append({"goal_id": g.id, "title": g.title, "summary": summary, **counts})
             batch = self.calendar.open_proposal_batch(g.id)
             if batch:
-                attention.append(f"{g.title} has sessions waiting for approval")
-                pending.append("Approve or reject the proposed sessions?")
+                needs.append(
+                    TodayNeed(
+                        id=f"approve-{g.id}",
+                        kind="approve",
+                        title=f"{g.title} has sessions waiting for approval",
+                        detail="Approve, reject, or adjust the proposed plan",
+                        goal_id=g.id,
+                        conversation_id=g.conversation_id,
+                        proposal_batch_id=batch,
+                    )
+                )
             elif g.status == "gathering":
-                attention.append(f"{g.title} still needs a clearer plan")
-                if not pending:
-                    pending.append("What would make this goal realistic this week?")
+                needs.append(
+                    TodayNeed(
+                        id=f"gather-{g.id}",
+                        kind="gathering",
+                        title=f"{g.title} still needs a clearer plan",
+                        detail="What would make this goal realistic this week?",
+                        goal_id=g.id,
+                        conversation_id=g.conversation_id,
+                    )
+                )
 
         spark = None
         open_sparks = self.sparks.list_open()
@@ -631,10 +647,15 @@ class ControlPlane:
             # Deterministic resurfacing — no AI call
             spark = open_sparks[0]
 
+        # Legacy string lists kept for older clients; count should use `needs`.
+        attention = [n.title for n in needs]
+        pending_questions = [n.detail for n in needs if n.detail]
+
         return TodayResponse(
             goals=goals,
             attention=attention,
-            pending_questions=pending,
+            pending_questions=pending_questions,
+            needs=needs,
             todays_sessions=[s for s in todays if s.start_at[:10] == today],
             progress=progress,
             resurfaced_spark=spark,
