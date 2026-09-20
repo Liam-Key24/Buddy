@@ -184,13 +184,8 @@ def delete_session(session_id: str):
 @app.patch("/calendar/sessions/{session_id}")
 def update_session(session_id: str, body: SessionUpdate):
     try:
-        updated = plane.calendar.update_session(
-            session_id,
-            title=body.title,
-            start_at=body.start_at,
-            end_at=body.end_at,
-            category_id=body.category_id,
-        )
+        data = body.model_dump(exclude_unset=True)
+        updated = plane.calendar.update_session(session_id, **data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:

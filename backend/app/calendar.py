@@ -809,7 +809,7 @@ class CalendarService:
         title: str | None = None,
         start_at: str | None = None,
         end_at: str | None = None,
-        category_id: str | None = None,
+        category_id: str | None | object = ...,
     ) -> SessionOut | None:
         row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if not row:
@@ -826,11 +826,16 @@ class CalendarService:
         if end <= start:
             raise ValueError("End must be after start")
 
-        new_category_id = category_id if category_id is not None else current.get("category_id")
-        if title and category_id is None:
-            matched, _ = self._category_for_title(new_title)
-            if matched:
-                new_category_id = matched
+        if category_id is not ...:
+            new_category_id = category_id or None
+            if new_category_id and not self.categories.get(str(new_category_id)):
+                new_category_id = None
+        else:
+            new_category_id = current.get("category_id")
+            if title and category_id is ...:
+                matched, _ = self._category_for_title(new_title)
+                if matched:
+                    new_category_id = matched
 
         now = _now()
         self.conn.execute(

@@ -78,6 +78,22 @@
   }
 }
 
+@layer components {
+  .field {
+    border-radius: 0.5rem;
+    background: var(--color-raised-soft);
+    padding: 0.35rem 0.5rem;
+    font-size: 0.875rem;
+    color: var(--color-ink);
+    outline: none;
+  }
+
+  .field:focus-visible {
+    outline: 2px solid var(--color-mint);
+    outline-offset: 1px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

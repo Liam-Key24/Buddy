@@ -14,13 +14,22 @@ import {
   Trash,
   X,
 } from "@phosphor-icons/react";
-import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { CategoryPanel, type CategoryDraft } from "../components/CategoryPanel";
 import { CategoryIcon } from "../components/CategoryIcon";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Button } from "../components/ui/Button";
 import { FrostFloat } from "../components/ui/FrostFloat";
 import { IconButton } from "../components/ui/IconButton";
 import { Surface } from "../components/ui/Surface";
 import { Tag } from "../components/ui/Tag";
+import {
+  isFixedCategory,
+  loadCategoryFilters,
+  mergeCategoryFilters,
+  saveCategoryFilters,
+  UNCATEGORIZED_KEY,
+  uniqueCategories,
+} from "../lib/categories";
 import { cn } from "../lib/cn";
 import {
   createCategory,
@@ -36,7 +45,9 @@ import {
   formatSessionWhen,
   markSessionOutcome,
   notifyCalendarChanged,
+  updateCategory,
   updateFixedBlock,
+  updateSession,
   type Category,
   type FixedBlock,
   type Session,
@@ -49,8 +60,6 @@ const VIEW_TABS: Array<{ id: CalView; label: string }> = [
   { id: "timeGridWeek", label: "Week" },
   { id: "dayGridMonth", label: "Month" },
 ];
-
-const COLOR_PRESETS = ["#eaf6cb", "#c5d9a0", "#9dde9a", "#a8c5a0", "#e8c56b", "#f0a0a0", "#8fb9a8"];
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -169,15 +178,11 @@ export function CalendarPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [enabled, setEnabled] = useState<Record<string, boolean>>({});
+  const [enabled, setEnabled] = useState<Record<string, boolean>>(loadCategoryFilters);
   const [view, setView] = useState<CalView>("timeGridWeek");
   const [selected, setSelected] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [addCategoryOpen, setAddCategoryOpen] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newKeywords, setNewKeywords] = useState("");
-  const [newColor, setNewColor] = useState(COLOR_PRESETS[0]);
   const [eventOpen, setEventOpen] = useState(false);
   const [eventTitle, setEventTitle] = useState("");
   const [eventDate, setEventDate] = useState(localDateInput);
@@ -189,6 +194,8 @@ export function CalendarPage() {
   });
   const [eventCategoryId, setEventCategoryId] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [pendingDeleteCategory, setPendingDeleteCategory] = useState<Category | null>(null);
+  const [dismissedNextId, setDismissedNextId] = useState<string | null>(null);
   const [fixedBlocks, setFixedBlocks] = useState<FixedBlock[]>([]);
   const [fixedOpen, setFixedOpen] = useState(false);
   const [fixedTitle, setFixedTitle] = useState("");
@@ -211,13 +218,7 @@ export function CalendarPage() {
     setSessions(s);
     setCategories(c);
     setFixedBlocks(f);
-    setEnabled((prev) => {
-      const next = { ...prev };
-      for (const cat of c) {
-        if (next[cat.id] === undefined) next[cat.id] = true;
-      }
-      return next;
-    });
+    setEnabled((prev) => mergeCategoryFilters(c, prev));
   }
 
   useEffect(() => {
@@ -229,40 +230,48 @@ export function CalendarPage() {
     return () => window.removeEventListener("buddy.calendar-changed", onCalendarChanged);
   }, []);
 
+  useEffect(() => {
+    saveCategoryFilters(enabled);
+  }, [enabled]);
+
+  const filterCats = useMemo(() => uniqueCategories(categories), [categories]);
+
+  const categoryById = useMemo(() => {
+    const map = new Map<string, Category>();
+    for (const c of categories) map.set(c.id, c);
+    return map;
+  }, [categories]);
+
   const filtered = useMemo(() => {
     return sessions.filter((s) => {
       const id = s.category_id;
-      if (!id) return true;
+      if (!id) return enabled[UNCATEGORIZED_KEY] !== false;
+      const cat = categoryById.get(id);
+      if (cat && isFixedCategory(cat.name)) return true;
       return enabled[id] !== false;
     });
-  }, [sessions, enabled]);
+  }, [sessions, enabled, categoryById]);
 
   const counts = useMemo(() => {
     const map: Record<string, number> = {};
+    let uncategorized = 0;
     for (const s of sessions) {
       const id = s.category_id || "";
-      if (!id) continue;
+      if (!id) {
+        uncategorized += 1;
+        continue;
+      }
       map[id] = (map[id] || 0) + 1;
     }
-    return map;
+    return { map, uncategorized };
   }, [sessions]);
-
-  const uniqueCategories = useMemo(() => {
-    const seen = new Set<string>();
-    return categories.filter((c) => {
-      const key = c.name.trim().toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [categories]);
 
   const categoryTotals = useMemo(() => {
     return Math.max(
       1,
-      uniqueCategories.reduce((sum, c) => sum + (counts[c.id] || 0), 0),
+      filterCats.reduce((sum, c) => sum + (counts.map[c.id] || 0), 0) + counts.uncategorized,
     );
-  }, [uniqueCategories, counts]);
+  }, [filterCats, counts]);
 
   const minutesUntil = (session: Session | null) => {
     if (!session) return null;
@@ -279,11 +288,12 @@ export function CalendarPage() {
     const now = Date.now();
     return (
       [...filtered]
+        .filter((s) => s.id !== dismissedNextId)
         .filter((s) => new Date(s.end_at).getTime() >= now - 60_000)
         .filter((s) => s.status !== "missed" && s.status !== "rejected")
         .sort((a, b) => a.start_at.localeCompare(b.start_at))[0] || null
     );
-  }, [filtered]);
+  }, [filtered, dismissedNextId]);
 
   const busyGroups = useMemo(() => groupFixedBlocks(fixedBlocks), [fixedBlocks]);
 
@@ -524,48 +534,78 @@ export function CalendarPage() {
     }
   }
 
-  function closeAddCategory() {
-    setAddCategoryOpen(false);
-    setNewName("");
-    setNewKeywords("");
-    setNewColor(COLOR_PRESETS[0]);
-  }
-
-  async function onAddCategory() {
-    if (!newName.trim() || busy) return;
+  async function onSaveCategory(draft: CategoryDraft) {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
-      const lower = newName.trim().toLowerCase();
-      await createCategory({
-        name: newName.trim(),
-        color: newColor,
-        keywords: newKeywords.trim(),
-        icon: lower.includes("climb")
-          ? "mountain"
-          : lower.includes("strength") || lower.includes("workout")
-            ? "barbell"
-            : "circle",
-      });
-      closeAddCategory();
+      if (draft.id) {
+        await updateCategory(draft.id, {
+          name: draft.name,
+          color: draft.color,
+          keywords: draft.keywords,
+          icon: draft.icon,
+        });
+      } else {
+        await createCategory({
+          name: draft.name,
+          color: draft.color,
+          keywords: draft.keywords,
+          icon: draft.icon,
+        });
+      }
       await reload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add category");
+      setError(e instanceof Error ? e.message : "Could not save category");
+      throw e;
     } finally {
       setBusy(false);
     }
   }
 
-  async function onDeleteCategory(id: string) {
-    if (busy) return;
+  async function confirmDeleteCategory() {
+    if (!pendingDeleteCategory || busy) return;
     setBusy(true);
+    setError(null);
     try {
-      await deleteCategory(id);
+      await deleteCategory(pendingDeleteCategory.id);
+      setPendingDeleteCategory(null);
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete category");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function onChangeSelectedCategory(categoryId: string) {
+    if (!selected || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await updateSession(selected.id, {
+        category_id: categoryId || null,
+      });
+      setSelected(updated);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update category");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setFilter(id: string, on: boolean) {
+    setEnabled((prev) => ({ ...prev, [id]: on }));
+  }
+
+  function showAllCategories() {
+    setEnabled((prev) => {
+      const next = { ...prev };
+      for (const cat of filterCats) next[cat.id] = true;
+      next[UNCATEGORIZED_KEY] = true;
+      return next;
+    });
   }
 
 
@@ -672,7 +712,7 @@ export function CalendarPage() {
                 }
                 color={selected.category?.color}
               >
-                {selected.category?.name || "Session"}
+                {selected.category?.name || "Uncategorized"}
               </Tag>
               <div className="min-w-0 flex-1">
                 <strong className="text-sm">{selected.title}</strong>
@@ -684,6 +724,22 @@ export function CalendarPage() {
                 <X size={16} />
               </IconButton>
             </div>
+            <label className="mt-2 flex flex-col gap-1 text-xs text-muted">
+              Category
+              <select
+                className="field"
+                value={selected.category_id || ""}
+                disabled={busy}
+                onChange={(e) => onChangeSelectedCategory(e.target.value)}
+              >
+                <option value="">Uncategorized</option>
+                {filterCats.map((cat) => (
+                  <option key={cat.id} value={cat.id}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="mt-2 flex flex-wrap gap-2">
               {selected.status === "proposed" && selected.proposal_batch_id && (
                 <Button tone="primary" disabled={busy} onClick={onApproveSelected}>
@@ -813,7 +869,10 @@ export function CalendarPage() {
                 </div>
                 <strong className="block text-sm leading-snug">{nextUp.title}</strong>
                 <div className="mt-3 flex gap-2">
-                  <Button tone="ghost" onClick={() => setSelected(null)}>
+                  <Button
+                    tone="ghost"
+                    onClick={() => setDismissedNextId(nextUp.id)}
+                  >
                     Later
                   </Button>
                   <Button tone="primary" onClick={() => setSelected(nextUp)}>
@@ -827,109 +886,18 @@ export function CalendarPage() {
           </Surface>
 
           <Surface className="rounded-3xl border-0 bg-raised/90">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="m-0 text-sm font-medium">Categories</h3>
-              <IconButton label="Add category" size="sm" onClick={() => setAddCategoryOpen(true)}>
-                <Plus size={14} weight="bold" />
-              </IconButton>
-            </div>
-            <ul className="m-0 flex list-none flex-col gap-3 p-0">
-              {uniqueCategories.map((cat) => {
-                const count = counts[cat.id] || 0;
-                const pct = Math.min(100, Math.round((count / categoryTotals) * 100));
-                return (
-                  <li key={cat.id} className="flex items-center gap-2">
-                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
-                      <input
-                        type="checkbox"
-                        className="sr-only"
-                        checked={enabled[cat.id] !== false}
-                        onChange={(e) =>
-                          setEnabled((prev) => ({ ...prev, [cat.id]: e.target.checked }))
-                        }
-                      />
-                      <span
-                        className={cn(
-                          "size-2.5 shrink-0 rounded-full",
-                          enabled[cat.id] === false && "opacity-30",
-                        )}
-                        style={{ background: cat.color }}
-                      />
-                      <span
-                        className={cn(
-                          "w-20 shrink-0 truncate text-sm",
-                          enabled[cat.id] === false && "text-muted",
-                        )}
-                      >
-                        {cat.name}
-                      </span>
-                      <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-raised-soft">
-                        <span
-                          className="block h-full rounded-full transition-[width]"
-                          style={{
-                            width: `${enabled[cat.id] === false ? 0 : Math.max(pct, count ? 12 : 0)}%`,
-                            background: cat.color,
-                          }}
-                        />
-                      </span>
-                    </label>
-                    {cat.name !== "Other" && cat.name !== "Fixed" && (
-                      <IconButton
-                        label="Delete category"
-                        size="sm"
-                        onClick={() => onDeleteCategory(cat.id)}
-                      >
-                        <Trash size={14} />
-                      </IconButton>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-            {addCategoryOpen && (
-              <div className="mt-3 flex flex-col gap-2 border-t border-white/5 pt-3">
-                <input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder="Name"
-                  autoFocus
-                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
-                />
-                <input
-                  value={newKeywords}
-                  onChange={(e) => setNewKeywords(e.target.value)}
-                  placeholder="Keywords"
-                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
-                />
-                <div className="flex flex-wrap gap-1.5">
-                  {COLOR_PRESETS.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      className={cn(
-                        "size-5 rounded-full",
-                        newColor === c && "ring-2 ring-mint ring-offset-1 ring-offset-raised",
-                      )}
-                      style={{ background: c }}
-                      onClick={() => setNewColor(c)}
-                      aria-label={c}
-                    />
-                  ))}
-                </div>
-                <div className="flex gap-2">
-                  <Button tone="ghost" onClick={closeAddCategory}>
-                    Cancel
-                  </Button>
-                  <Button
-                    tone="primary"
-                    disabled={busy || !newName.trim()}
-                    onClick={onAddCategory}
-                  >
-                    Add
-                  </Button>
-                </div>
-              </div>
-            )}
+            <CategoryPanel
+              categories={filterCats}
+              counts={counts.map}
+              uncategorizedCount={counts.uncategorized}
+              enabled={enabled}
+              total={categoryTotals}
+              busy={busy}
+              onToggle={setFilter}
+              onShowAll={showAllCategories}
+              onSave={onSaveCategory}
+              onRequestDelete={setPendingDeleteCategory}
+            />
           </Surface>
 
           <Surface className="rounded-3xl border-0 bg-raised/90">
@@ -997,61 +965,61 @@ export function CalendarPage() {
                 <X size={16} />
               </IconButton>
             </div>
-            <div className="flex flex-col gap-2 text-sm">
-              <label className="flex flex-col gap-1">
-                Title
-                <input
-                  value={eventTitle}
-                  onChange={(e) => setEventTitle(e.target.value)}
-                  placeholder="Title"
-                  autoFocus
-                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                Date
-                <input
-                  type="date"
-                  value={eventDate}
-                  onChange={(e) => setEventDate(e.target.value)}
-                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                />
-              </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-col gap-2 text-sm">
                 <label className="flex flex-col gap-1">
-                  Start
+                  Title
                   <input
-                    type="time"
-                    value={eventStart}
-                    onChange={(e) => setEventStart(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    value={eventTitle}
+                    onChange={(e) => setEventTitle(e.target.value)}
+                    placeholder="Title"
+                    autoFocus
+                    className="field"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  End
+                  Date
                   <input
-                    type="time"
-                    value={eventEnd}
-                    onChange={(e) => setEventEnd(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    type="date"
+                    value={eventDate}
+                    onChange={(e) => setEventDate(e.target.value)}
+                    className="field"
                   />
                 </label>
-              </div>
-              <label className="flex flex-col gap-1">
-                Category
-                <select
-                  value={eventCategoryId}
-                  onChange={(e) => setEventCategoryId(e.target.value)}
-                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
-                >
-                  <option value="">Auto</option>
-                  {uniqueCategories.map((cat) => (
-                    <option key={cat.id} value={cat.id}>
-                      {cat.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex flex-col gap-1">
+                    Start
+                    <input
+                      type="time"
+                      value={eventStart}
+                      onChange={(e) => setEventStart(e.target.value)}
+                      className="field"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    End
+                    <input
+                      type="time"
+                      value={eventEnd}
+                      onChange={(e) => setEventEnd(e.target.value)}
+                      className="field"
+                    />
+                  </label>
+                </div>
+                <label className="flex flex-col gap-1">
+                  Category
+                  <select
+                    value={eventCategoryId}
+                    onChange={(e) => setEventCategoryId(e.target.value)}
+                    className="field"
+                  >
+                    <option value="">Auto</option>
+                    {filterCats.map((cat) => (
+                      <option key={cat.id} value={cat.id}>
+                        {cat.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               <Button
                 tone="primary"
                 block
@@ -1090,7 +1058,7 @@ export function CalendarPage() {
                 <input
                   value={fixedTitle}
                   onChange={(e) => setFixedTitle(e.target.value)}
-                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  className="field"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1098,7 +1066,7 @@ export function CalendarPage() {
                 <select
                   value={fixedWeekday}
                   onChange={(e) => setFixedWeekday(Number(e.target.value))}
-                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  className="field"
                 >
                   {WEEKDAY_LABELS.map((label, i) => (
                     <option key={label} value={i}>
@@ -1114,7 +1082,7 @@ export function CalendarPage() {
                     type="time"
                     value={fixedStart}
                     onChange={(e) => setFixedStart(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    className="field"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -1123,7 +1091,7 @@ export function CalendarPage() {
                     type="time"
                     value={fixedEnd}
                     onChange={(e) => setFixedEnd(e.target.value)}
-                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    className="field"
                   />
                 </label>
               </div>
@@ -1151,6 +1119,25 @@ export function CalendarPage() {
         busy={busy}
         onConfirm={confirmDeleteSession}
         onCancel={() => !busy && setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingDeleteCategory}
+        title="Delete category?"
+        message={
+          pendingDeleteCategory ? (
+            <>
+              Delete <strong>{pendingDeleteCategory.name}</strong>? Events keep their
+              times but lose this tag.
+            </>
+          ) : null
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        danger
+        busy={busy}
+        onConfirm={confirmDeleteCategory}
+        onCancel={() => !busy && setPendingDeleteCategory(null)}
       />
     </section>
   );

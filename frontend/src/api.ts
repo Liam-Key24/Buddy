@@ -309,6 +309,23 @@ export async function createSession(input: {
   );
 }
 
+export async function updateSession(
+  id: string,
+  input: {
+    title?: string;
+    start_at?: string;
+    end_at?: string;
+    category_id?: string | null;
+  },
+): Promise<Session> {
+  return json(
+    await fetch(`${API_BASE}/calendar/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
 
 export async function deleteSession(id: string): Promise<void> {
   await json(await fetch(`${API_BASE}/calendar/sessions/${id}`, { method: "DELETE" }));

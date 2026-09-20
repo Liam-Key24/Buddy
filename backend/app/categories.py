@@ -18,7 +18,7 @@ def _new_id() -> str:
 DEFAULT_CATEGORIES = [
     {
         "name": "Climbing",
-        "color": "#c5d9a0",
+        "color": "#7eb8da",
         "icon": "mountain",
         "keywords": "climb,boulder,technique,endurance,power,route",
     },
@@ -36,7 +36,7 @@ DEFAULT_CATEGORIES = [
     },
     {
         "name": "Other",
-        "color": "#eaf6cb",
+        "color": "#e8c56b",
         "icon": "circle",
         "keywords": "",
     },
