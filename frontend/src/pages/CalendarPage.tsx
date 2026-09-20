@@ -399,7 +399,7 @@ export function CalendarPage() {
   function renderDayHeader(arg: DayHeaderContentArg) {
     const weekday = arg.date.toLocaleDateString(undefined, { weekday: "short" });
     if (arg.view.type === "dayGridMonth") {
-      return <span className="cal-day-name">{weekday}</span>;
+      return <span className="cal-day-name">{weekday.slice(0, 2)}</span>;
     }
     const dayNum = arg.date.getDate();
     return (

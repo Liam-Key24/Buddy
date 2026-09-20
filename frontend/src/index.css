@@ -201,38 +201,70 @@
 
 .cal-grid-wrap .fc-daygrid-day-frame {
   min-height: 100%;
-  padding: 0.2rem;
+  padding: 0.25rem;
 }
 
-.cal-grid-wrap .fc-daygrid-day.fc-day-today .fc-daygrid-day-frame {
+/* Month: no boxes on every cell — only today gets a soft container; highlight is the day number */
+.cal-grid-wrap.is-month .fc-daygrid-day-frame {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.cal-grid-wrap.is-month .fc-daygrid-day.fc-day-today .fc-daygrid-day-frame {
   border-radius: var(--cal-soft-radius);
-  background: rgb(234 246 203 / 0.1);
-  box-shadow:
-    inset 0 0 0 1px rgb(234 246 203 / 0.08),
-    0 4px 12px rgb(10 16 14 / 0.12);
+  background: rgb(234 246 203 / 0.07);
+  box-shadow: inset 0 0 0 1px rgb(234 246 203 / 0.06);
+}
+
+.cal-grid-wrap.is-month .fc-daygrid-day-top {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  padding: 0.4rem 0 0.2rem;
 }
 
 .cal-grid-wrap .fc-daygrid-day-number {
-  float: none;
-  display: inline-flex;
+  float: none !important;
+  display: inline-flex !important;
   align-items: center;
   justify-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
-  margin: 0.15rem 0.2rem 0 auto;
-  border-radius: var(--cal-soft-radius);
-  color: var(--color-ink-soft);
-  font-size: 0.8rem;
+  width: 1.85rem;
+  height: 1.85rem;
+  margin: 0 auto !important;
+  padding: 0 !important;
+  border-radius: 999px;
+  color: var(--color-ink);
+  font-size: 0.85rem;
+  font-weight: 500;
+  line-height: 1;
+  text-align: center;
+}
+
+.cal-grid-wrap.is-month .fc-day-other .fc-daygrid-day-number {
+  color: var(--color-muted-dim);
+  font-weight: 400;
 }
 
 .cal-grid-wrap .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
   background: var(--color-mint);
   color: var(--color-page-deep);
   font-weight: 600;
+  box-shadow: 0 2px 8px rgb(10 16 14 / 0.2);
 }
 
 .cal-grid-wrap.is-month .fc-col-header-cell-cushion {
-  padding: 0.35rem 0 0.5rem;
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  align-items: center;
+  padding: 0.45rem 0 0.55rem;
+}
+
+.cal-grid-wrap.is-month .fc-daygrid-day-events {
+  margin-top: 0.1rem;
+  min-height: 0.5rem;
 }
 
 .cal-grid-wrap .fc-timegrid-slot {
@@ -328,6 +360,9 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--color-muted);
+  display: block;
+  text-align: center;
+  width: 100%;
 }
 
 .cal-day-num {
@@ -338,7 +373,7 @@
   justify-content: center;
   width: 1.75rem;
   height: 1.75rem;
-  border-radius: var(--cal-soft-radius);
+  border-radius: 999px;
 }
 
 .cal-day-head.is-today .cal-day-num {
