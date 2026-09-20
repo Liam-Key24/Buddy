@@ -1,82 +1,38 @@
-import {
-  CalendarBlank,
-  ChatCircle,
-  Lightning,
-  SquaresFour,
-  GearSix,
-  Target,
-} from "@phosphor-icons/react";
-import { NavLink, Outlet } from "react-router-dom";
-
-const links = [
-  { to: "/", label: "Today", icon: SquaresFour, end: true },
-  { to: "/chat", label: "Chat", icon: ChatCircle },
-  { to: "/goals", label: "Goals", icon: Target },
-  { to: "/calendar", label: "Calendar", icon: CalendarBlank },
-  { to: "/sparks", label: "Sparks", icon: Lightning },
-];
+import { List } from "@phosphor-icons/react";
+import { useState } from "react";
+import { Outlet } from "react-router-dom";
+import { ChatNavProvider } from "./chatNav";
+import { MobileNav, SharedSidebar } from "./components/SharedSidebar";
+import { IconButton } from "./components/ui/IconButton";
+import { ToastProvider } from "./components/ui/Toast";
 
 export function AppShell() {
+  const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+
   return (
-    <div className="app-shell">
-      <nav className="nav-rail" aria-label="Primary">
-        <img
-          className="brand-mark"
-          src="/buddy-icon.png"
-          alt="Buddy"
-          title="Buddy"
-          width={30}
-          height={30}
-        />
-        {links.map((link) => {
-          const Icon = link.icon;
-          return (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              end={link.end}
-              title={link.label}
-              className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
-            >
-              <Icon size={20} weight={link.to === "/" ? "duotone" : "regular"} />
-            </NavLink>
-          );
-        })}
-        <div className="nav-spacer" />
-        <NavLink
-          to="/settings"
-          title="Settings"
-          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
-        >
-          <GearSix size={20} weight="regular" />
-        </NavLink>
-      </nav>
-      <main className="content">
-        <Outlet />
-      </main>
-      <nav className="mobile-nav" aria-label="Mobile">
-        {links.map((link) => {
-          const Icon = link.icon;
-          return (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              end={link.end}
-              title={link.label}
-              className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
-            >
-              <Icon size={22} />
-            </NavLink>
-          );
-        })}
-        <NavLink
-          to="/settings"
-          title="Settings"
-          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
-        >
-          <GearSix size={22} />
-        </NavLink>
-      </nav>
-    </div>
+    <ToastProvider>
+      <ChatNavProvider>
+        <div className="flex h-dvh bg-page font-ui text-ink">
+          <SharedSidebar
+            collapsed={collapsed}
+            mobileOpen={mobileOpen}
+            onToggleCollapsed={() => setCollapsed((v) => !v)}
+            onCloseMobile={() => setMobileOpen(false)}
+          />
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="flex items-center gap-2 px-3 pt-3 md:hidden">
+              <IconButton label="Open menu" onClick={() => setMobileOpen(true)}>
+                <List size={20} />
+              </IconButton>
+            </div>
+            <main className="min-h-0 min-w-0 flex-1 overflow-hidden pb-16 md:pb-0">
+              <Outlet />
+            </main>
+          </div>
+          <MobileNav onOpenSidebar={() => setMobileOpen(true)} />
+        </div>
+      </ChatNavProvider>
+    </ToastProvider>
   );
 }

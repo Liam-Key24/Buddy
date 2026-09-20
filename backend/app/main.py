@@ -288,7 +288,16 @@ def dismiss_spark(spark_id: str):
     return spark
 
 
-class ConversationRename(BaseModel):
+class ConversationPatch(BaseModel):
+    title: str | None = None
+    folder_id: str | None = None
+
+
+class FolderCreate(BaseModel):
+    title: str
+
+
+class FolderRename(BaseModel):
     title: str
 
 
@@ -307,10 +316,46 @@ def create_conversation():
 
 
 @app.patch("/conversations/{conversation_id}")
-def rename_conversation(conversation_id: str, body: ConversationRename):
-    row = plane.rename_conversation(conversation_id, body.title)
+def patch_conversation(conversation_id: str, body: ConversationPatch):
+    row = None
+    if body.title is not None:
+        row = plane.rename_conversation(conversation_id, body.title)
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+    if "folder_id" in body.model_fields_set:
+        row = plane.move_conversation(conversation_id, body.folder_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation or folder not found")
+    if row is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    return row
+
+
+@app.get("/folders")
+def list_folders():
+    return plane.list_folders()
+
+
+@app.post("/folders")
+def create_folder(body: FolderCreate):
+    if not body.title.strip():
+        raise HTTPException(status_code=400, detail="Title required")
+    return plane.create_folder(body.title)
+
+
+@app.patch("/folders/{folder_id}")
+def rename_folder(folder_id: str, body: FolderRename):
+    row = plane.rename_folder(folder_id, body.title)
     if not row:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return row
+
+
+@app.delete("/folders/{folder_id}")
+def delete_folder(folder_id: str):
+    row = plane.delete_folder(folder_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Folder not found")
     return row
 
 

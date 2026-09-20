@@ -12,8 +12,13 @@ import {
   Trash,
   X,
 } from "@phosphor-icons/react";
-import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { CategoryIcon } from "../components/CategoryIcon";
+import { Button } from "../components/ui/Button";
+import { FrostFloat } from "../components/ui/FrostFloat";
+import { IconButton } from "../components/ui/IconButton";
+import { Tag } from "../components/ui/Tag";
+import { cn } from "../lib/cn";
 import {
   createCategory,
   createFixedBlock,
@@ -42,7 +47,7 @@ const VIEW_TABS: Array<{ id: CalView; label: string }> = [
   { id: "dayGridMonth", label: "Month" },
 ];
 
-const COLOR_PRESETS = ["#c4b5fd", "#a7f3d0", "#fbcfe8", "#bfdbfe", "#fde68a", "#fed7aa", "#e7e5e4"];
+const COLOR_PRESETS = ["#eaf6cb", "#c5d9a0", "#9dde9a", "#a8c5a0", "#e8c56b", "#f0a0a0", "#8fb9a8"];
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -171,7 +176,7 @@ export function CalendarPage() {
 
   const events = useMemo(() => {
     const sessionEvents = filtered.map((s) => {
-      const color = s.category?.color || "#bfdbfe";
+      const color = s.category?.color || "#c5d9a0";
       const proposed = s.status === "proposed";
       return {
         id: s.id,
@@ -180,7 +185,7 @@ export function CalendarPage() {
         end: s.end_at,
         backgroundColor: proposed ? "transparent" : color,
         borderColor: "transparent",
-        textColor: "#1c1917",
+        textColor: "#1a2422",
         classNames: [
           "evt-soft",
           proposed ? "evt-hatched" : "evt-solid",
@@ -196,7 +201,7 @@ export function CalendarPage() {
       startTime: minutesToTime(b.start_minute),
       endTime: minutesToTime(b.end_minute),
       display: "background" as const,
-      backgroundColor: "rgba(120, 113, 108, 0.18)",
+      backgroundColor: "rgba(73, 90, 86, 0.28)",
       classNames: ["evt-fixed-block"],
       editable: false,
       extendedProps: { fixedBlock: b },
@@ -204,13 +209,6 @@ export function CalendarPage() {
     return [...blockEvents, ...sessionEvents];
   }, [filtered, fixedBlocks]);
 
-  const upcoming = useMemo(() => {
-    const now = Date.now();
-    return [...filtered]
-      .filter((s) => new Date(s.end_at).getTime() >= now - 60_000)
-      .filter((s) => s.status !== "missed" && s.status !== "rejected")
-      .sort((a, b) => a.start_at.localeCompare(b.start_at));
-  }, [filtered]);
 
   function openEventModal() {
     const start = new Date();
@@ -267,7 +265,7 @@ export function CalendarPage() {
 
   function renderEvent(arg: EventContentArg) {
     const session = arg.event.extendedProps.session as Session | undefined;
-    const color = (arg.event.extendedProps.color as string) || "#bfdbfe";
+    const color = (arg.event.extendedProps.color as string) || "#c5d9a0";
     if (!session) return true;
     const compact = arg.view.type === "dayGridMonth";
     if (compact) {
@@ -434,26 +432,25 @@ export function CalendarPage() {
     }
   }
 
+
   return (
-    <section className={`cal-shell${sidebarOpen ? "" : " sidebar-collapsed"}`}>
+    <section className="flex h-full min-h-0 bg-page">
       {sidebarOpen && (
-        <aside className="cal-panel cal-side" aria-label="Categories">
-          <div className="cal-side-head">
-            <h2>Categories</h2>
-            <button
-              type="button"
-              className="icon-btn"
-              title="Close sidebar"
-              onClick={() => setSidebarOpen(false)}
-            >
+        <aside
+          className="fixed inset-y-0 left-0 z-20 h-full w-64 overflow-y-auto bg-sidebar p-3 lg:static lg:z-0"
+          aria-label="Categories"
+        >
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="m-0 text-sm font-medium">Categories</h2>
+            <IconButton label="Close categories" onClick={() => setSidebarOpen(false)}>
               <CaretLeft size={16} />
-            </button>
+            </IconButton>
           </div>
 
-          <ul className="cat-filter-list">
+          <ul className="m-0 flex list-none flex-col gap-1 p-0">
             {categories.map((cat) => (
-              <li key={cat.id}>
-                <label className="cat-filter-row">
+              <li key={cat.id} className="flex items-center gap-1">
+                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-xl px-1 py-1 hover:bg-sidebar-hover">
                   <input
                     type="checkbox"
                     checked={enabled[cat.id] !== false}
@@ -461,119 +458,105 @@ export function CalendarPage() {
                       setEnabled((prev) => ({ ...prev, [cat.id]: e.target.checked }))
                     }
                   />
-                  <span className="cat-swatch" style={{ background: cat.color }}>
-                    <CategoryIcon name={cat.icon || cat.name} size={12} />
-                  </span>
-                  <span className="cat-name">{cat.name}</span>
-                  <span className="cat-count">{counts[cat.id] || 0}</span>
+                  <Tag icon={<CategoryIcon name={cat.icon || cat.name} size={12} />} color={cat.color}>
+                    {cat.name}
+                  </Tag>
+                  <span className="ml-auto text-[10px] text-muted-dim">{counts[cat.id] || 0}</span>
                 </label>
                 {cat.name !== "Other" && cat.name !== "Fixed" && (
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    title="Delete category"
+                  <IconButton
+                    label="Delete category"
+                    size="sm"
                     onClick={() => onDeleteCategory(cat.id)}
                   >
                     <Trash size={14} />
-                  </button>
+                  </IconButton>
                 )}
               </li>
             ))}
           </ul>
 
-          <div className="cal-side-add">
+          <div className="mt-3">
             {!addCategoryOpen ? (
-              <button
-                type="button"
-                className="btn ghost block cal-side-add-toggle"
-                onClick={() => setAddCategoryOpen(true)}
-              >
-                <Plus size={16} weight="bold" /> Add category
-              </button>
+              <Button tone="ghost" block onClick={() => setAddCategoryOpen(true)}>
+                <Plus size={16} weight="bold" /> Add
+              </Button>
             ) : (
-              <div className="cat-add-form">
+              <div className="flex flex-col gap-2">
                 <input
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   placeholder="Name"
                   autoFocus
+                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
                 />
                 <input
                   value={newKeywords}
                   onChange={(e) => setNewKeywords(e.target.value)}
                   placeholder="Keywords"
+                  className="rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
                 />
-                <div className="color-row">
+                <div className="flex flex-wrap gap-1.5">
                   {COLOR_PRESETS.map((c) => (
                     <button
                       key={c}
                       type="button"
-                      className={`color-chip${newColor === c ? " active" : ""}`}
+                      className={cn(
+                        "size-5 rounded-full",
+                        newColor === c && "ring-2 ring-mint ring-offset-1 ring-offset-sidebar",
+                      )}
                       style={{ background: c }}
                       onClick={() => setNewColor(c)}
                       aria-label={c}
                     />
                   ))}
                 </div>
-                <div className="cal-form-actions">
-                  <button type="button" className="btn ghost" onClick={closeAddCategory}>
+                <div className="flex gap-2">
+                  <Button tone="ghost" onClick={closeAddCategory}>
                     Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="btn primary"
+                  </Button>
+                  <Button
+                    tone="primary"
                     disabled={busy || !newName.trim()}
                     onClick={onAddCategory}
                   >
-                    <Plus size={16} weight="bold" /> Add category
-                  </button>
+                    Add
+                  </Button>
                 </div>
               </div>
             )}
           </div>
 
-          <div className="cal-side-fixed">
-            <div className="cal-side-head cal-side-subhead">
-              <h2>Fixed blocks</h2>
-              <button
-                type="button"
-                className="icon-btn"
-                title="Add fixed block"
-                onClick={() => openFixedEditor()}
-              >
+          <div className="mt-5">
+            <div className="mb-1 flex items-center justify-between">
+              <h2 className="m-0 text-sm font-medium">Busy hours</h2>
+              <IconButton label="Add fixed block" onClick={() => openFixedEditor()}>
                 <Plus size={16} weight="bold" />
-              </button>
+              </IconButton>
             </div>
-            <p className="muted cal-fixed-hint">Buddy avoids these when proposing.</p>
-            <ul className="cal-fixed-list">
+            <p className="mt-0 mb-2 text-xs text-muted">Skipped when proposing.</p>
+            <ul className="m-0 flex list-none flex-col gap-2 p-0">
               {fixedBlocks.map((b) => (
-                <li key={b.id} className="cal-fixed-row">
+                <li key={b.id} className="flex items-start justify-between gap-2">
                   <div>
-                    <strong>{b.title}</strong>
-                    <div className="muted">
+                    <strong className="text-sm">{b.title}</strong>
+                    <div className="text-xs text-muted">
                       {WEEKDAY_LABELS[b.weekday]} ·{" "}
                       {minutesToTime(b.start_minute).slice(0, 5)}–
                       {minutesToTime(b.end_minute).slice(0, 5)}
                     </div>
                   </div>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      disabled={busy}
-                      onClick={() => openFixedEditor(b)}
-                    >
+                  <div className="flex">
+                    <Button tone="ghost" disabled={busy} onClick={() => openFixedEditor(b)}>
                       Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title="Delete"
+                    </Button>
+                    <IconButton
+                      label="Delete"
                       disabled={busy}
                       onClick={() => onDeleteFixed(b.id)}
                     >
                       <Trash size={14} />
-                    </button>
+                    </IconButton>
                   </div>
                 </li>
               ))}
@@ -582,86 +565,110 @@ export function CalendarPage() {
         </aside>
       )}
 
-      <div className="cal-panel cal-stage">
-        <header className="cal-stage-head">
-          <div className="cal-title-row">
-            {!sidebarOpen && (
-              <button
-                type="button"
-                className="cal-filter-btn"
-                onClick={() => setSidebarOpen(true)}
-                title="Open categories"
-              >
-                <FunnelSimple size={18} />
-                <span>Categories</span>
-              </button>
-            )}
-            <h1>Calendar</h1>
-          </div>
-
-          <div className="cal-view-toggle" role="tablist" aria-label="Calendar view">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col p-4">
+        <header className="mb-3 flex flex-wrap items-center gap-2">
+          <Button
+            tone="ghost"
+            className={sidebarOpen ? "lg:hidden" : ""}
+            onClick={() => setSidebarOpen((v) => !v)}
+            aria-label={sidebarOpen ? "Close categories" : "Open categories"}
+          >
+            <FunnelSimple size={18} />
+          </Button>
+          <div
+            className="flex rounded-pill bg-raised-soft p-0.5"
+            role="tablist"
+            aria-label="Calendar view"
+          >
             {VIEW_TABS.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
                 role="tab"
                 aria-selected={view === tab.id}
-                className={view === tab.id ? "active" : ""}
+                className={cn(
+                  "rounded-pill px-3 py-1 text-sm",
+                  view === tab.id ? "bg-mint text-page-deep" : "text-ink-soft",
+                )}
                 onClick={() => setCalView(tab.id)}
               >
                 {tab.label}
               </button>
             ))}
           </div>
-          <button type="button" className="btn primary cal-add-btn" onClick={openEventModal}>
-            <Plus size={16} weight="bold" /> Add event
-          </button>
+          <Button tone="primary" className="ml-auto" onClick={openEventModal}>
+            <Plus size={16} weight="bold" /> Add
+          </Button>
         </header>
 
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="mb-2 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
+        )}
 
         {eventOpen && (
-          <div className="cal-modal-backdrop" onClick={() => setEventOpen(false)}>
-            <div
-              className="cal-modal"
+          <div
+            className="fixed inset-0 z-30 grid place-items-center bg-overlay p-4"
+            onClick={() => setEventOpen(false)}
+          >
+            <FrostFloat
+              className="w-full max-w-md p-5"
               role="dialog"
               aria-label="Add event"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="cal-modal-head">
-                <h2>Add event</h2>
-                <button type="button" className="icon-btn" onClick={() => setEventOpen(false)} title="Close">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="m-0 font-display text-lg">Add event</h2>
+                <IconButton label="Close" onClick={() => setEventOpen(false)}>
                   <X size={16} />
-                </button>
+                </IconButton>
               </div>
-
-              <div className="cal-modal-form">
-                <label>
+              <div className="flex flex-col gap-2 text-sm">
+                <label className="flex flex-col gap-1">
                   Title
                   <input
                     value={eventTitle}
                     onChange={(e) => setEventTitle(e.target.value)}
                     placeholder="Title"
                     autoFocus
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
                   />
                 </label>
-                <label>
+                <label className="flex flex-col gap-1">
                   Date
-                  <input type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
+                  <input
+                    type="date"
+                    value={eventDate}
+                    onChange={(e) => setEventDate(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  />
                 </label>
-                <div className="cal-modal-row">
-                  <label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex flex-col gap-1">
                     Start
-                    <input type="time" value={eventStart} onChange={(e) => setEventStart(e.target.value)} />
+                    <input
+                      type="time"
+                      value={eventStart}
+                      onChange={(e) => setEventStart(e.target.value)}
+                      className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    />
                   </label>
-                  <label>
+                  <label className="flex flex-col gap-1">
                     End
-                    <input type="time" value={eventEnd} onChange={(e) => setEventEnd(e.target.value)} />
+                    <input
+                      type="time"
+                      value={eventEnd}
+                      onChange={(e) => setEventEnd(e.target.value)}
+                      className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                    />
                   </label>
                 </div>
-                <label>
+                <label className="flex flex-col gap-1">
                   Category
-                  <select value={eventCategoryId} onChange={(e) => setEventCategoryId(e.target.value)}>
+                  <select
+                    value={eventCategoryId}
+                    onChange={(e) => setEventCategoryId(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                  >
                     <option value="">Auto</option>
                     {categories.map((cat) => (
                       <option key={cat.id} value={cat.id}>
@@ -670,48 +677,20 @@ export function CalendarPage() {
                     ))}
                   </select>
                 </label>
-                <button
-                  type="button"
-                  className="btn primary block"
+                <Button
+                  tone="primary"
+                  block
                   disabled={busy || !eventTitle.trim()}
                   onClick={onAddEvent}
                 >
                   <Plus size={16} weight="bold" /> Add event
-                </button>
+                </Button>
               </div>
-
-              <div className="cal-modal-list">
-                <h3>Upcoming</h3>
-                {!upcoming.length && <p className="muted">None yet.</p>}
-                <ul>
-                  {upcoming.map((s) => (
-                    <li key={s.id}>
-                      <span
-                        className="cat-swatch"
-                        style={{ background: s.category?.color || "#bfdbfe" }}
-                      />
-                      <div>
-                        <strong>{s.title}</strong>
-                        <div className="muted">{formatSessionWhen(s)}</div>
-                      </div>
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        title="Delete event"
-                        disabled={busy}
-                        onClick={() => setPendingDelete(s)}
-                      >
-                        <Trash size={14} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+            </FrostFloat>
           </div>
         )}
 
-        <div className="cal-grid-wrap minimal">
+        <div className="cal-grid-wrap min-h-0 flex-1">
           <FullCalendar
             ref={calendarRef}
             plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
@@ -761,90 +740,87 @@ export function CalendarPage() {
         </div>
 
         {selected && (
-          <div className="cal-detail">
-            <div className="cal-detail-top">
-              <span className="cat-swatch" style={{ background: selected.category?.color || "#bfdbfe" }}>
-                <CategoryIcon name={selected.category?.icon || selected.category?.name || ""} size={12} />
-              </span>
-              <div className="cal-detail-copy">
-                <strong>{selected.title}</strong>
-                <span className="muted">
+          <FrostFloat className="mt-3 p-3">
+            <div className="flex items-start gap-2">
+              <Tag
+                icon={
+                  <CategoryIcon
+                    name={selected.category?.icon || selected.category?.name || ""}
+                    size={12}
+                  />
+                }
+                color={selected.category?.color}
+              >
+                {selected.category?.name || "Session"}
+              </Tag>
+              <div className="min-w-0 flex-1">
+                <strong className="text-sm">{selected.title}</strong>
+                <div className="text-xs text-muted">
                   {formatSessionWhen(selected)} · {selected.status}
-                  {selected.category ? ` · ${selected.category.name}` : ""}
-                </span>
+                </div>
               </div>
-              <button type="button" className="icon-btn" onClick={() => setSelected(null)} title="Close">
+              <IconButton label="Close" onClick={() => setSelected(null)}>
                 <X size={16} />
-              </button>
+              </IconButton>
             </div>
-            <div className="actions">
+            <div className="mt-2 flex flex-wrap gap-2">
               {selected.status === "proposed" && selected.proposal_batch_id && (
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={busy}
-                  onClick={onApproveSelected}
-                >
+                <Button tone="primary" disabled={busy} onClick={onApproveSelected}>
                   <CheckCircle size={16} /> Approve batch
-                </button>
+                </Button>
               )}
               {selected.status === "scheduled" && (
                 <>
-                  <button
-                    type="button"
-                    className="btn primary"
-                    disabled={busy}
-                    onClick={() => onOutcome("completed")}
-                  >
+                  <Button tone="primary" disabled={busy} onClick={() => onOutcome("completed")}>
                     <CheckCircle size={16} /> Completed
-                  </button>
-                  <button
-                    type="button"
-                    className="btn danger"
-                    disabled={busy}
-                    onClick={() => onOutcome("missed")}
-                  >
+                  </Button>
+                  <Button tone="danger" disabled={busy} onClick={() => onOutcome("missed")}>
                     Missed
-                  </button>
+                  </Button>
                 </>
               )}
-              <button
-                type="button"
-                className="btn danger"
-                disabled={busy}
-                onClick={() => setPendingDelete(selected)}
-              >
+              <Button tone="danger" disabled={busy} onClick={() => setPendingDelete(selected)}>
                 <Trash size={16} /> Delete
-              </button>
+              </Button>
             </div>
-          </div>
+          </FrostFloat>
         )}
       </div>
 
       {fixedOpen && (
-        <div className="cal-modal-backdrop" onClick={() => setFixedOpen(false)}>
-          <div
-            className="cal-modal"
+        <div
+          className="fixed inset-0 z-30 grid place-items-center bg-overlay p-4"
+          onClick={() => setFixedOpen(false)}
+        >
+          <FrostFloat
+            className="w-full max-w-md p-5"
             role="dialog"
             aria-label="Fixed block"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="cal-modal-head">
-              <h2>{editingFixedId ? "Edit fixed block" : "Add fixed block"}</h2>
-              <button type="button" className="icon-btn" onClick={() => setFixedOpen(false)} title="Close">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="m-0 font-display text-lg">
+                {editingFixedId ? "Edit busy hours" : "Add busy hours"}
+              </h2>
+              <IconButton label="Close" onClick={() => setFixedOpen(false)}>
                 <X size={16} />
-              </button>
+              </IconButton>
             </div>
-            <div className="cal-modal-form">
-              <label>
+            <div className="flex flex-col gap-2 text-sm">
+              <label className="flex flex-col gap-1">
                 Title
-                <input value={fixedTitle} onChange={(e) => setFixedTitle(e.target.value)} />
+                <input
+                  value={fixedTitle}
+                  onChange={(e) => setFixedTitle(e.target.value)}
+                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
+                />
               </label>
-              <label>
+              <label className="flex flex-col gap-1">
                 Weekday
                 <select
                   value={fixedWeekday}
                   onChange={(e) => setFixedWeekday(Number(e.target.value))}
+                  className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
                 >
                   {WEEKDAY_LABELS.map((label, i) => (
                     <option key={label} value={i}>
@@ -853,34 +829,31 @@ export function CalendarPage() {
                   ))}
                 </select>
               </label>
-              <div className="cal-modal-row">
-                <label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
                   Start
                   <input
                     type="time"
                     value={fixedStart}
                     onChange={(e) => setFixedStart(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
                   />
                 </label>
-                <label>
+                <label className="flex flex-col gap-1">
                   End
                   <input
                     type="time"
                     value={fixedEnd}
                     onChange={(e) => setFixedEnd(e.target.value)}
+                    className="rounded-lg bg-raised-soft px-2 py-1.5 outline-none"
                   />
                 </label>
               </div>
-              <button
-                type="button"
-                className="btn primary block"
-                disabled={busy || !fixedTitle.trim()}
-                onClick={onSaveFixed}
-              >
+              <Button tone="primary" block disabled={busy || !fixedTitle.trim()} onClick={onSaveFixed}>
                 Save
-              </button>
+              </Button>
             </div>
-          </div>
+          </FrostFloat>
         </div>
       )}
 

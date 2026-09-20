@@ -1,5 +1,8 @@
+import { CalendarBlank, X } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
 import { formatSessionWhen, type Goal, type ProposalSummary, type Session } from "../api";
+import { Button } from "./ui/Button";
+import { FrostFloat } from "./ui/FrostFloat";
 
 type ProposalCardsProps = {
   goal: Goal | null;
@@ -8,6 +11,7 @@ type ProposalCardsProps = {
   whyOpen: boolean;
   busy: boolean;
   onToggleWhy: () => void;
+  onClose?: () => void;
   onDecide: (decision: "approve" | "reject" | "adjust") => void;
 };
 
@@ -18,13 +22,28 @@ export function ProposalCards({
   whyOpen,
   busy,
   onToggleWhy,
+  onClose,
   onDecide,
 }: ProposalCardsProps) {
   const sample = summary.sample || proposals.slice(0, 5);
   return (
-    <div className="frost-card accent proposal-card-simple">
-      <h2>{summary.goal_card?.title || goal?.title || "Proposed plan"}</h2>
-      <ul className="meta-list">
+    <FrostFloat className="w-full max-w-md p-4" role="dialog" aria-label="Review plan">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <h2 className="m-0 font-display text-lg font-medium">
+          {summary.goal_card?.title || goal?.title || "Proposed plan"}
+        </h2>
+        {onClose && (
+          <button
+            type="button"
+            className="grid size-7 place-items-center rounded-lg text-muted hover:bg-raised-soft hover:text-ink"
+            aria-label="Close plan"
+            onClick={onClose}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+      <ul className="m-0 flex list-none flex-col gap-1 p-0 text-sm text-ink-soft">
         {summary.goal_card?.outcome && <li>{summary.goal_card.outcome}</li>}
         {summary.pattern && <li>{summary.pattern}</li>}
         {summary.through && (
@@ -35,19 +54,15 @@ export function ProposalCards({
         )}
       </ul>
 
-      <ul className="list comfort-proposal-list">
+      <ul className="mt-3 flex list-none flex-col gap-1.5 p-0">
         {sample.map((s) => {
-          const color = s.category?.color || "#93c5fd";
+          const color = s.category?.color || "#c5d9a0";
           return (
-            <li
-              key={s.id}
-              className="comfort-proposal-row"
-              style={{ ["--cat-color" as string]: color }}
-            >
-              <span className="comfort-swatch" style={{ background: color }} />
+            <li key={s.id} className="flex items-start gap-2 text-sm">
+              <span className="mt-1 size-2.5 shrink-0 rounded-full" style={{ background: color }} />
               <div>
-                <strong>{s.title}</strong>
-                <div className="muted">
+                <strong className="font-medium">{s.title}</strong>
+                <div className="text-xs text-muted">
                   {formatSessionWhen(s)}
                   {s.category ? ` · ${s.category.name}` : ""}
                 </div>
@@ -57,11 +72,11 @@ export function ProposalCards({
         })}
       </ul>
 
-      <button type="button" className="linkish" onClick={onToggleWhy}>
+      <button type="button" className="mt-3 text-xs text-mint" onClick={onToggleWhy}>
         {whyOpen ? "Hide why" : "Why these times?"}
       </button>
       {whyOpen && (
-        <ul className="meta-list">
+        <ul className="mt-2 flex list-none flex-col gap-1 p-0 text-xs text-muted">
           {(summary.why_lines || []).map((line) => (
             <li key={line}>{line}</li>
           ))}
@@ -69,20 +84,23 @@ export function ProposalCards({
         </ul>
       )}
 
-      <div className="actions">
-        <button type="button" className="btn primary" disabled={busy} onClick={() => onDecide("approve")}>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button tone="primary" disabled={busy} onClick={() => onDecide("approve")}>
           Approve
-        </button>
-        <button type="button" className="btn" disabled={busy} onClick={() => onDecide("adjust")}>
+        </Button>
+        <Button disabled={busy} onClick={() => onDecide("adjust")}>
           Adjust
-        </button>
-        <button type="button" className="btn danger" disabled={busy} onClick={() => onDecide("reject")}>
+        </Button>
+        <Button tone="danger" disabled={busy} onClick={() => onDecide("reject")}>
           Reject
-        </button>
-        <Link className="btn ghost" to="/calendar">
-          Calendar
+        </Button>
+        <Link
+          className="inline-flex items-center gap-1 rounded-pill px-3 py-1.5 text-sm text-ink-soft hover:bg-raised-soft"
+          to="/calendar"
+        >
+          <CalendarBlank size={14} /> Calendar
         </Link>
       </div>
-    </div>
+    </FrostFloat>
   );
 }

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from .ai.groq_provider import GroqError, GroqProvider
@@ -18,6 +20,7 @@ from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
 from .planning import propose_for_goal, summarize_proposal
 from .conversations import ConversationStore
+from .folders import FolderStore
 from .usage import UsageStore
 from .schemas import (
     BuddyTurn,
@@ -33,6 +36,37 @@ from .schemas import (
 from .sparks import SparkService
 
 log = logging.getLogger("buddy.control_plane")
+
+
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        import time as _time
+
+        payload = {
+            "sessionId": "9a1707",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000),
+            "runId": "pre-fix",
+        }
+        log.warning("DEBUG_AGENT %s", json.dumps(payload))
+        for path in (
+            Path("/Volumes/DISK/02_PROJECTS/BUDDY/.cursor/debug-9a1707.log"),
+            Path(__file__).resolve().parents[1] / "data" / "debug-9a1707.log",
+        ):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a") as f:
+                    f.write(json.dumps(payload) + "\n")
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # #endregion
 
 
 class AIClient(Protocol):
@@ -68,6 +102,7 @@ class ControlPlane:
         self.calendar = CalendarService(self.conn, categories=self.categories)
         self.sparks = SparkService(self.conn)
         self.conversations = ConversationStore(self.conn)
+        self.folders = FolderStore(self.conn)
         self.usage = UsageStore(self.conn)
         self._ai = ai
         self._ai_owned = ai is None
@@ -108,6 +143,25 @@ class ControlPlane:
 
     def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any] | None:
         return self.conversations.rename(conversation_id, title)
+
+    def move_conversation(
+        self, conversation_id: str, folder_id: str | None
+    ) -> dict[str, Any] | None:
+        if folder_id and not self.folders.get(folder_id):
+            return None
+        return self.conversations.move(conversation_id, folder_id)
+
+    def list_folders(self) -> list[dict[str, Any]]:
+        return self.folders.list()
+
+    def create_folder(self, title: str) -> dict[str, Any]:
+        return self.folders.create(title)
+
+    def rename_folder(self, folder_id: str, title: str) -> dict[str, Any] | None:
+        return self.folders.rename(folder_id, title)
+
+    def delete_folder(self, folder_id: str) -> dict[str, Any] | None:
+        return self.folders.delete(folder_id)
 
     def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         return self.conversations.soft_delete(conversation_id)
@@ -375,6 +429,18 @@ class ControlPlane:
         self._call_count += 1
         try:
             raw = self._provider().complete_json(SYSTEM_PROMPT, payload, allow_retry=True)
+            # #region agent log
+            _agent_dbg(
+                "C",
+                "control_plane.py:_run_ai_turn",
+                "first complete_json ok",
+                {
+                    "keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+                    "has_assistant_text": isinstance(raw, dict) and "assistant_text" in raw,
+                    "intents": (raw.get("intents") if isinstance(raw, dict) else None),
+                },
+            )
+            # #endregion
             stats = getattr(self._provider(), "last_stats", None)
             self.usage.record(
                 conversation_id=cid,
@@ -388,8 +454,35 @@ class ControlPlane:
                 rate_remaining=getattr(stats, "rate_remaining", None) if stats else None,
                 rate_reset=getattr(stats, "rate_reset", None) if stats else None,
             )
-            return parse_buddy_turn(raw)
-        except Exception:
+            try:
+                return parse_buddy_turn(raw)
+            except Exception as parse_exc:
+                # #region agent log
+                _agent_dbg(
+                    "C",
+                    "control_plane.py:parse_buddy_turn",
+                    "parse_buddy_turn failed after first call",
+                    {
+                        "err": str(parse_exc)[:300],
+                        "err_type": type(parse_exc).__name__,
+                        "keys": list(raw.keys()) if isinstance(raw, dict) else None,
+                    },
+                )
+                # #endregion
+                raise
+        except Exception as first_exc:
+            # #region agent log
+            _agent_dbg(
+                "C",
+                "control_plane.py:_run_ai_turn",
+                "first attempt failed, starting repair",
+                {
+                    "err": str(first_exc)[:300],
+                    "err_type": type(first_exc).__name__,
+                    "category": getattr(first_exc, "category", None),
+                },
+            )
+            # #endregion
             # One repair retry for malformed structured output (counts as the allowed retry path).
             self._call_count += 1
             repair = (
@@ -398,6 +491,17 @@ class ControlPlane:
             )
             try:
                 raw2 = self._provider().complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
+                # #region agent log
+                _agent_dbg(
+                    "C",
+                    "control_plane.py:repair",
+                    "repair complete_json ok",
+                    {
+                        "keys": list(raw2.keys()) if isinstance(raw2, dict) else type(raw2).__name__,
+                        "has_assistant_text": isinstance(raw2, dict) and "assistant_text" in raw2,
+                    },
+                )
+                # #endregion
                 stats = getattr(self._provider(), "last_stats", None)
                 self.usage.record(
                     conversation_id=cid,
@@ -408,12 +512,26 @@ class ControlPlane:
                 )
                 return parse_buddy_turn(raw2)
             except Exception as exc:  # noqa: BLE001
+                # #region agent log
+                _agent_dbg(
+                    "C",
+                    "control_plane.py:repair",
+                    "repair failed -> malformed",
+                    {
+                        "err": str(exc)[:400],
+                        "err_type": type(exc).__name__,
+                        "category": getattr(exc, "category", None),
+                    },
+                )
+                # #endregion
                 self.usage.record(
                     conversation_id=cid,
                     model=self.settings.groq_model,
-                    status="malformed",
+                    status=getattr(exc, "category", None) or "malformed",
                     attempt=2,
                 )
+                if isinstance(exc, GroqError):
+                    raise
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
 
     def _apply_turn(self, cid: str, turn: BuddyTurn, goal: Goal | None) -> ChatResponse:

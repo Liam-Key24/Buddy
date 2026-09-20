@@ -66,7 +66,16 @@ export type Conversation = {
   created_at: string;
   updated_at: string;
   deleted_at?: string | null;
+  folder_id?: string | null;
   draft?: Record<string, unknown>;
+};
+
+export type ChatFolder = {
+  id: string;
+  title: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ProposalSummary = {
@@ -423,6 +432,47 @@ export async function renameConversation(id: string, title: string): Promise<Con
       body: JSON.stringify({ title }),
     }),
   );
+}
+
+export async function moveConversation(
+  id: string,
+  folderId: string | null,
+): Promise<Conversation> {
+  return json(
+    await fetch(`${API_BASE}/conversations/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_id: folderId }),
+    }),
+  );
+}
+
+export async function fetchFolders(): Promise<ChatFolder[]> {
+  return json(await fetch(`${API_BASE}/folders`));
+}
+
+export async function createFolder(title: string): Promise<ChatFolder> {
+  return json(
+    await fetch(`${API_BASE}/folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
+export async function renameFolder(id: string, title: string): Promise<ChatFolder> {
+  return json(
+    await fetch(`${API_BASE}/folders/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
+export async function deleteFolder(id: string): Promise<ChatFolder> {
+  return json(await fetch(`${API_BASE}/folders/${id}`, { method: "DELETE" }));
 }
 
 export async function deleteConversation(id: string): Promise<Conversation> {

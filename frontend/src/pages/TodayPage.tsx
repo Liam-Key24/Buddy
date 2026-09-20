@@ -9,8 +9,12 @@ import {
   Target,
   WarningCircle,
 } from "@phosphor-icons/react";
-import { EmptyState } from "../components/EmptyState";
-import { SectionHead } from "../components/SectionHead";
+import { EmptyState } from "../components/ui/EmptyState";
+import { SectionHead } from "../components/ui/SectionHead";
+import { Skeleton } from "../components/ui/Skeleton";
+import { Surface } from "../components/ui/Surface";
+import { Tag } from "../components/ui/Tag";
+import { Button } from "../components/ui/Button";
 import {
   decideProposal,
   fetchSessions,
@@ -22,7 +26,7 @@ import {
   type UsageSummary,
 } from "../api";
 
-const GOAL_BAR_COLORS = ["#60a5fa", "#34d399", "#fbbf24", "#c4b5fd", "#fb7185", "#67e8f9"];
+const GOAL_BAR_COLORS = ["#eaf6cb", "#9dde9a", "#e8c56b", "#c5d9a0", "#f0a0a0", "#a8c5a0"];
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
@@ -59,9 +63,9 @@ function progressRatio(p: {
 }
 
 function barColorForRatio(ratio: number, index: number) {
-  if (ratio >= 0.75) return "#34d399";
+  if (ratio >= 0.75) return "#9dde9a";
   if (ratio >= 0.4) return GOAL_BAR_COLORS[index % GOAL_BAR_COLORS.length];
-  if (ratio > 0) return "#fbbf24";
+  if (ratio > 0) return "#e8c56b";
   return GOAL_BAR_COLORS[index % GOAL_BAR_COLORS.length];
 }
 
@@ -72,6 +76,7 @@ export function TodayPage() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [busyBatch, setBusyBatch] = useState<string | null>(null);
+  const loading = !data && !error;
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000);
@@ -175,226 +180,245 @@ export function TodayPage() {
   const todaySessionCount = data?.todays_sessions.length ?? 0;
   const activeGoals = data?.goals.length ?? 0;
 
+  const stats = [
+    {
+      icon: <ChatCircle size={20} weight="duotone" />,
+      value: usage ? `${usage.used} / ${usage.limit}` : "—",
+      label: "Requests",
+      color: "text-mint",
+    },
+    {
+      icon: <Target size={20} weight="duotone" />,
+      value: data ? String(activeGoals) : "—",
+      label: "Goals",
+      color: "text-ok",
+    },
+    {
+      icon: <WarningCircle size={20} weight="duotone" />,
+      value: data ? String(pendingCount) : "—",
+      label: "Needs you",
+      color: "text-warn",
+    },
+    {
+      icon: <CalendarBlank size={20} weight="duotone" />,
+      value: data ? String(todaySessionCount) : "—",
+      label: "Today",
+      color: "text-mint-dim",
+    },
+  ];
+
   return (
-    <section className="today-shell">
-      <div className="today-panel today-hero">
-        <div className="today-hero-copy">
-          <p className="page-kicker">
-            <CalendarBlank size={16} weight="duotone" />
+    <section className="h-full overflow-y-auto p-5">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="m-0 flex items-center gap-1.5 text-xs tracking-wide text-muted uppercase">
+            <CalendarBlank size={14} weight="duotone" />
             Today
           </p>
-          <h1 className="today-date">{formatLongDate(now)}</h1>
-          <p className="today-sub">Sessions, goals, and anything waiting on you.</p>
+          <h1 className="mt-1 mb-0 font-display text-3xl font-medium">{formatLongDate(now)}</h1>
         </div>
-        <div className="today-clock" aria-live="polite">
-          <Clock size={22} weight="duotone" />
-          <span className="today-clock-time">{formatClock(now)}</span>
-        </div>
-      </div>
-
-      {error && <div className="error-banner today-error">Could not load today: {error}</div>}
-
-      <div className="today-panel today-stats">
-        <div className="today-stat-grid">
-          <div className="today-stat">
-            <span className="today-stat-icon" style={{ color: "#60a5fa" }}>
-              <ChatCircle size={20} weight="duotone" />
-            </span>
-            <div>
-              <div className="today-stat-value">
-                {usage ? `${usage.used} / ${usage.limit}` : "—"}
-              </div>
-              <div className="today-stat-label">Requests asked</div>
-            </div>
-          </div>
-          <div className="today-stat">
-            <span className="today-stat-icon" style={{ color: "#34d399" }}>
-              <Target size={20} weight="duotone" />
-            </span>
-            <div>
-              <div className="today-stat-value">{data ? activeGoals : "—"}</div>
-              <div className="today-stat-label">Goals</div>
-            </div>
-          </div>
-          <div className="today-stat">
-            <span className="today-stat-icon" style={{ color: "#fbbf24" }}>
-              <WarningCircle size={20} weight="duotone" />
-            </span>
-            <div>
-              <div className="today-stat-value">{data ? pendingCount : "—"}</div>
-              <div className="today-stat-label">Needs you</div>
-            </div>
-          </div>
-          <div className="today-stat">
-            <span className="today-stat-icon" style={{ color: "#c4b5fd" }}>
-              <CalendarBlank size={20} weight="duotone" />
-            </span>
-            <div>
-              <div className="today-stat-value">{data ? todaySessionCount : "—"}</div>
-              <div className="today-stat-label">Today</div>
-            </div>
-          </div>
+        <div className="flex items-center gap-2 text-mint" aria-live="polite">
+          <Clock size={20} weight="duotone" />
+          <span className="font-display text-xl tabular-nums">{formatClock(now)}</span>
         </div>
       </div>
 
-      <div className="today-mid">
-        <div className="today-panel today-list-panel">
+      {error && (
+        <div className="mb-4 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">
+          Could not load today: {error}
+        </div>
+      )}
+
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {stats.map((s) => (
+          <Surface key={s.label} className="flex items-center gap-3">
+            <span className={s.color}>{s.icon}</span>
+            <div>
+              {loading ? (
+                <Skeleton className="mb-1 h-6 w-16" />
+              ) : (
+                <div className="text-xl font-semibold">{s.value}</div>
+              )}
+              <div className="text-xs text-muted">{s.label}</div>
+            </div>
+          </Surface>
+        ))}
+      </div>
+
+      <div className="mb-4 grid gap-3 lg:grid-cols-2">
+        <Surface>
           <SectionHead
-            title={
-              <>
-                <Clock size={18} weight="duotone" />
-                Upcoming
-              </>
-            }
+            icon={<Clock size={16} weight="duotone" />}
+            title="Upcoming"
             action={
-              <Link className="today-link" to="/calendar">
+              <Link className="text-xs text-mint no-underline hover:underline" to="/calendar">
                 Calendar
               </Link>
             }
           />
-          {!upcoming.length && <EmptyState>Nothing upcoming.</EmptyState>}
-          <ul className="today-list">
+          {loading && (
+            <div className="flex flex-col gap-2">
+              <Skeleton className="h-10" />
+              <Skeleton className="h-10" />
+            </div>
+          )}
+          {!loading && !upcoming.length && (
+            <EmptyState
+              icon={<Clock size={22} />}
+              action={
+                <Link to="/calendar" className="text-mint">
+                  Open calendar
+                </Link>
+              }
+            >
+              Nothing upcoming.
+            </EmptyState>
+          )}
+          <ul className="m-0 flex list-none flex-col gap-1 p-0">
             {upcoming.map((s) => (
-              <li key={s.id} className="today-list-row">
-                <div className="today-list-time">{formatShortTime(s.start_at)}</div>
-                <div className="today-list-body">
-                  <strong>{s.title}</strong>
-                </div>
-                <span className={`badge ${s.status}`}>{s.status}</span>
+              <li key={s.id}>
+                <Link
+                  to="/calendar"
+                  className="flex items-center gap-3 rounded-xl px-1 py-1.5 text-ink no-underline hover:bg-raised-soft"
+                >
+                  <div className="w-14 shrink-0 text-xs text-muted">{formatShortTime(s.start_at)}</div>
+                  <strong className="min-w-0 flex-1 truncate text-sm font-medium">{s.title}</strong>
+                  <Tag tone={s.status === "proposed" ? "warn" : "mint"}>{s.status}</Tag>
+                </Link>
               </li>
             ))}
           </ul>
-        </div>
+        </Surface>
 
-        <div className="today-panel today-list-panel">
+        <Surface>
           <SectionHead
-            title={
-              <>
-                <WarningCircle size={18} weight="duotone" />
-                Needs you
-              </>
-            }
+            icon={<WarningCircle size={16} weight="duotone" />}
+            title="Needs you"
             action={
-              <Link className="today-link" to="/chat">
+              <Link className="text-xs text-mint no-underline hover:underline" to="/chat">
                 Chat
               </Link>
             }
           />
-          {!pendingCount && <EmptyState>All clear.</EmptyState>}
-          <ul className="today-list">
+          {loading && <Skeleton className="h-16" />}
+          {!loading && !pendingCount && (
+            <EmptyState icon={<CheckCircle size={22} />}>All clear.</EmptyState>
+          )}
+          <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {proposedBatches.slice(0, 4).map((batch) => (
-              <li key={batch.batchId} className="today-list-row">
-                <CheckCircle size={18} weight="duotone" className="today-list-icon" />
-                <div className="today-list-body">
-                  <strong>{batch.title}</strong>
-                  <div className="muted">
-                    Proposed · {batch.count} session{batch.count === 1 ? "" : "s"}
+              <li key={batch.batchId} className="flex items-center gap-2">
+                <CheckCircle size={18} weight="duotone" className="text-mint-dim" />
+                <div className="min-w-0 flex-1">
+                  <strong className="text-sm">{batch.title}</strong>
+                  <div className="text-xs text-muted">
+                    Waiting · {batch.count} session{batch.count === 1 ? "" : "s"}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="btn primary"
+                <Button
+                  tone="primary"
                   disabled={!!busyBatch}
                   onClick={() => onApproveBatch(batch.batchId)}
                 >
                   {busyBatch === batch.batchId ? "…" : "Approve"}
-                </button>
+                </Button>
               </li>
             ))}
             {data?.attention.map((item) => (
-              <li key={`att-${item}`} className="today-list-row">
-                <WarningCircle size={18} weight="duotone" className="today-list-icon warn" />
-                <div className="today-list-body">
-                  <strong>{item}</strong>
-                </div>
+              <li key={`att-${item}`} className="flex items-center gap-2">
+                <WarningCircle size={18} weight="duotone" className="text-warn" />
+                <strong className="text-sm">{item}</strong>
               </li>
             ))}
             {data?.pending_questions.map((q) => (
-              <li key={`q-${q}`} className="today-list-row">
-                <ChatCircle size={18} weight="duotone" className="today-list-icon" />
-                <div className="today-list-body">
-                  <strong>{q}</strong>
-                  <div className="muted">
+              <li key={`q-${q}`} className="flex items-center gap-2">
+                <ChatCircle size={18} weight="duotone" className="text-mint-dim" />
+                <div className="min-w-0 flex-1">
+                  <strong className="text-sm">{q}</strong>
+                  <div className="text-xs">
                     <Link to="/chat">Continue in Chat</Link>
                   </div>
                 </div>
               </li>
             ))}
           </ul>
-        </div>
+        </Surface>
       </div>
 
-      <div className="today-panel today-goals">
-        <SectionHead
-          title={
-            <>
-              <Target size={18} weight="duotone" />
-              Goals
-            </>
-          }
-        />
-        {!data?.goals.length && (
-          <EmptyState>
-            No goals yet. <Link to="/chat">Start in Chat</Link>
+      <Surface className="mb-4">
+        <SectionHead icon={<Target size={16} weight="duotone" />} title="Goals" />
+        {loading && (
+          <div className="flex flex-col gap-3">
+            <Skeleton className="h-12" />
+            <Skeleton className="h-12" />
+          </div>
+        )}
+        {!loading && !data?.goals.length && (
+          <EmptyState
+            icon={<Target size={22} />}
+            action={
+              <Link to="/chat" className="text-mint">
+                Start in Chat
+              </Link>
+            }
+          >
+            No goals yet.
           </EmptyState>
         )}
-        <ul className="today-goal-list">
+        <ul className="m-0 flex list-none flex-col gap-3 p-0">
           {data?.goals.map((g, i) => {
             const prog = data.progress?.find((p) => p.goal_id === g.id);
             const ratio = prog ? progressRatio(prog) : 0;
             const pct = Math.round(ratio * 100);
             const color = barColorForRatio(ratio, i);
             return (
-              <li key={g.id} className="today-goal-row">
-                <div className="today-goal-top">
-                  <div>
-                    <strong>{g.title}</strong>
-                    <div className="muted">
-                      {prog?.summary ||
-                        [g.baseline && `from ${g.baseline}`, g.frequency].filter(Boolean).join(" · ") ||
-                        "Clarifying the plan"}
+              <li key={g.id}>
+                <Link to="/chat" className="block text-ink no-underline">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <div>
+                      <strong className="text-sm">{g.title}</strong>
+                      <div className="text-xs text-muted">
+                        {prog?.summary ||
+                          [g.baseline && `from ${g.baseline}`, g.frequency].filter(Boolean).join(" · ") ||
+                          "Clarifying the plan"}
+                      </div>
+                    </div>
+                    <div className="text-sm font-semibold" style={{ color }}>
+                      {pct}%
                     </div>
                   </div>
-                  <div className="today-goal-pct" style={{ color }}>
-                    {pct}%
+                  <div className="h-1.5 overflow-hidden rounded-pill bg-page-deep" aria-hidden>
+                    <div
+                      className="h-full rounded-pill"
+                      style={{ width: `${pct}%`, background: color }}
+                    />
                   </div>
-                </div>
-                <div className="today-progress" aria-hidden>
-                  <div
-                    className="today-progress-fill"
-                    style={{ width: `${pct}%`, background: color }}
-                  />
-                </div>
-                {prog && (
-                  <div className="today-goal-counts muted">
-                    {prog.completed} done · {prog.scheduled} scheduled
-                    {prog.proposed ? ` · ${prog.proposed} proposed` : ""}
-                    {prog.missed ? ` · ${prog.missed} missed` : ""}
-                  </div>
-                )}
+                  {prog && (
+                    <div className="mt-1 text-xs text-muted">
+                      {prog.completed} done · {prog.scheduled} scheduled
+                      {prog.proposed ? ` · ${prog.proposed} proposed` : ""}
+                      {prog.missed ? ` · ${prog.missed} missed` : ""}
+                    </div>
+                  )}
+                </Link>
               </li>
             );
           })}
         </ul>
-      </div>
+      </Surface>
 
       {data?.resurfaced_spark && (
-        <div className="today-panel today-spark">
+        <Surface>
           <SectionHead
-            title={
-              <>
-                <Sparkle size={18} weight="duotone" />
-                Spark
-              </>
-            }
+            icon={<Sparkle size={16} weight="duotone" />}
+            title="Spark"
             action={
-              <Link className="today-link" to="/sparks">
+              <Link className="text-xs text-mint no-underline hover:underline" to="/sparks">
                 Sparks
               </Link>
             }
           />
-          <p className="today-spark-body">{data.resurfaced_spark.content}</p>
-        </div>
+          <p className="m-0 text-sm text-ink-soft">{data.resurfaced_spark.content}</p>
+        </Surface>
       )}
     </section>
   );

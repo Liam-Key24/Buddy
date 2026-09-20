@@ -1,15 +1,38 @@
-import { Barbell, Circle, Lock, Mountains } from "@phosphor-icons/react";
+import {
+  Barbell,
+  Circle,
+  FolderSimple,
+  Lightning,
+  Lock,
+  Mountains,
+  Target,
+} from "@phosphor-icons/react";
+import type { ComponentType } from "react";
+
+const ICONS: Record<string, ComponentType<{ size?: number; weight?: "duotone" | "fill" | "regular" }>> = {
+  mountain: Mountains,
+  mountains: Mountains,
+  climb: Mountains,
+  barbell: Barbell,
+  strength: Barbell,
+  workout: Barbell,
+  lock: Lock,
+  fixed: Lock,
+  target: Target,
+  lightning: Lightning,
+  folder: FolderSimple,
+  circle: Circle,
+};
+
+export function categoryIconFor(name: string) {
+  const n = name.toLowerCase();
+  for (const [key, Icon] of Object.entries(ICONS)) {
+    if (n.includes(key)) return Icon;
+  }
+  return Circle;
+}
 
 export function CategoryIcon({ name, size = 14 }: { name: string; size?: number }) {
-  const n = name.toLowerCase();
-  if (n.includes("climb") || n.includes("mountain")) {
-    return <Mountains size={size} weight="duotone" />;
-  }
-  if (n.includes("strength") || n.includes("barbell") || n.includes("workout")) {
-    return <Barbell size={size} weight="duotone" />;
-  }
-  if (n.includes("fixed") || n.includes("lock")) {
-    return <Lock size={size} weight="duotone" />;
-  }
-  return <Circle size={size} weight="fill" />;
+  const Icon = categoryIconFor(name);
+  return <Icon size={size} weight={Icon === Circle ? "fill" : "duotone"} />;
 }

@@ -69,6 +69,17 @@ class ConversationStore:
         ).fetchall()
         return [self._row(r) for r in rows]
 
+    def move(self, conversation_id: str, folder_id: str | None) -> dict[str, Any] | None:
+        row = self.get(conversation_id)
+        if not row or row.get("deleted_at"):
+            return None
+        self.conn.execute(
+            "UPDATE conversations SET folder_id=?, updated_at=? WHERE id=?",
+            (folder_id, _now(), conversation_id),
+        )
+        self.conn.commit()
+        return self.get(conversation_id)
+
     def rename(self, conversation_id: str, title: str) -> dict[str, Any] | None:
         row = self.get(conversation_id)
         if not row or row.get("deleted_at"):
@@ -132,5 +143,6 @@ class ConversationStore:
             "created_at": d["created_at"],
             "updated_at": d["updated_at"],
             "deleted_at": d.get("deleted_at"),
+            "folder_id": d.get("folder_id"),
             "draft": draft if isinstance(draft, dict) else {},
         }
