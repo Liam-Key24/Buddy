@@ -802,7 +802,6 @@ button {
 }
 
 .cal-side-add {
-  margin-top: auto;
   padding-top: 0.75rem;
 }
 
@@ -816,6 +815,49 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
+}
+
+.cal-side-fixed {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.cal-side-subhead {
+  margin-bottom: 0.25rem;
+}
+
+.cal-fixed-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+}
+
+.cal-fixed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cal-fixed-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.35rem;
+  border-radius: 10px;
+}
+
+.cal-fixed-row .actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-shrink: 0;
+}
+
+.fc .evt-fixed-block {
+  opacity: 1;
 }
 
 .cal-side-add-toggle {

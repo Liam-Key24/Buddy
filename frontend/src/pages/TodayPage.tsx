@@ -12,9 +12,11 @@ import {
 import { EmptyState } from "../components/EmptyState";
 import { SectionHead } from "../components/SectionHead";
 import {
+  decideProposal,
   fetchSessions,
   fetchToday,
   fetchUsage,
+  notifyCalendarChanged,
   type Session,
   type TodayResponse,
   type UsageSummary,
@@ -69,15 +71,32 @@ export function TodayPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
+  const [busyBatch, setBusyBatch] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
+  function loadDashboard() {
+    Promise.all([
+      fetchToday(),
+      fetchUsage().catch(() => null),
+      fetchSessions().catch(() => [] as Session[]),
+    ])
+      .then(([today, usageRow, sessionRows]) => {
+        setData(today);
+        setUsage(usageRow);
+        setSessions(sessionRows);
+      })
+      .catch((e: Error) => {
+        setError(e.message);
+      });
+  }
+
   useEffect(() => {
     let cancelled = false;
-    function loadDashboard() {
+    function load() {
       Promise.all([
         fetchToday(),
         fetchUsage().catch(() => null),
@@ -93,8 +112,8 @@ export function TodayPage() {
           if (!cancelled) setError(e.message);
         });
     }
-    loadDashboard();
-    const onCalendarChanged = () => loadDashboard();
+    load();
+    const onCalendarChanged = () => load();
     window.addEventListener("buddy.calendar-changed", onCalendarChanged);
     return () => {
       cancelled = true;
@@ -111,10 +130,42 @@ export function TodayPage() {
       .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
   }, [sessions, data?.todays_sessions, now]);
 
-  const proposedSessions = useMemo(() => {
+  const proposedBatches = useMemo(() => {
     const source = sessions.length ? sessions : data?.todays_sessions ?? [];
-    return source.filter((s) => s.status === "proposed");
+    const map = new Map<string, Session[]>();
+    for (const s of source.filter((row) => row.status === "proposed")) {
+      const key = s.proposal_batch_id || s.id;
+      const list = map.get(key) || [];
+      list.push(s);
+      map.set(key, list);
+    }
+    return [...map.entries()].map(([batchId, rows]) => ({
+      batchId,
+      sessions: rows,
+      title: rows[0]?.title || "Proposed sessions",
+      count: rows.length,
+    }));
   }, [sessions, data?.todays_sessions]);
+
+  const proposedSessions = useMemo(
+    () => proposedBatches.flatMap((b) => b.sessions),
+    [proposedBatches],
+  );
+
+  async function onApproveBatch(batchId: string) {
+    if (busyBatch) return;
+    setBusyBatch(batchId);
+    setError(null);
+    try {
+      await decideProposal(batchId, "approve");
+      notifyCalendarChanged();
+      loadDashboard();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not approve");
+    } finally {
+      setBusyBatch(null);
+    }
+  }
 
   const pendingCount =
     (data?.pending_questions.length ?? 0) +
@@ -231,13 +282,23 @@ export function TodayPage() {
           />
           {!pendingCount && <EmptyState>All clear.</EmptyState>}
           <ul className="today-list">
-            {proposedSessions.slice(0, 4).map((s) => (
-              <li key={s.id} className="today-list-row">
+            {proposedBatches.slice(0, 4).map((batch) => (
+              <li key={batch.batchId} className="today-list-row">
                 <CheckCircle size={18} weight="duotone" className="today-list-icon" />
                 <div className="today-list-body">
-                  <strong>{s.title}</strong>
-                  <div className="muted">Proposed · {formatShortTime(s.start_at)}</div>
+                  <strong>{batch.title}</strong>
+                  <div className="muted">
+                    Proposed · {batch.count} session{batch.count === 1 ? "" : "s"}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={!!busyBatch}
+                  onClick={() => onApproveBatch(batch.batchId)}
+                >
+                  {busyBatch === batch.batchId ? "…" : "Approve"}
+                </button>
               </li>
             ))}
             {data?.attention.map((item) => (

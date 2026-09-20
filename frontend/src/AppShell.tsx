@@ -69,6 +69,13 @@ export function AppShell() {
             </NavLink>
           );
         })}
+        <NavLink
+          to="/settings"
+          title="Settings"
+          className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
+        >
+          <GearSix size={22} />
+        </NavLink>
       </nav>
     </div>
   );

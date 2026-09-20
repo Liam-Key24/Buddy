@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from .config import load_settings
 from .control_plane import ControlPlane
 from .schemas import (
+    ChatCancelRequest,
     ChatRequest,
     ChatResponse,
     OutcomeRequest,
@@ -60,7 +61,16 @@ def health():
 def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message required")
-    return plane.handle_message(req.message, req.conversation_id)
+    return plane.handle_message(
+        req.message, req.conversation_id, request_id=req.request_id
+    )
+
+
+@app.post("/chat/cancel")
+def chat_cancel(body: ChatCancelRequest):
+    if not body.request_id.strip():
+        raise HTTPException(status_code=400, detail="request_id required")
+    return plane.cancel_request(body.request_id.strip())
 
 
 @app.get("/today", response_model=TodayResponse)
@@ -76,6 +86,57 @@ def calendar_sessions(start: str | None = None, end: str | None = None):
 @app.get("/calendar/fixed")
 def calendar_fixed():
     return plane.calendar.list_fixed_blocks()
+
+
+class FixedBlockCreate(BaseModel):
+    title: str
+    weekday: int
+    start_minute: int
+    end_minute: int
+
+
+class FixedBlockUpdate(BaseModel):
+    title: str | None = None
+    weekday: int | None = None
+    start_minute: int | None = None
+    end_minute: int | None = None
+
+
+@app.post("/calendar/fixed")
+def create_fixed(body: FixedBlockCreate):
+    try:
+        return plane.calendar.create_fixed_block(
+            title=body.title,
+            weekday=body.weekday,
+            start_minute=body.start_minute,
+            end_minute=body.end_minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/calendar/fixed/{block_id}")
+def update_fixed(block_id: str, body: FixedBlockUpdate):
+    try:
+        updated = plane.calendar.update_fixed_block(
+            block_id,
+            title=body.title,
+            weekday=body.weekday,
+            start_minute=body.start_minute,
+            end_minute=body.end_minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Fixed block not found")
+    return updated
+
+
+@app.delete("/calendar/fixed/{block_id}")
+def delete_fixed(block_id: str):
+    if not plane.calendar.delete_fixed_block(block_id):
+        raise HTTPException(status_code=404, detail="Fixed block not found")
+    return {"ok": True}
 
 
 @app.post("/calendar/proposals/decide")
@@ -280,6 +341,11 @@ def save_draft(conversation_id: str, body: DraftBody):
 @app.get("/conversations/{conversation_id}/messages")
 def messages(conversation_id: str):
     return plane.list_messages(conversation_id)
+
+
+@app.get("/conversations/{conversation_id}/open-proposal")
+def open_proposal(conversation_id: str):
+    return plane.get_open_proposal(conversation_id)
 
 
 @app.get("/ai/usage")

@@ -21,16 +21,19 @@ import {
 } from "react";
 import { ProposalCards } from "../components/ProposalCards";
 import {
+  cancelChat,
   createConversation,
   decideProposal,
   deleteConversation,
   fetchMessages,
+  fetchOpenProposal,
   fetchUsage,
   listConversations,
   renameConversation,
   restoreConversation,
   saveDraft,
   notifyCalendarChanged,
+  buildProposalSummary,
   sendChat,
   type ActivityStep,
   type ChatResponse,
@@ -79,6 +82,7 @@ export function ChatPage() {
   const [renameValue, setRenameValue] = useState("");
   const composingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const requestIdRef = useRef<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stepsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -124,9 +128,10 @@ export function ChatPage() {
 
   useEffect(() => {
     if (!conversationId) return;
+    let cancelled = false;
     fetchMessages(conversationId)
       .then((rows) => {
-        if (!rows.length) return;
+        if (cancelled || !rows.length) return;
         setMessages(
           rows
             .filter((r) => r.role === "user" || r.role === "assistant")
@@ -134,6 +139,22 @@ export function ChatPage() {
         );
       })
       .catch(() => undefined);
+    fetchOpenProposal(conversationId)
+      .then((open) => {
+        if (cancelled) return;
+        if (open.goal) setGoal(open.goal);
+        if (open.proposed_sessions?.length && open.proposal_summary) {
+          setProposals(open.proposed_sessions);
+          setProposalSummary(open.proposal_summary);
+        } else {
+          setProposals([]);
+          setProposalSummary(null);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [conversationId]);
 
   useEffect(() => {
@@ -171,6 +192,7 @@ export function ChatPage() {
     setUndoBatchId(null);
     setError(null);
     setActivity([]);
+    setGoal(null);
     setStepsCollapsed(true);
     composerRef.current?.focus();
   }
@@ -237,13 +259,21 @@ export function ChatPage() {
     setStepsCollapsed(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    const requestId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `req-${Date.now()}`;
+    requestIdRef.current = requestId;
     try {
-      const res = await sendChat(text, conversationId, controller.signal);
+      const res = await sendChat(text, conversationId, controller.signal, requestId);
       applyChatResult(res);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         setActivity([{ stage: "cancelled", label: "Stopped", detail: "No database or calendar changes" }]);
-        setMessages((m) => [...m, { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." }]);
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." },
+        ]);
       } else {
         const message = err instanceof Error ? err.message : "Something went wrong";
         setError(message);
@@ -256,6 +286,7 @@ export function ChatPage() {
     } finally {
       setBusy(false);
       abortRef.current = null;
+      requestIdRef.current = null;
       composerRef.current?.focus();
     }
   }
@@ -307,6 +338,7 @@ export function ChatPage() {
             content: `Booked ${res.booked?.length ?? 0} session(s). They appear in Calendar and Today.`,
           },
         ]);
+        notifyCalendarChanged();
       } else if (decision === "reject") {
         setProposals([]);
         setProposalSummary(null);
@@ -314,14 +346,18 @@ export function ChatPage() {
           ...m,
           { role: "assistant", content: `Rejected ${res.rejected ?? 0} proposed session(s).` },
         ]);
+        notifyCalendarChanged();
       } else if (decision === "undo") {
         setUndoBatchId(null);
-        setProposals(res.undone || []);
+        const undone = res.undone || [];
+        setProposals(undone);
+        setProposalSummary(buildProposalSummary(goal, undone));
         setToast("Booking undone — sessions are proposals again.");
         setMessages((m) => [
           ...m,
           { role: "assistant", content: "Undid that booking. Nothing used Cloud AI." },
         ]);
+        notifyCalendarChanged();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Decision failed");
@@ -669,7 +705,13 @@ export function ChatPage() {
                 <button
                   type="button"
                   className="composer-send danger"
-                  onClick={() => abortRef.current?.abort()}
+                  onClick={() => {
+                    const rid = requestIdRef.current;
+                    if (rid) {
+                      cancelChat(rid).catch(() => undefined);
+                    }
+                    abortRef.current?.abort();
+                  }}
                   aria-label="Stop"
                   title="Stop"
                 >

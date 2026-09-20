@@ -16,7 +16,7 @@ from .config import Settings, load_settings
 from .db import get_connection, init_db
 from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
-from .planning import propose_for_goal
+from .planning import propose_for_goal, summarize_proposal
 from .conversations import ConversationStore
 from .usage import UsageStore
 from .schemas import (
@@ -177,10 +177,63 @@ class ControlPlane:
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None):
         return self.calendar.mark_outcome(session_id, outcome, notes)
 
+    # --- chat cancel ---
+
+    def cancel_request(self, request_id: str) -> dict[str, Any]:
+        entry = self._active_requests.get(request_id)
+        if entry is not None:
+            entry["cancelled"] = True
+        self.usage.mark_cancelled(request_id)
+        return {"ok": True, "request_id": request_id, "found": entry is not None}
+
+    def _is_cancelled(self, request_id: str | None) -> bool:
+        if not request_id:
+            return False
+        entry = self._active_requests.get(request_id)
+        return bool(entry and entry.get("cancelled"))
+
+    def get_open_proposal(self, conversation_id: str) -> dict[str, Any]:
+        """Rebuild proposal card state for a conversation from persisted proposed sessions."""
+        goal = self.goals.active_for_conversation(conversation_id)
+        if not goal:
+            return {"goal": None, "proposed_sessions": [], "proposal_summary": None}
+        batch_id = self.calendar.open_proposal_batch(goal.id)
+        if not batch_id:
+            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None}
+        sessions = self.calendar.list_proposed_for_batch(batch_id)
+        if not sessions:
+            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None}
+        summary = summarize_proposal(goal, sessions)
+        return {
+            "goal": goal,
+            "proposed_sessions": sessions,
+            "proposal_summary": summary,
+        }
+
     # --- chat entry ---
 
-    def handle_message(self, message: str, conversation_id: str | None = None) -> ChatResponse:
+    def handle_message(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+        *,
+        request_id: str | None = None,
+    ) -> ChatResponse:
         text = message.strip()
+        rid = request_id or str(uuid.uuid4())
+        self._active_requests[rid] = {"cancelled": False}
+        try:
+            return self._handle_message_inner(text, conversation_id, request_id=rid)
+        finally:
+            self._active_requests.pop(rid, None)
+
+    def _handle_message_inner(
+        self,
+        text: str,
+        conversation_id: str | None,
+        *,
+        request_id: str,
+    ) -> ChatResponse:
         cid = self._ensure_conversation(conversation_id)
         self._add_message(cid, "user", text)
         self.conversations.touch_title_from_first_user_message(cid, text)
@@ -204,6 +257,7 @@ class ControlPlane:
                     booked_sessions=booked,
                     ai_available=True,
                     undo_batch_id=batch_id if booked else None,
+                    request_id=request_id,
                     activity=[
                         {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
                     ],
@@ -212,7 +266,13 @@ class ControlPlane:
                 n = self.calendar.reject_batch(batch_id)
                 reply = f"Rejected {n} proposed session(s). Say what to change and I'll propose again."
                 self._add_message(cid, "assistant", reply)
-                return ChatResponse(conversation_id=cid, reply=reply, goal=goal, ai_available=True)
+                return ChatResponse(
+                    conversation_id=cid,
+                    reply=reply,
+                    goal=goal,
+                    ai_available=True,
+                    request_id=request_id,
+                )
 
         if not self.settings.groq_configured and self._ai is None:
             reply = (
@@ -226,6 +286,17 @@ class ControlPlane:
                 reply=reply,
                 goal=goal,
                 ai_available=False,
+                request_id=request_id,
+            )
+
+        if self._is_cancelled(request_id):
+            return ChatResponse(
+                conversation_id=cid,
+                reply="Stopped.",
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                activity=[{"stage": "cancelled", "label": "Stopped", "detail": "No calendar changes"}],
             )
 
         try:
@@ -242,9 +313,35 @@ class ControlPlane:
                 reply=reply,
                 goal=goal,
                 ai_available=False,
+                request_id=request_id,
             )
 
-        return self._apply_turn(cid, turn, goal)
+        if self._is_cancelled(request_id):
+            self.usage.record(
+                conversation_id=cid,
+                model=self.settings.groq_model,
+                status="cancelled",
+                cancelled=True,
+                request_id=request_id,
+            )
+            return ChatResponse(
+                conversation_id=cid,
+                reply="Stopped.",
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                activity=[
+                    {
+                        "stage": "cancelled",
+                        "label": "Stopped",
+                        "detail": "Cloud AI response discarded — no calendar changes",
+                    }
+                ],
+            )
+
+        response = self._apply_turn(cid, turn, goal)
+        response.request_id = request_id
+        return response
 
     def _run_ai_turn(self, cid: str, text: str, goal: Goal | None) -> BuddyTurn:
         recent = [

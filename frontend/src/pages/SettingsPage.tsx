@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   BookOpen,
   Cloud,
@@ -38,6 +39,8 @@ export function SettingsPage() {
   const privacy = health?.privacy ?? "Local data · Cloud reasoning";
   const model = health?.ai.model_configured;
   const aiLabel = health?.ai.label ?? "Cloud AI";
+  const aiConfigured = health?.ai.configured === true;
+  const aiEnabled = health?.ai.enabled !== false;
 
   return (
     <section className="settings-shell">
@@ -49,7 +52,7 @@ export function SettingsPage() {
           </p>
           <h1 className="today-date">About</h1>
           <p className="today-sub">
-            Local-dev reference — Cloud AI is set via backend <code>.env</code> or Keychain.
+            Local-first planner — Chat needs Cloud AI; Today, Calendar, and Sparks work offline.
           </p>
         </div>
         <div className="settings-hero-meta">
@@ -71,6 +74,91 @@ export function SettingsPage() {
       )}
 
       <div className="settings-grid">
+        <div className="settings-panel settings-span">
+          <SectionHead
+            title={
+              <>
+                <Cloud size={18} weight="duotone" />
+                Cloud AI setup
+              </>
+            }
+            action={
+              health ? (
+                <StatusPill
+                  ok={aiConfigured && aiEnabled}
+                  label={
+                    !aiEnabled
+                      ? "Disabled"
+                      : aiConfigured
+                        ? "Ready for Chat"
+                        : "Key needed"
+                  }
+                />
+              ) : null
+            }
+          />
+          {!aiConfigured ? (
+            <ol className="settings-steps">
+              <li>
+                <strong>Enable Zero Data Retention</strong>
+                <p className="muted">
+                  In the{" "}
+                  <a href="https://console.groq.com" target="_blank" rel="noreferrer">
+                    Groq console
+                  </a>
+                  , turn on Zero Data Retention for your org.
+                </p>
+              </li>
+              <li>
+                <strong>Create an API key</strong>
+                <p className="muted">
+                  Copy a Groq API key. Buddy never shows the key in the UI.
+                </p>
+              </li>
+              <li>
+                <strong>Set the key (pick one)</strong>
+                <p className="muted">
+                  Local: put <code>GROQ_API_KEY=…</code> in <code>backend/.env</code>, then restart
+                  the backend.
+                </p>
+                <p className="muted">
+                  Desktop (macOS Keychain):{" "}
+                  <code>
+                    security add-generic-password -a buddy -s com.liamgk.buddy.groq -w
+                    &apos;YOUR_KEY&apos; -U
+                  </code>
+                </p>
+              </li>
+              <li>
+                <strong>Confirm</strong>
+                <p className="muted">
+                  Refresh this page — status should read “Ready for Chat”. Then open{" "}
+                  <Link to="/chat">Chat</Link>.
+                </p>
+              </li>
+            </ol>
+          ) : (
+            <dl className="settings-dl">
+              <div>
+                <dt>Status</dt>
+                <dd>
+                  Key set · {aiEnabled ? "enabled" : "disabled"}
+                  {model ? (
+                    <>
+                      {" · "}
+                      <code>{model}</code>
+                    </>
+                  ) : null}
+                </dd>
+              </div>
+              <div>
+                <dt>What needs AI</dt>
+                <dd>Chat planning and Sparks → Promote. Today and Calendar work without it.</dd>
+              </div>
+            </dl>
+          )}
+        </div>
+
         <div className="settings-panel">
           <SectionHead
             title={
@@ -148,14 +236,13 @@ export function SettingsPage() {
               <strong>Backend</strong>
               <p className="muted">
                 <code>cd backend</code> → <code>.venv</code> →{" "}
-                <code>pip install -r requirements.txt</code> →{" "}
                 <code>PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload</code>
               </p>
             </li>
             <li>
               <strong>Frontend</strong>
               <p className="muted">
-                <code>cd frontend</code> → <code>npm install</code> → <code>npm run dev</code>
+                <code>cd frontend</code> → <code>npm run dev</code>
               </p>
             </li>
             <li>
@@ -208,8 +295,9 @@ export function SettingsPage() {
               <div>
                 <strong>Groq</strong>
                 <p className="muted">
-                  <code>GROQ_API_KEY</code> in <code>backend/.env</code> (never commit). Optional:{" "}
-                  <code>GROQ_MODEL</code>, <code>BUDDY_AI_ENABLED</code>.
+                  <code>GROQ_API_KEY</code> in <code>backend/.env</code> or Keychain service{" "}
+                  <code>com.liamgk.buddy.groq</code>. Optional: <code>GROQ_MODEL</code>,{" "}
+                  <code>BUDDY_AI_ENABLED</code>.
                 </p>
               </div>
             </div>

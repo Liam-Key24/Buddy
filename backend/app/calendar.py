@@ -124,6 +124,94 @@ class CalendarService:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def create_fixed_block(
+        self,
+        *,
+        title: str,
+        weekday: int,
+        start_minute: int,
+        end_minute: int,
+    ) -> dict[str, Any]:
+        title = title.strip()
+        if not title:
+            raise ValueError("Title required")
+        if not (0 <= weekday <= 6):
+            raise ValueError("weekday must be 0–6 (Mon–Sun)")
+        if not (0 <= start_minute < end_minute <= 24 * 60):
+            raise ValueError("Invalid start/end minutes")
+        bid = _new_id()
+        self.conn.execute(
+            """
+            INSERT INTO fixed_blocks (id, title, weekday, start_minute, end_minute, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (bid, title, weekday, start_minute, end_minute, _now()),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM fixed_blocks WHERE id = ?", (bid,)).fetchone()
+        return dict(row)
+
+    def update_fixed_block(
+        self,
+        block_id: str,
+        *,
+        title: str | None = None,
+        weekday: int | None = None,
+        start_minute: int | None = None,
+        end_minute: int | None = None,
+    ) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM fixed_blocks WHERE id = ?", (block_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        if title is not None:
+            title = title.strip()
+            if not title:
+                raise ValueError("Title required")
+            data["title"] = title
+        if weekday is not None:
+            if not (0 <= weekday <= 6):
+                raise ValueError("weekday must be 0–6 (Mon–Sun)")
+            data["weekday"] = weekday
+        if start_minute is not None:
+            data["start_minute"] = start_minute
+        if end_minute is not None:
+            data["end_minute"] = end_minute
+        if not (0 <= data["start_minute"] < data["end_minute"] <= 24 * 60):
+            raise ValueError("Invalid start/end minutes")
+        self.conn.execute(
+            """
+            UPDATE fixed_blocks
+            SET title=?, weekday=?, start_minute=?, end_minute=?
+            WHERE id=?
+            """,
+            (
+                data["title"],
+                data["weekday"],
+                data["start_minute"],
+                data["end_minute"],
+                block_id,
+            ),
+        )
+        self.conn.commit()
+        return data
+
+    def delete_fixed_block(self, block_id: str) -> bool:
+        cur = self.conn.execute("DELETE FROM fixed_blocks WHERE id = ?", (block_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def list_proposed_for_batch(self, batch_id: str) -> list[SessionOut]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM sessions
+            WHERE proposal_batch_id = ? AND status = 'proposed'
+            ORDER BY start_at ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
     def _category_for_title(self, title: str) -> tuple[str | None, CategoryBrief | None]:
         cat = self.categories.classify_session_title(title)
         if not cat:

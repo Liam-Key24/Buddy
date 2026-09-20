@@ -16,14 +16,21 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CategoryIcon } from "../components/CategoryIcon";
 import {
   createCategory,
+  createFixedBlock,
   createSession,
+  decideProposal,
   deleteCategory,
+  deleteFixedBlock,
   deleteSession,
   fetchCategories,
+  fetchFixedBlocks,
   fetchSessions,
   formatSessionWhen,
   markSessionOutcome,
+  notifyCalendarChanged,
+  updateFixedBlock,
   type Category,
+  type FixedBlock,
   type Session,
 } from "../api";
 
@@ -36,6 +43,24 @@ const VIEW_TABS: Array<{ id: CalView; label: string }> = [
 ];
 
 const COLOR_PRESETS = ["#c4b5fd", "#a7f3d0", "#fbcfe8", "#bfdbfe", "#fde68a", "#fed7aa", "#e7e5e4"];
+
+const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function minutesToTime(m: number): string {
+  const h = Math.floor(m / 60);
+  const min = m % 60;
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00`;
+}
+
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+/** Python weekday (Mon=0) → FullCalendar daysOfWeek (Sun=0). */
+function pythonWeekdayToFc(weekday: number): number {
+  return (weekday + 1) % 7;
+}
 
 function localDateInput(d = new Date()): string {
   const y = d.getFullYear();
@@ -91,11 +116,23 @@ export function CalendarPage() {
   });
   const [eventCategoryId, setEventCategoryId] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [fixedBlocks, setFixedBlocks] = useState<FixedBlock[]>([]);
+  const [fixedOpen, setFixedOpen] = useState(false);
+  const [fixedTitle, setFixedTitle] = useState("");
+  const [fixedWeekday, setFixedWeekday] = useState(0);
+  const [fixedStart, setFixedStart] = useState("09:00");
+  const [fixedEnd, setFixedEnd] = useState("17:00");
+  const [editingFixedId, setEditingFixedId] = useState<string | null>(null);
 
   async function reload() {
-    const [s, c] = await Promise.all([fetchSessions(), fetchCategories()]);
+    const [s, c, f] = await Promise.all([
+      fetchSessions(),
+      fetchCategories(),
+      fetchFixedBlocks().catch(() => [] as FixedBlock[]),
+    ]);
     setSessions(s);
     setCategories(c);
+    setFixedBlocks(f);
     setEnabled((prev) => {
       const next = { ...prev };
       for (const cat of c) {
@@ -132,29 +169,40 @@ export function CalendarPage() {
     return map;
   }, [sessions]);
 
-  const events = useMemo(
-    () =>
-      filtered.map((s) => {
-        const color = s.category?.color || "#bfdbfe";
-        const proposed = s.status === "proposed";
-        return {
-          id: s.id,
-          title: s.title,
-          start: s.start_at,
-          end: s.end_at,
-          backgroundColor: proposed ? "transparent" : color,
-          borderColor: "transparent",
-          textColor: "#1c1917",
-          classNames: [
-            "evt-soft",
-            proposed ? "evt-hatched" : "evt-solid",
-            s.status === "missed" ? "evt-missed-soft" : "",
-          ].filter(Boolean),
-          extendedProps: { session: s, color },
-        };
-      }),
-    [filtered],
-  );
+  const events = useMemo(() => {
+    const sessionEvents = filtered.map((s) => {
+      const color = s.category?.color || "#bfdbfe";
+      const proposed = s.status === "proposed";
+      return {
+        id: s.id,
+        title: s.title,
+        start: s.start_at,
+        end: s.end_at,
+        backgroundColor: proposed ? "transparent" : color,
+        borderColor: "transparent",
+        textColor: "#1c1917",
+        classNames: [
+          "evt-soft",
+          proposed ? "evt-hatched" : "evt-solid",
+          s.status === "missed" ? "evt-missed-soft" : "",
+        ].filter(Boolean),
+        extendedProps: { session: s, color },
+      };
+    });
+    const blockEvents = fixedBlocks.map((b) => ({
+      id: `fixed-${b.id}`,
+      title: b.title,
+      daysOfWeek: [pythonWeekdayToFc(b.weekday)],
+      startTime: minutesToTime(b.start_minute),
+      endTime: minutesToTime(b.end_minute),
+      display: "background" as const,
+      backgroundColor: "rgba(120, 113, 108, 0.18)",
+      classNames: ["evt-fixed-block"],
+      editable: false,
+      extendedProps: { fixedBlock: b },
+    }));
+    return [...blockEvents, ...sessionEvents];
+  }, [filtered, fixedBlocks]);
 
   const upcoming = useMemo(() => {
     const now = Date.now();
@@ -190,6 +238,7 @@ export function CalendarPage() {
         category_id: eventCategoryId || null,
       });
       setEventTitle("");
+      setEventOpen(false);
       await reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not add event");
@@ -248,6 +297,77 @@ export function CalendarPage() {
       setSelected(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onApproveSelected() {
+    if (!selected?.proposal_batch_id || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await decideProposal(selected.proposal_batch_id, "approve");
+      notifyCalendarChanged();
+      await reload();
+      setSelected(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not approve");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openFixedEditor(block?: FixedBlock) {
+    if (block) {
+      setEditingFixedId(block.id);
+      setFixedTitle(block.title);
+      setFixedWeekday(block.weekday);
+      setFixedStart(minutesToTime(block.start_minute).slice(0, 5));
+      setFixedEnd(minutesToTime(block.end_minute).slice(0, 5));
+    } else {
+      setEditingFixedId(null);
+      setFixedTitle("");
+      setFixedWeekday(0);
+      setFixedStart("09:00");
+      setFixedEnd("17:00");
+    }
+    setFixedOpen(true);
+  }
+
+  async function onSaveFixed() {
+    if (!fixedTitle.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const payload = {
+        title: fixedTitle.trim(),
+        weekday: fixedWeekday,
+        start_minute: timeToMinutes(fixedStart),
+        end_minute: timeToMinutes(fixedEnd),
+      };
+      if (editingFixedId) {
+        await updateFixedBlock(editingFixedId, payload);
+      } else {
+        await createFixedBlock(payload);
+      }
+      setFixedOpen(false);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save fixed block");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDeleteFixed(id: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await deleteFixedBlock(id);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not delete fixed block");
     } finally {
       setBusy(false);
     }
@@ -410,6 +530,54 @@ export function CalendarPage() {
                 </div>
               </div>
             )}
+          </div>
+
+          <div className="cal-side-fixed">
+            <div className="cal-side-head cal-side-subhead">
+              <h2>Fixed blocks</h2>
+              <button
+                type="button"
+                className="icon-btn"
+                title="Add fixed block"
+                onClick={() => openFixedEditor()}
+              >
+                <Plus size={16} weight="bold" />
+              </button>
+            </div>
+            <p className="muted cal-fixed-hint">Buddy avoids these when proposing.</p>
+            <ul className="cal-fixed-list">
+              {fixedBlocks.map((b) => (
+                <li key={b.id} className="cal-fixed-row">
+                  <div>
+                    <strong>{b.title}</strong>
+                    <div className="muted">
+                      {WEEKDAY_LABELS[b.weekday]} ·{" "}
+                      {minutesToTime(b.start_minute).slice(0, 5)}–
+                      {minutesToTime(b.end_minute).slice(0, 5)}
+                    </div>
+                  </div>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      disabled={busy}
+                      onClick={() => openFixedEditor(b)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Delete"
+                      disabled={busy}
+                      onClick={() => onDeleteFixed(b.id)}
+                    >
+                      <Trash size={14} />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
         </aside>
       )}
@@ -610,6 +778,16 @@ export function CalendarPage() {
               </button>
             </div>
             <div className="actions">
+              {selected.status === "proposed" && selected.proposal_batch_id && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={busy}
+                  onClick={onApproveSelected}
+                >
+                  <CheckCircle size={16} /> Approve batch
+                </button>
+              )}
               {selected.status === "scheduled" && (
                 <>
                   <button
@@ -642,6 +820,69 @@ export function CalendarPage() {
           </div>
         )}
       </div>
+
+      {fixedOpen && (
+        <div className="cal-modal-backdrop" onClick={() => setFixedOpen(false)}>
+          <div
+            className="cal-modal"
+            role="dialog"
+            aria-label="Fixed block"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="cal-modal-head">
+              <h2>{editingFixedId ? "Edit fixed block" : "Add fixed block"}</h2>
+              <button type="button" className="icon-btn" onClick={() => setFixedOpen(false)} title="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="cal-modal-form">
+              <label>
+                Title
+                <input value={fixedTitle} onChange={(e) => setFixedTitle(e.target.value)} />
+              </label>
+              <label>
+                Weekday
+                <select
+                  value={fixedWeekday}
+                  onChange={(e) => setFixedWeekday(Number(e.target.value))}
+                >
+                  {WEEKDAY_LABELS.map((label, i) => (
+                    <option key={label} value={i}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="cal-modal-row">
+                <label>
+                  Start
+                  <input
+                    type="time"
+                    value={fixedStart}
+                    onChange={(e) => setFixedStart(e.target.value)}
+                  />
+                </label>
+                <label>
+                  End
+                  <input
+                    type="time"
+                    value={fixedEnd}
+                    onChange={(e) => setFixedEnd(e.target.value)}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                className="btn primary block"
+                disabled={busy || !fixedTitle.trim()}
+                onClick={onSaveFixed}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={!!pendingDelete}

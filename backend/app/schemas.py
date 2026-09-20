@@ -162,6 +162,11 @@ class BuddyTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    request_id: str | None = None
+
+
+class ChatCancelRequest(BaseModel):
+    request_id: str
 
 
 class ChatResponse(BaseModel):

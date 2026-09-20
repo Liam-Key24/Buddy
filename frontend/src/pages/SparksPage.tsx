@@ -8,14 +8,18 @@ import {
   dismissSpark,
   fetchSparks,
   promoteSpark,
+  type ChatResponse,
   type Spark,
 } from "../api";
+
+const STORAGE_KEY = "buddy.conversationId";
 
 export function SparksPage() {
   const [sparks, setSparks] = useState<Spark[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [promotingId, setPromotingId] = useState<string | null>(null);
   const navigate = useNavigate();
 
   async function reload() {
@@ -38,6 +42,26 @@ export function SparksPage() {
       setError(err instanceof Error ? err.message : "Failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onPromote(s: Spark) {
+    if (promotingId) return;
+    setPromotingId(s.id);
+    setError(null);
+    try {
+      const res = await promoteSpark(s.id);
+      const chat = (res as { chat?: ChatResponse }).chat;
+      const cid = chat?.conversation_id;
+      if (cid) {
+        localStorage.setItem(STORAGE_KEY, cid);
+      }
+      await reload();
+      navigate("/chat");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not promote spark");
+    } finally {
+      setPromotingId(null);
     }
   }
 
@@ -84,17 +108,15 @@ export function SparksPage() {
                 <button
                   type="button"
                   className="btn primary"
-                  onClick={async () => {
-                    await promoteSpark(s.id);
-                    await reload();
-                    navigate("/chat");
-                  }}
+                  disabled={!!promotingId}
+                  onClick={() => onPromote(s)}
                 >
-                  Promote
+                  {promotingId === s.id ? "Promoting…" : "Promote"}
                 </button>
                 <button
                   type="button"
                   className="btn ghost"
+                  disabled={!!promotingId}
                   onClick={async () => {
                     await dismissSpark(s.id);
                     await reload();
