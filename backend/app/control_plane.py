@@ -142,7 +142,11 @@ class ControlPlane:
         return self.folders.delete(folder_id)
 
     def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
-        return self.conversations.soft_delete(conversation_id)
+        row = self.conversations.soft_delete(conversation_id)
+        if row:
+            # Soft-deleted chats should not keep driving Today Needs you / open goals.
+            self.goals.pause_for_conversation(conversation_id)
+        return row
 
     def restore_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         return self.conversations.restore(conversation_id)
@@ -616,6 +620,10 @@ class ControlPlane:
             counts = self.calendar.progress_for_goal(g.id)
             summary = progress_summary(g, counts)
             progress.append({"goal_id": g.id, "title": g.title, "summary": summary, **counts})
+            conv = self.conversations.get(g.conversation_id)
+            if not conv or conv.get("deleted_at"):
+                # Chat gone from sidebar — don't surface Needs you for it.
+                continue
             batch = self.calendar.open_proposal_batch(g.id)
             if batch:
                 needs.append(

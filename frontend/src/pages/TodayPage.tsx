@@ -28,6 +28,7 @@ import {
 } from "../api";
 import { useChatNav } from "../chatNav";
 import { useNavigate } from "react-router-dom";
+import { useToast } from "../components/ui/Toast";
 
 const CONTINUE_HINT_KEY = "buddy.continueHint";
 
@@ -76,7 +77,8 @@ function barColorForRatio(ratio: number, index: number) {
 
 export function TodayPage() {
   const navigate = useNavigate();
-  const { setConversationId } = useChatNav();
+  const { conversations, setConversationId } = useChatNav();
+  const { pushToast } = useToast();
   const [data, setData] = useState<TodayResponse | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -163,6 +165,12 @@ export function TodayPage() {
   }
 
   function continueNeed(need: TodayNeed) {
+    const inSidebar = conversations.some((c) => c.id === need.conversation_id);
+    if (!inSidebar) {
+      pushToast("That chat was deleted — Needs you will clear on refresh");
+      loadDashboard();
+      return;
+    }
     setConversationId(need.conversation_id);
     localStorage.setItem(
       CONTINUE_HINT_KEY,

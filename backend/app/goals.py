@@ -112,6 +112,10 @@ class GoalStore:
             )
         self.conn.commit()
 
+    def pause_for_conversation(self, conversation_id: str) -> None:
+        """Pause every open goal tied to a conversation (e.g. chat soft-deleted)."""
+        self.pause_others(conversation_id, keep_id=None)
+
     def create(
         self,
         conversation_id: str,
