@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 
-from .calendar import CalendarService
+from .calendar import CalendarService, is_one_off_goal
 from .schemas import Goal, SessionOut
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -90,6 +90,38 @@ def summarize_proposal(goal: Goal, sessions: list[SessionOut], *, why: dict | No
             why_lines.append(f"Kept {', '.join(names)} clear")
     if why.get("preference_note"):
         why_lines.append(str(why["preference_note"]))
+    catch_ups = sum(1 for s in sessions if (s.notes or "").lower() == "catch-up")
+    if catch_ups:
+        why["catch_up_sessions"] = catch_ups
+        why_lines.append(
+            f"Stacked {catch_ups} catch-up slot{'s' if catch_ups != 1 else ''} for missed sessions before the deadline"
+        )
+
+    catch_note = ""
+    if catch_ups:
+        catch_note = (
+            f" Includes {catch_ups} catch-up slot{'s' if catch_ups != 1 else ''} "
+            "to make up missed sessions before the deadline."
+        )
+
+    if is_one_off_goal(goal) or len(sessions) == 1:
+        s = sessions[0]
+        start = datetime.fromisoformat(s.start_at)
+        end = datetime.fromisoformat(s.end_at)
+        text = (
+            f"{start.strftime('%a %d %b %H:%M')}–{end.strftime('%H:%M')} · {s.title}. "
+            "One session — nothing is booked until you approve."
+        )
+        return {
+            "pattern": f"{_WEEKDAYS[start.weekday()]} {start.strftime('%H:%M')}–{end.strftime('%H:%M')}",
+            "sample": [s],
+            "total": 1,
+            "through": end.date().isoformat(),
+            "text": text,
+            "why": why or {},
+            "why_lines": why_lines,
+            "goal_card": _goal_card(goal),
+        }
 
     text = (
         f"Weekly pattern: {pattern}\n"
@@ -99,7 +131,7 @@ def summarize_proposal(goal: Goal, sessions: list[SessionOut], *, why: dict | No
             f"{datetime.fromisoformat(s.end_at).strftime('%H:%M')} · {s.title}"
             for s in sample
         )
-        + f"\nThen repeats through {through} · {len(sessions)} sessions total. "
+        + f"\nThen repeats through {through} · {len(sessions)} sessions total.{catch_note} "
         "Nothing is booked until you approve."
     )
     return {

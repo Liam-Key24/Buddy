@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -206,5 +206,31 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 5)
         version = 5
+
+    if version < 6:
+        # Remove used to archive as status='done'. Those rows are leftover deletes,
+        # not genuine completions. Hard-delete them (and related records) once.
+        now = datetime.now(timezone.utc).isoformat()
+        ids = [
+            r["id"] if isinstance(r, sqlite3.Row) else r[0]
+            for r in conn.execute("SELECT id FROM goals WHERE status='done'").fetchall()
+        ]
+        for goal_id in ids:
+            conn.execute("DELETE FROM sessions WHERE goal_id=?", (goal_id,))
+            conn.execute("DELETE FROM approval_events WHERE goal_id=?", (goal_id,))
+            conn.execute(
+                """
+                UPDATE sparks
+                SET promoted_goal_id=NULL,
+                    status=CASE WHEN status='promoted' THEN 'open' ELSE status END,
+                    updated_at=?
+                WHERE promoted_goal_id=?
+                """,
+                (now, goal_id),
+            )
+            conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+        conn.commit()
+        set_schema_version(conn, 6)
+        version = 6
 
     return version

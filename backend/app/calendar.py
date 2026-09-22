@@ -19,8 +19,35 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+_CLOCK_RE = re.compile(
+    r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\b\d{1,2}:\d{2}\b",
+    re.I,
+)
+_ONE_OFF_FREQ = {
+    "once",
+    "one",
+    "one-off",
+    "one off",
+    "single",
+    "single event",
+    "one time",
+    "one-time",
+}
+
+
 def frequency_to_weekly_count(frequency: str | None, commitment: str | None = None) -> int:
-    text = f"{commitment or ''} {frequency or ''}".lower()
+    raw = f"{commitment or ''} {frequency or ''}".strip()
+    if not raw:
+        return 2
+    # "8 pm" / "8pm" / "20:00" are clock times, never session counts.
+    text = _CLOCK_RE.sub(" ", raw.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or text in {"at", "around", "about", "by"}:
+        return 1
+    if text in _ONE_OFF_FREQ or re.search(
+        r"\b(single event|one-?off|once only|just once)\b", text
+    ):
+        return 1
     if "every day" in text or "daily" in text:
         return 7
     # Ranges like 3-4 → prefer the higher end when planning capacity
@@ -35,6 +62,8 @@ def frequency_to_weekly_count(frequency: str | None, commitment: str | None = No
         return max(1, int(m.group(1)))
     if "twice" in text or "two times" in text:
         return 2
+    if re.search(r"\bonce\s+(a|per)\s+(week|month|day)", text):
+        return 1
     if "once" in text or "one time" in text:
         return 1
     if "four" in text:
@@ -42,6 +71,43 @@ def frequency_to_weekly_count(frequency: str | None, commitment: str | None = No
     if "three" in text:
         return 3
     return 2
+
+
+def is_one_off_goal(goal: Any, plan: dict[str, Any] | None = None) -> bool:
+    """True for a single dated event — not a repeating weekly plan."""
+    if plan is None:
+        facts = getattr(goal, "facts", None) or {}
+        raw = facts.get("weekly_plan") if isinstance(facts, dict) else None
+        plan = raw if isinstance(raw, dict) else None
+    freq = (getattr(goal, "frequency", None) or "").strip().lower()
+    commit = (getattr(goal, "commitment", None) or "").strip().lower()
+    blob = f"{freq} {commit}".strip()
+    if freq in _ONE_OFF_FREQ or commit in _ONE_OFF_FREQ:
+        return True
+    if re.search(r"\b(single event|one-?off|once only|just once)\b", blob):
+        return True
+    if freq and not _CLOCK_RE.sub(" ", freq).strip():
+        return True
+    if not isinstance(plan, dict):
+        return False
+    repeat = str(plan.get("repeat") or "").lower().replace("-", "_").replace(" ", "_")
+    if repeat in {"once", "one", "one_off", "single"}:
+        return True
+    try:
+        if int(plan.get("occurrences") or 0) == 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return bool(plan.get("on_date"))
+
+
+def _plan_on_date(plan: dict[str, Any] | None) -> date | None:
+    if not isinstance(plan, dict) or not plan.get("on_date"):
+        return None
+    try:
+        return date.fromisoformat(str(plan["on_date"])[:10])
+    except ValueError:
+        return None
 
 
 def session_duration_minutes(domain: str | None) -> int:
@@ -56,17 +122,52 @@ def session_duration_minutes(domain: str | None) -> int:
     return 60
 
 
+def _month_end(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
 def _parse_deadline_end(deadline: str | None) -> date:
+    """Parse goal deadline to an inclusive end date.
+
+    Month-only values use the last day of that month. If the model (or user text)
+    yields a past year for a month name like "November", roll forward year-by-year
+    until the deadline is today or later so proposals still land on the calendar.
+    """
     today = datetime.now().date()
     if not deadline:
         return today + timedelta(weeks=8)
     try:
-        year_s, month_s = deadline.split("-")[:2]
-        year, month = int(year_s), int(month_s)
-        # last day of month
-        if month == 12:
-            return date(year, 12, 31)
-        return date(year, month + 1, 1) - timedelta(days=1)
+        parts = [int(p) for p in deadline.strip().split("-")[:3]]
+        if len(parts) < 2:
+            return today + timedelta(weeks=8)
+        year, month = parts[0], parts[1]
+        if not (1 <= month <= 12):
+            return today + timedelta(weeks=8)
+        if len(parts) >= 3:
+            day = parts[2]
+            try:
+                end = date(year, month, day)
+            except ValueError:
+                end = _month_end(year, month)
+        else:
+            end = _month_end(year, month)
+        # Roll past deadlines forward (common when AI omits/wrong-years "end of November").
+        guard = 0
+        while end < today and guard < 6:
+            year += 1
+            if len(parts) >= 3:
+                try:
+                    end = date(year, month, parts[2])
+                except ValueError:
+                    end = _month_end(year, month)
+            else:
+                end = _month_end(year, month)
+            guard += 1
+        if end < today:
+            return today + timedelta(weeks=8)
+        return end
     except Exception:
         return today + timedelta(weeks=8)
 
@@ -306,9 +407,12 @@ class CalendarService:
         prefer_minute: int,
         window_start_hour: int = 17,
         window_end_hour: int = 21,
+        extra_busy: list[tuple[datetime, datetime]] | None = None,
     ) -> tuple[datetime, datetime] | None:
         """Place one session on a day near the preferred time, within the evening window."""
-        busy = self._busy_intervals(day)
+        busy = list(self._busy_intervals(day))
+        if extra_busy:
+            busy.extend(extra_busy)
         preferred = datetime(day.year, day.month, day.day, prefer_hour, prefer_minute)
         window_start = datetime(day.year, day.month, day.day, window_start_hour, 0)
         window_end = datetime(day.year, day.month, day.day, window_end_hour, 0)
@@ -326,10 +430,112 @@ class CalendarService:
             end = start + timedelta(minutes=duration_minutes)
             if start < window_start or end > window_end:
                 continue
+            if day == datetime.now().date() and start < datetime.now() - timedelta(minutes=2):
+                continue
             if any(_overlaps(start, end, b0, b1) for b0, b1 in busy):
                 continue
             return start, end
         return None
+
+    def _missed_count(self, goal_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM sessions WHERE goal_id = ? AND status = 'missed'",
+            (goal_id,),
+        ).fetchone()
+        return int(row["c"] if row else 0)
+
+    def _append_catch_up(
+        self,
+        goal: Any,
+        chosen: list[tuple[datetime, datetime, str]],
+        *,
+        start_day: date,
+        end_day: date,
+        duration_minutes: int,
+        prefer_hour: int = 17,
+        prefer_minute: int = 30,
+        window_start_hour: int = 17,
+        window_end_hour: int = 21,
+        avoid: set[int] | None = None,
+        title_pool: list[str] | None = None,
+        limit: int | None = None,
+    ) -> int:
+        """Stack makeup proposals for missed sessions into free slots before the deadline.
+
+        Prefers empty days first, then stacks later on days that already have a session.
+        Returns how many catch-up slots were added (titles get a · Catch-up suffix).
+        """
+        needed = self._missed_count(goal.id) if limit is None else max(0, int(limit))
+        if needed <= 0:
+            return 0
+        avoid = avoid or set()
+        titles = [t.strip() for t in (title_pool or []) if isinstance(t, str) and t.strip()]
+        if not titles:
+            titles = [str(getattr(goal, "title", None) or "Session")]
+
+        def catch_title(i: int) -> str:
+            base = titles[i % len(titles)]
+            if "catch-up" in base.lower():
+                return base
+            return f"{base} · Catch-up"
+
+        added = 0
+        days_with = {c[0].date() for c in chosen}
+
+        for prefer_empty in (True, False):
+            day = start_day
+            while day <= end_day and added < needed:
+                if day.weekday() in avoid:
+                    day += timedelta(days=1)
+                    continue
+                if prefer_empty and day in days_with:
+                    day += timedelta(days=1)
+                    continue
+                if not prefer_empty and day not in days_with:
+                    day += timedelta(days=1)
+                    continue
+
+                extra = [(c0, c1) for c0, c1, _t in chosen if c0.date() == day]
+                # On occupied days, prefer later in the window so catch-ups stack after the plan slot.
+                hour = prefer_hour
+                minute = prefer_minute
+                if not prefer_empty and extra:
+                    latest = max(c1 for _c0, c1 in extra)
+                    hour = latest.hour
+                    minute = latest.minute
+                    if minute % 30:
+                        minute = 30 if minute < 30 else 0
+                        if minute == 0:
+                            hour += 1
+
+                placed = self._slot_on_day(
+                    day,
+                    duration_minutes=duration_minutes,
+                    prefer_hour=min(hour, max(0, window_end_hour - 1)),
+                    prefer_minute=minute if minute in (0, 30) else 30,
+                    window_start_hour=min(window_start_hour, prefer_hour),
+                    window_end_hour=window_end_hour,
+                    extra_busy=extra,
+                )
+                if placed:
+                    start, end = placed
+                    exists = self.conn.execute(
+                        """
+                        SELECT id FROM sessions
+                        WHERE goal_id = ? AND start_at = ?
+                          AND status IN ('scheduled', 'proposed', 'completed')
+                        """,
+                        (goal.id, start.isoformat()),
+                    ).fetchone()
+                    if not exists and not any(
+                        _overlaps(start, end, c0, c1) for c0, c1, _t in chosen
+                    ):
+                        chosen.append((start, end, catch_title(added)))
+                        days_with.add(day)
+                        added += 1
+                day += timedelta(days=1)
+
+        return added
 
     def propose_goal_sessions(self, goal: Any, *, weeks: int | None = None) -> list[SessionOut]:
         """Create dated proposed sessions from real availability. Replaces open proposals for the goal."""
@@ -342,23 +548,40 @@ class CalendarService:
         )
 
         today = datetime.now().date()
-        start_day = today + timedelta(days=1)
-        end_day = _parse_deadline_end(goal.deadline)
-        if weeks:
-            end_day = min(end_day, today + timedelta(weeks=weeks))
-
         plan = (getattr(goal, "facts", None) or {}).get("weekly_plan")
-        if isinstance(plan, dict) and isinstance(plan.get("slots"), list) and plan["slots"]:
+        plan = plan if isinstance(plan, dict) else None
+        one_off = is_one_off_goal(goal, plan)
+        on_date = _plan_on_date(plan)
+
+        if one_off:
+            start_day = on_date or today
+            if start_day < today:
+                start_day = today
+            end_day = start_day
+        else:
+            start_day = today + timedelta(days=1)
+            end_day = _parse_deadline_end(goal.deadline)
+            if end_day < start_day:
+                end_day = start_day + timedelta(weeks=8)
+            if weeks:
+                end_day = min(end_day, today + timedelta(weeks=weeks))
+
+        if plan and isinstance(plan.get("slots"), list) and plan["slots"]:
             sessions = self._propose_from_weekly_plan(goal, plan, start_day, end_day)
             self.conn.commit()
             return sessions
 
         # Generic path (no structured weekly plan): keep a short approval horizon.
-        end_day = min(end_day, today + timedelta(weeks=4))
-        weekly = frequency_to_weekly_count(goal.frequency, goal.commitment)
+        if one_off:
+            weekly = 1
+            base_needed = 1
+        else:
+            end_day = min(end_day, today + timedelta(weeks=4))
+            weekly = frequency_to_weekly_count(goal.frequency, goal.commitment)
+            base_needed = weekly * max(1, ((end_day - start_day).days // 7) + 1)
+            base_needed = min(base_needed, weekly * 4)
         duration = session_duration_minutes(goal.domain)
-        needed = weekly * max(1, ((end_day - start_day).days // 7) + 1)
-        needed = min(needed, weekly * 4)
+        missed = self._missed_count(goal.id)
 
         prefer_after = 17
         facts = getattr(goal, "facts", None) or {}
@@ -370,21 +593,23 @@ class CalendarService:
             end_day=end_day,
             duration_minutes=duration,
             prefer_hours=(prefer_after, 21),
-            limit=needed * 3,
+            limit=max(base_needed, 1) * 3,
         )
         avoid = set()
         if isinstance(facts.get("avoid_weekdays"), list):
             avoid = {int(x) for x in facts["avoid_weekdays"] if isinstance(x, int)}
 
-        chosen: list[tuple[datetime, datetime]] = []
+        chosen: list[tuple[datetime, datetime, str]] = []
         per_week: dict[str, int] = {}
         for slot in free:
+            if len(chosen) >= base_needed:
+                break
             if slot[0].weekday() in avoid:
                 continue
             key = slot[0].strftime("%G-W%V")
             if per_week.get(key, 0) >= weekly:
                 continue
-            if any(_overlaps(slot[0], slot[1], c0, c1) for c0, c1 in chosen):
+            if any(_overlaps(slot[0], slot[1], c0, c1) for c0, c1, _t in chosen):
                 continue
             exists = self.conn.execute(
                 """
@@ -395,12 +620,26 @@ class CalendarService:
             ).fetchone()
             if exists:
                 continue
-            chosen.append(slot)
+            chosen.append((slot[0], slot[1], goal.title))
             per_week[key] = per_week.get(key, 0) + 1
-            if len(chosen) >= needed:
-                break
 
-        return self._insert_proposed(goal, chosen, title_for=lambda _s, _e: goal.title)
+        if missed and not one_off:
+            self._append_catch_up(
+                goal,
+                chosen,
+                start_day=start_day,
+                end_day=end_day,
+                duration_minutes=duration,
+                prefer_hour=prefer_after,
+                prefer_minute=30,
+                window_start_hour=prefer_after,
+                window_end_hour=21,
+                avoid=avoid,
+                title_pool=[goal.title],
+                limit=missed,
+            )
+
+        return self._insert_proposed_titled(goal, chosen)
 
     def _propose_from_weekly_plan(
         self,
@@ -415,8 +654,45 @@ class CalendarService:
             avoid = {int(x) for x in plan["avoid_weekdays"] if isinstance(x, int)}
         window_start = int(plan.get("prefer_after_hour", 17))
         window_end = int(plan.get("window_end_hour", 21))
+        one_off = is_one_off_goal(goal, plan)
 
         chosen: list[tuple[datetime, datetime, str]] = []
+        if one_off:
+            specs = slots or [
+                {
+                    "title": goal.title,
+                    "start_hour": window_start,
+                    "start_minute": 0,
+                    "duration_minutes": session_duration_minutes(goal.domain),
+                }
+            ]
+            for spec in specs:
+                title = str(spec.get("title") or goal.title).strip() or goal.title
+                duration = int(spec.get("duration_minutes") or session_duration_minutes(goal.domain))
+                prefer_hour = int(spec.get("start_hour", window_start))
+                prefer_minute = int(spec.get("start_minute", 0))
+                end_hour = min(23, max(window_end, prefer_hour + 1))
+                placed = self._slot_on_day(
+                    start_day,
+                    duration_minutes=duration,
+                    prefer_hour=prefer_hour,
+                    prefer_minute=prefer_minute,
+                    window_start_hour=min(window_start, prefer_hour),
+                    window_end_hour=end_hour,
+                )
+                if not placed and start_day == datetime.now().date():
+                    placed = self._slot_on_day(
+                        start_day + timedelta(days=1),
+                        duration_minutes=duration,
+                        prefer_hour=prefer_hour,
+                        prefer_minute=prefer_minute,
+                        window_start_hour=min(window_start, prefer_hour),
+                        window_end_hour=end_hour,
+                    )
+                if placed:
+                    chosen.append((placed[0], placed[1], title))
+            return self._insert_proposed_titled(goal, chosen, commit=False)
+
         day = start_day
         while day <= end_day:
             if day.weekday() in avoid:
@@ -455,18 +731,50 @@ class CalendarService:
                 chosen.append((start, end, title))
             day += timedelta(days=1)
 
+        title_pool = [
+            str(s.get("title") or goal.title).strip() or goal.title
+            for s in slots
+            if isinstance(s, dict)
+        ]
+        default_dur = session_duration_minutes(goal.domain)
+        if slots:
+            default_dur = int(slots[0].get("duration_minutes") or default_dur)
+        self._append_catch_up(
+            goal,
+            chosen,
+            start_day=start_day,
+            end_day=end_day,
+            duration_minutes=default_dur,
+            prefer_hour=window_start,
+            prefer_minute=30,
+            window_start_hour=window_start,
+            window_end_hour=window_end,
+            avoid=avoid,
+            title_pool=title_pool or [goal.title],
+        )
+
+        return self._insert_proposed_titled(goal, chosen, commit=False)
+
+    def _insert_proposed_titled(
+        self,
+        goal: Any,
+        chosen: list[tuple[datetime, datetime, str]],
+        *,
+        commit: bool = True,
+    ) -> list[SessionOut]:
         batch_id = _new_id()
         now = _now()
         sessions: list[SessionOut] = []
         for start, end, title in chosen:
             sid = _new_id()
+            notes = "catch-up" if "catch-up" in title.lower() else None
             category_id, category = self._category_for_title(title)
             self.conn.execute(
                 """
                 INSERT INTO sessions (
                     id, goal_id, title, start_at, end_at, kind, status,
                     proposal_batch_id, notes, created_at, updated_at, category_id
-                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, ?, ?, ?, ?)
                 """,
                 (
                     sid,
@@ -475,6 +783,7 @@ class CalendarService:
                     start.isoformat(),
                     end.isoformat(),
                     batch_id,
+                    notes,
                     now,
                     now,
                     category_id,
@@ -490,11 +799,13 @@ class CalendarService:
                     kind="flexible",
                     status="proposed",
                     proposal_batch_id=batch_id,
-                    notes=None,
+                    notes=notes,
                     category_id=category_id,
                     category=category,
                 )
             )
+        if commit:
+            self.conn.commit()
         return sessions
 
     def _insert_proposed(
@@ -504,49 +815,8 @@ class CalendarService:
         *,
         title_for,
     ) -> list[SessionOut]:
-        batch_id = _new_id()
-        now = _now()
-        sessions: list[SessionOut] = []
-        for start, end in chosen:
-            sid = _new_id()
-            title = title_for(start, end)
-            category_id, category = self._category_for_title(title)
-            self.conn.execute(
-                """
-                INSERT INTO sessions (
-                    id, goal_id, title, start_at, end_at, kind, status,
-                    proposal_batch_id, notes, created_at, updated_at, category_id
-                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, NULL, ?, ?, ?)
-                """,
-                (
-                    sid,
-                    goal.id,
-                    title,
-                    start.isoformat(),
-                    end.isoformat(),
-                    batch_id,
-                    now,
-                    now,
-                    category_id,
-                ),
-            )
-            sessions.append(
-                SessionOut(
-                    id=sid,
-                    goal_id=goal.id,
-                    title=title,
-                    start_at=start.isoformat(),
-                    end_at=end.isoformat(),
-                    kind="flexible",
-                    status="proposed",
-                    proposal_batch_id=batch_id,
-                    notes=None,
-                    category_id=category_id,
-                    category=category,
-                )
-            )
-        self.conn.commit()
-        return sessions
+        titled = [(start, end, title_for(start, end)) for start, end in chosen]
+        return self._insert_proposed_titled(goal, titled)
 
     def approve_batch(self, batch_id: str, *, conversation_id: str | None = None) -> list[SessionOut]:
         rows = self.conn.execute(
@@ -731,6 +1001,23 @@ class CalendarService:
         for r in rows:
             out[r["status"]] = r["c"]
         return out
+
+    def span_for_goal(self, goal_id: str) -> dict[str, str | None]:
+        row = self.conn.execute(
+            """
+            SELECT MIN(start_at) AS started_at,
+                   MAX(COALESCE(end_at, start_at)) AS ended_at
+            FROM sessions
+            WHERE goal_id = ? AND status IN ('scheduled', 'completed', 'missed')
+            """,
+            (goal_id,),
+        ).fetchone()
+        if not row:
+            return {"started_at": None, "ended_at": None}
+        return {
+            "started_at": row["started_at"],
+            "ended_at": row["ended_at"],
+        }
 
     def create_manual_session(
         self,

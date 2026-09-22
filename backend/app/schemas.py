@@ -62,6 +62,18 @@ class Goal(BaseModel):
     commitment: str | None = None
     status: GoalStatus = "gathering"
     facts: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class GoalPublic(Goal):
+    """Goal plus session stats for the Goals page and detail panel."""
+
+    events_total: int = 0
+    events_completed: int = 0
+    events_missed: int = 0
+    started_at: str | None = None
+    ended_at: str | None = None
 
 
 class Message(BaseModel):

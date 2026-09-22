@@ -24,6 +24,55 @@ class FakeGroq:
         active = payload.get("active_goal")
         lower = message.lower()
 
+        # One-off / single event at a clock time
+        if "single event" in lower or (
+            ("8 pm" in lower or "8pm" in lower) and ("today" in lower or "once" in lower)
+        ):
+            from datetime import date as _date
+
+            today = _date.today().isoformat()
+            wd = _date.today().weekday()
+            hour = 20
+            m = re.search(r"\b(\d{1,2})\s*(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b", lower)
+            if m:
+                hour = int(m.group(1)) % 12
+                if "p" in (m.group(3) or ""):
+                    hour += 12
+            title = "Pick my nose" if "nose" in lower else "One-off"
+            return {
+                "assistant_text": f"One session today at {hour:02d}:00.",
+                "intents": ["goal_create", "goal_plan_request"],
+                "goal_updates": [
+                    {
+                        "action": "create",
+                        "title": title,
+                        "frequency": "once",
+                        "status": "ready_to_plan",
+                        "facts": {
+                            "weekly_plan": {
+                                "repeat": "once",
+                                "on_date": today,
+                                "pattern_summary": f"{hour:02d}:00",
+                                "prefer_after_hour": hour,
+                                "window_end_hour": min(23, hour + 1),
+                                "slots": [
+                                    {
+                                        "weekday": wd,
+                                        "title": title,
+                                        "start_hour": hour,
+                                        "start_minute": 0,
+                                        "duration_minutes": 15,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ],
+                "clarification": None,
+                "requested_action": {"type": "propose_sessions"},
+                "confidence": 0.95,
+            }
+
         # Day dump / spark
         if "spark:" in lower or lower.startswith("idea:"):
             content = re.sub(r"^(spark:|idea:)\s*", "", message, flags=re.I).strip()

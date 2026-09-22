@@ -25,6 +25,7 @@ from .schemas import (
     ChatResponse,
     ClarificationQuestion,
     Goal,
+    GoalPublic,
     GoalUpdate,
     RequestedAction,
     SessionOut,
@@ -185,11 +186,30 @@ class ControlPlane:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_goal(self, goal_id: str) -> Goal | None:
-        return self.goals.get(goal_id)
+    def get_goal(self, goal_id: str) -> GoalPublic | None:
+        goal = self.goals.get(goal_id)
+        return self._goal_public(goal) if goal else None
 
-    def list_goals(self) -> list[Goal]:
-        return self.goals.list_managed()
+    def list_goals(self) -> list[GoalPublic]:
+        return [self._goal_public(g) for g in self.goals.list_managed()]
+
+    def _goal_public(self, goal: Goal) -> GoalPublic:
+        counts = self.calendar.progress_for_goal(goal.id)
+        span = self.calendar.span_for_goal(goal.id)
+        completed = counts.get("completed", 0)
+        missed = counts.get("missed", 0)
+        started = span.get("started_at") or goal.created_at
+        ended = span.get("ended_at")
+        if not ended:
+            ended = goal.updated_at if goal.status == "done" else goal.deadline
+        return GoalPublic(
+            **goal.model_dump(),
+            events_total=completed + missed,
+            events_completed=completed,
+            events_missed=missed,
+            started_at=started,
+            ended_at=ended,
+        )
 
     def remove_goal(self, goal_id: str) -> Goal | None:
         return self.goals.remove(goal_id)
@@ -504,7 +524,12 @@ class ControlPlane:
         action = turn.requested_action or RequestedAction()
         proposal_summary = None
         if action.type == "propose_sessions" and goal:
-            if goal.status == "gathering" and not (goal.frequency or goal.commitment):
+            facts = goal.facts or {}
+            has_plan = isinstance(facts.get("weekly_plan"), dict) and bool(
+                (facts.get("weekly_plan") or {}).get("slots")
+            )
+            has_cadence = bool(goal.frequency or goal.commitment or has_plan)
+            if goal.status == "gathering" and not has_cadence:
                 # Don't propose without a workable cadence — ask instead
                 pass
             else:
