@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,12 @@ from pydantic import ValidationError
 
 from .ai.groq_provider import GroqError, GroqProvider
 from .ai.prompt import SYSTEM_PROMPT, build_user_payload
-from .buddy_turn import operations_from_turn, parse_buddy_turn
+from .buddy_turn import (
+    operation_calendar_action,
+    operation_goal_update,
+    operations_from_turn,
+    parse_buddy_turn,
+)
 from .calendar import CalendarService
 from .categories import CategoryStore
 from .config import Settings, load_settings
@@ -35,9 +41,8 @@ from .schemas import (
     ClarificationQuestion,
     Goal,
     GoalPublic,
-    GoalUpdate,
     KNOWN_REQUESTED_ACTIONS,
-    RequestedAction,
+    ProposalGroup,
     SessionOut,
     Spark,
     TodayNeed,
@@ -313,15 +318,31 @@ class ControlPlane:
     def decide_proposal(
         self, batch_id: str, decision: str, *, conversation_id: str | None = None
     ) -> dict[str, Any]:
+        cid = conversation_id
+        if not cid:
+            sessions = self.calendar.list_proposed_for_batch(batch_id)
+            if sessions and sessions[0].goal_id:
+                goal = self.goals.get(sessions[0].goal_id)
+                cid = goal.conversation_id if goal else None
         if decision == "approve":
-            booked = self.calendar.approve_batch(batch_id, conversation_id=conversation_id)
-            return {"booked": booked, "undo_batch_id": batch_id if booked else None}
+            booked = self.calendar.approve_batch(batch_id, conversation_id=cid)
+            return {
+                "booked": booked,
+                "undo_batch_id": batch_id if booked else None,
+                "proposal_groups": self._proposal_groups_for(cid) if cid else [],
+            }
         if decision == "reject":
             n = self.calendar.reject_batch(batch_id)
-            return {"rejected": n}
+            return {
+                "rejected": n,
+                "proposal_groups": self._proposal_groups_for(cid) if cid else [],
+            }
         if decision == "undo":
             restored = self.calendar.undo_batch(batch_id)
-            return {"undone": restored}
+            return {
+                "undone": restored,
+                "proposal_groups": self._proposal_groups_for(cid) if cid else [],
+            }
         return {"ok": False, "detail": "Use chat to describe an adjustment"}
 
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None):
@@ -335,18 +356,18 @@ class ControlPlane:
         if entry is not None:
             entry["cancelled"] = True
             client = entry.get("http_client")
-            if client is not None:
+            if client is not None and entry.get("owns_http_client"):
                 try:
                     client.close()
                 except Exception:
                     pass
+                entry["http_client"] = None
         turn = self.turns.get(request_id)
         status = turn["status"] if turn else None
         if status in {"committing", "completed"}:
             committed = True
         elif turn and status not in {"cancelled"}:
             self.turns.update(request_id, status="cancelled")
-        self.usage.mark_cancelled(request_id)
         return {
             "ok": True,
             "request_id": request_id,
@@ -365,37 +386,89 @@ class ControlPlane:
         return bool(turn and turn.get("status") == "cancelled")
 
     def get_open_proposal(self, conversation_id: str) -> dict[str, Any]:
-        """Rebuild proposal card state for a conversation from persisted proposed sessions."""
-        goal = self.goals.active_for_conversation(conversation_id)
+        """Rebuild unfinished chat state: proposal groups, previews, questions, answers."""
         pending = self.turns.latest_awaiting_approval(conversation_id)
         extra: dict[str, Any] = {
             "mutation_preview": None,
             "clarification_questions": [],
+            "entered_answers": {},
+            "proposal_groups": [],
         }
         if pending:
-            extra["mutation_preview"] = {
-                "operations": pending.get("pending_ops") or [],
-            }
+            extra["mutation_preview"] = self._preview_from_pending(pending)
             extra["clarification_questions"] = pending.get("clarifications") or []
         conv = self.conversations.get(conversation_id)
         draft = (conv or {}).get("draft") or {}
         if draft.get("clarification_questions") and not extra["clarification_questions"]:
             extra["clarification_questions"] = draft["clarification_questions"]
-        if not goal:
-            return {"goal": None, "proposed_sessions": [], "proposal_summary": None, **extra}
-        batch_id = self.calendar.open_proposal_batch(goal.id)
-        if not batch_id:
-            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None, **extra}
-        sessions = self.calendar.list_proposed_for_batch(batch_id)
-        if not sessions:
-            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None, **extra}
-        summary = summarize_proposal(goal, sessions)
+        answers = draft.get("clarification_answers") or draft.get("answers") or {}
+        if isinstance(answers, dict):
+            extra["entered_answers"] = answers
+            extra["clarification_answers"] = answers
+        groups = self._proposal_groups_for(conversation_id)
+        extra["proposal_groups"] = [g.model_dump(mode="json") for g in groups]
+        if not groups:
+            latest_turn = self.turns.latest_for_conversation(conversation_id)
+            stored = (latest_turn or {}).get("response") or {}
+            if stored.get("clarification_questions") and not extra["clarification_questions"]:
+                extra["clarification_questions"] = stored["clarification_questions"]
+            return {
+                "goal": None,
+                "proposed_sessions": [],
+                "proposal_summary": None,
+                **extra,
+            }
+        first = groups[0]
         return {
-            "goal": goal,
-            "proposed_sessions": sessions,
-            "proposal_summary": summary,
+            "goal": first.goal,
+            "proposed_sessions": first.sessions,
+            "proposal_summary": first.summary,
             **extra,
         }
+
+    def _proposal_groups_for(self, conversation_id: str | None) -> list[ProposalGroup]:
+        if not conversation_id:
+            return []
+        goals = sorted(
+            [g for g in self.goals.list_open() if g.conversation_id == conversation_id],
+            key=lambda g: g.created_at or "",
+        )
+        groups: list[ProposalGroup] = []
+        for goal in goals:
+            batch_id = self.calendar.open_proposal_batch(goal.id)
+            if not batch_id:
+                continue
+            sessions = self.calendar.list_proposed_for_batch(batch_id)
+            if not sessions:
+                continue
+            summary = self._public_proposal_summary(summarize_proposal(goal, sessions))
+            groups.append(
+                ProposalGroup(
+                    goal=goal,
+                    proposal_batch_id=batch_id,
+                    summary=summary,
+                    sessions=sessions,
+                )
+            )
+        return groups
+
+    def _preview_from_pending(self, pending: dict[str, Any]) -> dict[str, Any] | None:
+        ops = pending.get("pending_ops") or []
+        if not ops:
+            return None
+        first = ops[0]
+        if isinstance(first, dict) and first.get("preview"):
+            return first["preview"]
+        records = []
+        for raw in ops:
+            records.extend((raw.get("preview") or {}).get("records") or [])
+        if not records:
+            return None
+        return preview_payload(
+            kind=first.get("kind") if isinstance(first, dict) else "calendar",
+            records=records,
+            why="Waiting for approval before changing the calendar.",
+        )
 
     # --- chat entry ---
 
@@ -413,7 +486,7 @@ class ControlPlane:
         existing = self.turns.get(rid)
         if existing and existing.get("response"):
             return ChatResponse.model_validate(existing["response"])
-        self._active_requests[rid] = {"cancelled": False, "http_client": None}
+        self._active_requests[rid] = {"cancelled": False, "http_client": None, "owns_http_client": False}
         try:
             cid = (existing or {}).get("conversation_id") or self._ensure_conversation(conversation_id)
             with self._lock_for_conversation(cid):
@@ -478,7 +551,8 @@ class ControlPlane:
         pending = self.turns.latest_awaiting_approval(cid)
         if pending and lower in approve_words:
             response = self._commit_pending_turn(cid, pending, goal, request_id)
-            return self._finish_response(request_id, cid, response)
+            status = "awaiting_approval" if response.mutation_preview else "completed"
+            return self._finish_response(request_id, cid, response, status=status)
         if pending and lower in reject_words:
             self.turns.update(pending["request_id"], status="cancelled", pending_ops_json=[])
             reply = "Cancelled that preview. Nothing on the calendar changed."
@@ -492,41 +566,48 @@ class ControlPlane:
                 activity=[{"stage": "cancelled", "label": "Preview cancelled", "detail": "No calendar changes"}],
             )
             return self._finish_response(request_id, cid, response)
+        if pending:
+            # A new instruction supersedes an unapproved preview without applying it.
+            self.turns.update(pending["request_id"], status="cancelled", pending_ops_json=[])
 
-        if goal:
-            batch_id = self.calendar.open_proposal_batch(goal.id)
-            if batch_id and lower in approve_words:
-                booked = self.calendar.approve_batch(batch_id, conversation_id=cid)
-                reply = (
-                    f"Booked {len(booked)} session(s) once each and linked them to {goal.title}. "
-                    "Tell me when one is completed or missed and I'll record it."
-                )
-                self._add_message(cid, "assistant", reply)
-                response = ChatResponse(
-                    conversation_id=cid,
-                    reply=reply,
-                    goal=self.goals.get(goal.id),
-                    booked_sessions=booked,
-                    ai_available=True,
-                    undo_batch_id=batch_id if booked else None,
-                    request_id=request_id,
-                    activity=[
-                        {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
-                    ],
-                )
-                return self._finish_response(request_id, cid, response)
-            if batch_id and lower in reject_words:
-                n = self.calendar.reject_batch(batch_id)
-                reply = f"Rejected {n} proposed session(s). Say what to change and I'll propose again."
-                self._add_message(cid, "assistant", reply)
-                response = ChatResponse(
-                    conversation_id=cid,
-                    reply=reply,
-                    goal=goal,
-                    ai_available=True,
-                    request_id=request_id,
-                )
-                return self._finish_response(request_id, cid, response)
+        open_groups = self._proposal_groups_for(cid)
+        if len(open_groups) == 1 and lower in approve_words:
+            batch_id = open_groups[0].proposal_batch_id
+            booked = self.calendar.approve_batch(batch_id, conversation_id=cid)
+            title = open_groups[0].goal.title if open_groups[0].goal else "your goal"
+            reply = (
+                f"Booked {len(booked)} session(s) once each and linked them to {title}. "
+                "Tell me when one is completed or missed and I'll record it."
+            )
+            self._add_message(cid, "assistant", reply)
+            response = ChatResponse(
+                conversation_id=cid,
+                reply=reply,
+                goal=open_groups[0].goal,
+                booked_sessions=booked,
+                ai_available=True,
+                undo_batch_id=batch_id if booked else None,
+                proposal_groups=[],
+                request_id=request_id,
+                activity=[
+                    {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
+                ],
+            )
+            return self._finish_response(request_id, cid, response)
+        if len(open_groups) == 1 and lower in reject_words:
+            batch_id = open_groups[0].proposal_batch_id
+            n = self.calendar.reject_batch(batch_id)
+            reply = f"Rejected {n} proposed session(s). Say what to change and I'll propose again."
+            self._add_message(cid, "assistant", reply)
+            response = ChatResponse(
+                conversation_id=cid,
+                reply=reply,
+                goal=open_groups[0].goal,
+                ai_available=True,
+                proposal_groups=[],
+                request_id=request_id,
+            )
+            return self._finish_response(request_id, cid, response)
 
         if not self.settings.groq_configured and self._ai is None:
             reply = (
@@ -592,15 +673,9 @@ class ControlPlane:
             return self._finish_response(request_id, cid, response, status="failed")
 
         if self._is_cancelled(request_id):
-            self.usage.record(
-                conversation_id=cid,
-                model=self.settings.groq_model,
-                status="cancelled",
-                cancelled=True,
-            )
             response = ChatResponse(
                 conversation_id=cid,
-                reply="Stopped.",
+                reply="Stopped. Cloud AI output was discarded — no calendar changes.",
                 goal=goal,
                 ai_available=True,
                 request_id=request_id,
@@ -621,8 +696,31 @@ class ControlPlane:
             status="committing",
             context_categories_json=context_categories,
         )
+        if self._is_cancelled(request_id):
+            response = ChatResponse(
+                conversation_id=cid,
+                reply="This turn was already saving — some calendar changes may have been applied.",
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                stopped=True,
+                stop_committed=True,
+                activity=[
+                    {
+                        "stage": "completed",
+                        "label": "Finished during Stop",
+                        "detail": "Changes may have been applied",
+                    }
+                ],
+            )
+            return self._finish_response(request_id, cid, response, status="completed")
         response = self._apply_turn(
-            cid, turn, goal, request_id=request_id, context_categories=context_categories
+            cid,
+            turn,
+            goal,
+            request_id=request_id,
+            context_categories=context_categories,
+            user_text=text,
         )
         response.request_id = request_id
         status = "awaiting_approval" if response.mutation_preview else "completed"
@@ -637,8 +735,23 @@ class ControlPlane:
         status: str = "completed",
     ) -> ChatResponse:
         response.request_id = request_id
+        if not response.proposal_groups:
+            response.proposal_groups = self._proposal_groups_for(cid)
         payload = response.model_dump(mode="json")
         self.turns.update(request_id, status=status, response_json=payload)
+        if status in {"completed", "cancelled", "failed"} and not response.clarification_questions:
+            conv = self.conversations.get(cid) or {}
+            draft = dict(conv.get("draft") or {})
+            draft["clarification_questions"] = []
+            if status != "awaiting_approval":
+                draft["clarification_answers"] = {}
+                draft["answers"] = {}
+            self.conversations.save_draft(cid, draft)
+        elif response.clarification_questions:
+            conv = self.conversations.get(cid) or {}
+            draft = dict(conv.get("draft") or {})
+            draft["clarification_questions"] = [q.model_dump() for q in response.clarification_questions]
+            self.conversations.save_draft(cid, draft)
         return response
 
     def _commit_pending_turn(
@@ -652,25 +765,84 @@ class ControlPlane:
         deleted: list[str] = []
         updated: list[SessionOut] = []
         unresolved: list[str] = []
+        stale = False
+        refreshed_records: list[dict[str, Any]] = []
+        refreshed_ops: list[dict[str, Any]] = []
+
         for raw in ops:
-            if raw.get("kind") == "pause_others" and goal:
-                self.goals.pause_others(cid, keep_id=goal.id)
+            if raw.get("kind") == "pause_others":
+                keep_id = raw.get("target_id") or (goal.id if goal else None)
+                if keep_id:
+                    self.goals.pause_others(cid, keep_id=keep_id)
                 continue
-            action_data = raw.get("calendar_action") or raw
+            action_data = raw.get("calendar_action") or {}
             try:
                 action = CalendarAction.model_validate(action_data)
             except ValidationError:
                 unresolved.append("invalid_preview")
                 continue
-            d, u, errors = self.calendar.apply_calendar_action(action)
+            reviewed_ids = list(raw.get("reviewed_ids") or [])
+            fingerprints = raw.get("fingerprints") or {}
+            if not reviewed_ids:
+                unresolved.append("preview_missing_ids")
+                stale = True
+                continue
+            current = []
+            for sid in reviewed_ids:
+                session = self.calendar.get_session(sid)
+                if session is None or not self.calendar.fingerprints_match(session, fingerprints.get(sid)):
+                    stale = True
+                    break
+                current.append(session)
+            if stale:
+                # Rebuild a preview from the original selector for the user to review again.
+                targets = self.calendar.resolve_action_targets(action)
+                records = [self._preview_record(t, action) for t in targets]
+                preview = preview_payload(
+                    kind=raw.get("kind") or f"calendar_{action.op}",
+                    records=records,
+                    why="The calendar changed after this preview. Approve again to apply only the sessions shown.",
+                )
+                refreshed_ops.append(self._pending_op(raw.get("kind") or f"calendar_{action.op}", action, records, preview))
+                refreshed_records.extend(records)
+                continue
+            d, u, errors = self.calendar.apply_reviewed_action(action, reviewed_ids)
             deleted.extend(d)
             updated.extend(u)
             unresolved.extend(errors)
+
+        if stale:
+            preview = preview_payload(
+                kind="calendar",
+                records=refreshed_records,
+                why="The calendar changed after this preview. Nothing was applied.",
+            )
+            self.turns.update(pending["request_id"], status="cancelled", pending_ops_json=[])
+            self.turns.update(request_id, pending_ops_json=refreshed_ops)
+            reply = (
+                "That preview is stale — matching calendar records changed, so I didn't apply it. "
+                "Review the updated list and approve only if it still looks right."
+            )
+            self._add_message(cid, "assistant", reply)
+            return ChatResponse(
+                conversation_id=cid,
+                reply=reply,
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                mutation_preview=preview,
+                unresolved=unresolved,
+                activity=[
+                    {"stage": "preview", "label": "Preview is stale", "detail": "No calendar changes applied"},
+                    {"stage": "awaiting_approval", "label": "Review the updated preview", "detail": None},
+                ],
+            )
+
         self.turns.update(pending["request_id"], status="completed", pending_ops_json=[])
         n = len(deleted) + len(updated)
         reply = f"Applied {n} calendar change{'s' if n != 1 else ''}."
         if unresolved:
-            reply += " Some items could not be matched."
+            reply += " Some reviewed items could not be applied."
         self._add_message(cid, "assistant", reply)
         if deleted or updated:
             notify_detail = f"{len(deleted)} removed, {len(updated)} changed"
@@ -748,7 +920,7 @@ class ControlPlane:
             calendar_sessions = ranked[:20]
         if goal:
             categories.append("active_goal")
-        open_goals = [g.model_dump() for g in self.goals.list_open() if g.conversation_id == cid][:6]
+        open_goals = [g.model_dump() for g in self.goals.list_open() if g.conversation_id == cid][:12]
         if open_goals:
             categories.append("goals")
         log.info("chat_context categories=%s", ",".join(categories))
@@ -770,11 +942,14 @@ class ControlPlane:
         )
         provider = self._provider()
         entry = self._active_requests.get(request_id)
-        if entry is not None and hasattr(provider, "_http"):
+        request_client = None
+        if entry is not None and hasattr(provider, "open_request_client"):
             try:
-                entry["http_client"] = provider._http()
+                request_client = provider.open_request_client()
+                entry["http_client"] = request_client
+                entry["owns_http_client"] = True
             except Exception:
-                pass
+                request_client = None
 
         def _cancelled() -> bool:
             return self._is_cancelled(request_id)
@@ -795,12 +970,12 @@ class ControlPlane:
             )
 
         self._call_count += 1
+        complete_kwargs: dict[str, Any] = {"allow_retry": False, "cancel_check": _cancelled}
+        if request_client is not None:
+            complete_kwargs["http_client"] = request_client
         try:
-            kwargs: dict[str, Any] = {"allow_retry": False}
             try:
-                raw = provider.complete_json(
-                    SYSTEM_PROMPT, payload, cancel_check=_cancelled, **kwargs
-                )
+                raw = provider.complete_json(SYSTEM_PROMPT, payload, **complete_kwargs)
             except TypeError:
                 raw = provider.complete_json(SYSTEM_PROMPT, payload, allow_retry=False)
             try:
@@ -821,9 +996,7 @@ class ControlPlane:
             )
             try:
                 try:
-                    raw2 = provider.complete_json(
-                        SYSTEM_PROMPT, repair, cancel_check=_cancelled, allow_retry=False
-                    )
+                    raw2 = provider.complete_json(SYSTEM_PROMPT, repair, **complete_kwargs)
                 except TypeError:
                     raw2 = provider.complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
                 stats = getattr(provider, "last_stats", None)
@@ -844,12 +1017,21 @@ class ControlPlane:
                 + "\n\nPrevious output was invalid. Return ONLY valid BuddyTurn JSON using exact intent enums."
             )
             try:
-                raw2 = provider.complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
+                raw2 = provider.complete_json(SYSTEM_PROMPT, repair, **complete_kwargs)
             except TypeError:
                 raw2 = provider.complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
             stats = getattr(provider, "last_stats", None)
             _record("ok", attempt=2, stats=stats)
             return parse_buddy_turn(raw2), categories
+        finally:
+            if request_client is not None:
+                if entry is not None and entry.get("http_client") is request_client:
+                    entry["http_client"] = None
+                    entry["owns_http_client"] = False
+                try:
+                    request_client.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _needs_calendar_context(text: str) -> bool:
@@ -919,6 +1101,7 @@ class ControlPlane:
         *,
         request_id: str | None = None,
         context_categories: list[str] | None = None,
+        user_text: str = "",
     ) -> ChatResponse:
         proposed: list[SessionOut] = []
         booked: list[SessionOut] = []
@@ -928,11 +1111,13 @@ class ControlPlane:
         updated_sessions: list[SessionOut] = []
         operations: list[dict[str, Any]] = []
         touched_goals: list[Goal] = []
+        created_refs: dict[str, Goal] = {}
+        proposal_groups: list[ProposalGroup] = []
         undo_batch_id: str | None = None
-        proposal_summary = None
         pending_ops: list[dict[str, Any]] = []
         preview_records: list[dict[str, Any]] = []
         questions = list(turn.clarification_questions)
+        open_goals = [g for g in self.goals.list_open() if g.conversation_id == cid]
 
         action = turn.requested_action
         if action and action.type not in KNOWN_REQUESTED_ACTIONS:
@@ -961,22 +1146,34 @@ class ControlPlane:
                 }
             )
 
-        for op in operations_from_turn(turn):
-            cal_action: CalendarAction | None = op.get("calendar_action")
+        raw_ops = operations_from_turn(turn)
+        for op in raw_ops:
+            if self._is_cancelled(request_id):
+                operations.append(
+                    {
+                        "id": op.get("id") or str(uuid.uuid4()),
+                        "kind": op["kind"],
+                        "status": "cancelled",
+                        "goal_id": goal.id if goal else None,
+                        "detail": "Stopped before this operation",
+                    }
+                )
+                break
+            cal_action = operation_calendar_action(op)
             targets = self.calendar.resolve_action_targets(cal_action) if cal_action else []
             policy = classify_operation(
                 kind=op["kind"],
                 target_count=len(targets),
                 all_matching=bool(cal_action.all_matching) if cal_action else False,
                 has_session_id=bool(cal_action and cal_action.session_id) or bool(
-                    op.get("requested_action") and getattr(op.get("requested_action"), "session_id", None)
+                    (op.get("payload") or {}).get("session_id") or op.get("target_id")
                 ),
-                confidence=turn.confidence,
+                confidence=float(op.get("confidence") or turn.confidence),
             )
             if policy == "clarify":
                 operations.append(
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": op.get("id") or str(uuid.uuid4()),
                         "kind": op["kind"],
                         "status": "needs_clarification",
                         "goal_id": goal.id if goal else None,
@@ -993,32 +1190,17 @@ class ControlPlane:
                     )
                 continue
             if policy == "preview":
-                records = [
-                    {
-                        "id": t.id,
-                        "title": t.title,
-                        "start_at": t.start_at,
-                        "end_at": t.end_at,
-                        "status": t.status,
-                    }
-                    for t in targets
-                ]
+                records = [self._preview_record(t, cal_action) for t in targets] if cal_action else []
                 payload = preview_payload(
                     kind=op["kind"],
                     records=records,
                     why="Destructive or bulk calendar changes wait for your approval.",
                 )
-                pending_ops.append(
-                    {
-                        "kind": op["kind"],
-                        "calendar_action": cal_action.model_dump() if cal_action else None,
-                        "preview": payload,
-                    }
-                )
+                pending_ops.append(self._pending_op(op["kind"], cal_action, records, payload, op))
                 preview_records.extend(records)
                 operations.append(
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": op.get("id") or str(uuid.uuid4()),
                         "kind": op["kind"],
                         "status": "needs_approval",
                         "goal_id": goal.id if goal else None,
@@ -1029,11 +1211,19 @@ class ControlPlane:
                 continue
 
             try:
-                outcome = self._apply_operation(cid, op, goal, touched_goals)
+                outcome = self._apply_operation(
+                    cid,
+                    op,
+                    goal,
+                    touched_goals,
+                    created_refs=created_refs,
+                    user_text=user_text,
+                    open_goals=open_goals,
+                )
             except Exception as exc:  # noqa: BLE001
                 operations.append(
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": op.get("id") or str(uuid.uuid4()),
                         "kind": op["kind"],
                         "status": "failed",
                         "goal_id": goal.id if goal else None,
@@ -1044,23 +1234,48 @@ class ControlPlane:
                 log.exception("turn_op_failed kind=%s", op["kind"])
                 continue
 
+            if outcome.get("status") == "needs_clarification":
+                operations.append(
+                    {
+                        "id": op.get("id") or str(uuid.uuid4()),
+                        "kind": op["kind"],
+                        "status": "needs_clarification",
+                        "goal_id": outcome.get("goal_id") or (goal.id if goal else None),
+                        "detail": outcome.get("detail"),
+                    }
+                )
+                if outcome.get("question"):
+                    questions.append(outcome["question"])
+                elif not questions:
+                    questions.append(
+                        ClarificationQuestion(
+                            id="which-goal",
+                            label=outcome.get("detail") or "Which goal should I update?",
+                            answer_type="short_text",
+                        )
+                    )
+                continue
+
             if outcome.get("goal") is not None:
                 goal = outcome["goal"]
                 if goal and all(g.id != goal.id for g in touched_goals):
                     touched_goals.append(goal)
+                open_goals = [g for g in self.goals.list_open() if g.conversation_id == cid]
+            if outcome.get("ref") and outcome.get("goal"):
+                created_refs[str(outcome["ref"])] = outcome["goal"]
             proposed.extend(outcome.get("proposed") or [])
             booked.extend(outcome.get("booked") or [])
             captured.extend(outcome.get("sparks") or [])
             deleted_session_ids.extend(outcome.get("deleted") or [])
             updated_sessions.extend(outcome.get("updated") or [])
             unresolved.extend(outcome.get("errors") or [])
-            if outcome.get("proposal_summary"):
-                proposal_summary = outcome["proposal_summary"]
+            if outcome.get("proposal_group"):
+                proposal_groups.append(outcome["proposal_group"])
             if outcome.get("undo_batch_id"):
                 undo_batch_id = outcome["undo_batch_id"]
             operations.append(
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": op.get("id") or str(uuid.uuid4()),
                     "kind": op["kind"],
                     "status": outcome.get("status") or "succeeded",
                     "goal_id": (outcome.get("goal") or goal).id if (outcome.get("goal") or goal) else None,
@@ -1068,7 +1283,10 @@ class ControlPlane:
                 }
             )
 
-        reply = (turn.assistant_text or "").strip()
+        if not proposal_groups:
+            proposal_groups = self._dedupe_proposal_groups(proposed, touched_goals, goal)
+
+        reply = self._honest_reply(turn.assistant_text or "", operations)
         if pending_ops:
             n = len(preview_records)
             suffix = f" Approve to apply {n} calendar change{'s' if n != 1 else ''}."
@@ -1085,9 +1303,10 @@ class ControlPlane:
             if suffix.strip() not in reply:
                 reply = f"{reply.rstrip()}{suffix}"
         if proposed and not reply:
-            total = proposal_summary.get("total") if proposal_summary else len(proposed)
-            title = goal.title if goal else "your goal"
-            reply = f"Proposed {total} session(s) for {title}. Nothing is booked until you approve."
+            reply = (
+                f"Proposed plans for {len(proposal_groups) or 1} goal"
+                f"{'s' if len(proposal_groups) != 1 else ''}. Nothing is booked until you approve."
+            )
 
         cats = set(context_categories or [])
         activity: list[dict[str, Any]] = [
@@ -1107,7 +1326,7 @@ class ControlPlane:
         mutation_preview = None
         if pending_ops:
             mutation_preview = preview_payload(
-                kind="calendar",
+                kind=pending_ops[0].get("kind") or "calendar",
                 records=preview_records,
                 why="Waiting for approval before changing the calendar.",
             )
@@ -1129,7 +1348,7 @@ class ControlPlane:
                 {
                     "stage": "proposal_building",
                     "label": "Shaping the proposal",
-                    "detail": f"Prepared {len(proposed)} sessions",
+                    "detail": f"Prepared {len(proposed)} sessions across {len(proposal_groups) or 1} goal(s)",
                 }
             )
             activity.append({"stage": "completed", "label": "Waiting for approval", "detail": "No calendar changes made"})
@@ -1139,12 +1358,6 @@ class ControlPlane:
         else:
             activity.append({"stage": "completed", "label": "Completed", "detail": "No calendar changes made"})
 
-        failed_only = operations and all(
-            o.get("status") in {"failed", "needs_clarification"} for o in operations
-        )
-        if failed_only and not proposed and not captured and not pending_ops:
-            reply = "I couldn't apply that — the action wasn't valid."
-
         if request_id and pending_ops:
             self.turns.update(
                 request_id,
@@ -1153,10 +1366,6 @@ class ControlPlane:
             )
         elif request_id and questions:
             self.turns.update(request_id, clarifications_json=[q.model_dump() for q in questions])
-            conv = self.conversations.get(cid) or {}
-            draft = dict(conv.get("draft") or {})
-            draft["clarification_questions"] = [q.model_dump() for q in questions]
-            self.conversations.save_draft(cid, draft)
 
         self._add_message(cid, "assistant", reply)
         pending_q = None
@@ -1166,17 +1375,21 @@ class ControlPlane:
             pending_q = "Approve or reject these proposed sessions?"
         else:
             pending_q = turn.clarification
+        display_goal = goal
+        if proposal_groups and len({g.goal.id for g in proposal_groups if g.goal}) > 1:
+            display_goal = None
         return ChatResponse(
             conversation_id=cid,
             reply=reply,
-            goal=goal,
+            goal=display_goal,
             pending_question=pending_q,
             proposed_sessions=proposed,
             booked_sessions=booked,
             sparks=captured,
             unresolved=unresolved,
             ai_available=True,
-            proposal_summary=proposal_summary,
+            proposal_summary=proposal_groups[0].summary if proposal_groups else None,
+            proposal_groups=proposal_groups,
             clarification_questions=questions,
             activity=activity,
             undo_batch_id=undo_batch_id,
@@ -1186,103 +1399,424 @@ class ControlPlane:
             mutation_preview=mutation_preview,
         )
 
+    def _dedupe_proposal_groups(
+        self,
+        proposed: list[SessionOut],
+        touched_goals: list[Goal],
+        goal: Goal | None,
+    ) -> list[ProposalGroup]:
+        by_batch: dict[str, list[SessionOut]] = {}
+        for session in proposed:
+            if not session.proposal_batch_id:
+                continue
+            by_batch.setdefault(session.proposal_batch_id, []).append(session)
+        groups: list[ProposalGroup] = []
+        goals_by_id = {g.id: g for g in touched_goals}
+        if goal:
+            goals_by_id[goal.id] = goal
+        for batch_id, sessions in by_batch.items():
+            gid = next((s.goal_id for s in sessions if s.goal_id), None)
+            target = goals_by_id.get(gid) if gid else None
+            if target is None and gid:
+                target = self.goals.get(gid)
+            summary = self._public_proposal_summary(summarize_proposal(target, sessions) if target else None)
+            groups.append(
+                ProposalGroup(
+                    goal=target,
+                    proposal_batch_id=batch_id,
+                    summary=summary,
+                    sessions=sessions,
+                )
+            )
+        return groups
+
+    def _honest_reply(self, turn_text: str, operations: list[dict[str, Any]]) -> str:
+        text = (turn_text or "").strip()
+        statuses = [o.get("status") for o in operations]
+        failed = [o for o in operations if o.get("status") in {"failed", "needs_clarification"}]
+        succeeded = [o for o in operations if o.get("status") == "succeeded"]
+        approval = [o for o in operations if o.get("status") == "needs_approval"]
+        success_claim = bool(re.search(
+            r"\b(all done|everything succeeded|everything worked|all succeeded)\b",
+            text,
+            re.I,
+        ))
+        if not operations:
+            return text
+        if failed and not succeeded and not approval:
+            return "I couldn't apply that — " + "; ".join(
+                f"{o.get('kind')}: {o.get('detail') or 'not valid'}" for o in failed
+            )
+        if (failed and succeeded) or (failed and success_claim) or (approval and success_claim):
+            parts = []
+            for op in operations:
+                kind = str(op.get("kind") or "action").replace("_", " ")
+                status = op.get("status")
+                detail = op.get("detail")
+                if status == "succeeded":
+                    parts.append(f"{kind} succeeded" + (f" ({detail})" if detail else ""))
+                elif status == "needs_approval":
+                    parts.append(f"{kind} is waiting for your approval")
+                elif status == "needs_clarification":
+                    parts.append(f"{kind} needs a bit more detail" + (f": {detail}" if detail else ""))
+                elif status == "failed":
+                    parts.append(f"{kind} failed" + (f": {detail}" if detail else ""))
+            prefix = "I couldn't apply everything. "
+            return prefix + "; ".join(parts) + "."
+        return text
+
+    def _preview_record(self, session: SessionOut, action: CalendarAction | None) -> dict[str, Any]:
+        before = {
+            "title": session.title,
+            "start_at": session.start_at,
+            "end_at": session.end_at,
+            "status": session.status,
+            "updated_at": session.updated_at,
+        }
+        after = None
+        if action:
+            if action.op == "delete":
+                after = None
+            elif action.op == "update":
+                after = {
+                    "title": action.new_title or session.title,
+                    "start_at": action.new_start_at or session.start_at,
+                    "end_at": action.new_end_at or session.end_at,
+                    "status": session.status,
+                }
+            elif action.op == "move":
+                after = {
+                    "title": session.title,
+                    "start_at": action.new_start_at or session.start_at,
+                    "end_at": action.new_end_at or session.end_at,
+                    "status": session.status,
+                }
+            elif action.op == "mark_outcome":
+                after = {**before, "status": action.outcome}
+        reasons: list[str] = []
+        if action and action.session_id:
+            reasons.append("Exact session from this preview")
+        if action and action.title_contains:
+            reasons.append(f"Title contains “{action.title_contains}”")
+        if action and action.date:
+            reasons.append(f"On {action.date}")
+        if action and action.goal_id:
+            reasons.append("Linked to the selected goal")
+        if action and action.all_matching:
+            reasons.append("All matching sessions")
+        return {
+            "id": session.id,
+            "title": session.title,
+            "start_at": session.start_at,
+            "end_at": session.end_at,
+            "status": session.status,
+            "before": before,
+            "after": after,
+            "match_reason": "; ".join(reasons) or "Matched from your request",
+            "fingerprint": before,
+        }
+
+    def _pending_op(
+        self,
+        kind: str,
+        action: CalendarAction | None,
+        records: list[dict[str, Any]],
+        preview: dict[str, Any],
+        op: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        fingerprints = {
+            rec["id"]: rec.get("fingerprint") or rec.get("before") or {}
+            for rec in records
+            if rec.get("id")
+        }
+        return {
+            "kind": kind,
+            "target_id": (op or {}).get("target_id"),
+            "calendar_action": action.model_dump() if action else None,
+            "reviewed_ids": [rec["id"] for rec in records if rec.get("id")],
+            "fingerprints": fingerprints,
+            "preview": preview,
+        }
+
+    def _resolve_goal_for_op(
+        self,
+        cid: str,
+        op: dict[str, Any],
+        *,
+        current: Goal | None,
+        created_refs: dict[str, Goal],
+        open_goals: list[Goal],
+        user_text: str,
+        require: bool,
+    ) -> tuple[Goal | None, dict[str, Any] | None]:
+        payload = op.get("payload") or {}
+        target_id = op.get("target_id") or payload.get("goal_id")
+        if target_id:
+            found = self.goals.get(str(target_id))
+            if found and found.conversation_id == cid:
+                return found, None
+        ref = op.get("target_ref")
+        if ref and ref in created_refs:
+            return created_refs[ref], None
+        hay_parts = [
+            user_text,
+            payload.get("title"),
+            payload.get("domain"),
+            ref,
+        ]
+        hay = " ".join(str(p) for p in hay_parts if p).lower()
+        scored: list[tuple[int, Goal]] = []
+        for goal in open_goals:
+            score = self._goal_match_score(goal, hay)
+            if score > 0:
+                scored.append((score, goal))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if len(scored) == 1 or (len(scored) > 1 and scored[0][0] >= scored[1][0] + 3):
+            return scored[0][1], None
+        if len(scored) > 1:
+            return None, {
+                "status": "needs_clarification",
+                "detail": "Several goals could match that follow-up — which one?",
+                "question": ClarificationQuestion(
+                    id="which-goal",
+                    label="Which goal should I update?",
+                    answer_type="single_choice",
+                    options=[g.title for _, g in scored[:4]],
+                ),
+            }
+        conv_goals = [g for g in open_goals if g.conversation_id == cid] or list(open_goals)
+        if len(conv_goals) == 1:
+            return conv_goals[0], None
+        if current and current.conversation_id == cid and self._looks_like_slot_fill(hay):
+            return current, None
+        if not require:
+            if current and current.conversation_id == cid:
+                return current, None
+            return None, None
+        return None, {
+            "status": "needs_clarification",
+            "detail": "I couldn't tell which goal that refers to.",
+            "question": ClarificationQuestion(
+                id="which-goal",
+                label="Which goal should I update?",
+                answer_type="short_text",
+            ),
+        }
+
+    @staticmethod
+    def _looks_like_slot_fill(hay: str) -> bool:
+        if not hay:
+            return False
+        hints = (
+            "week",
+            "twice",
+            "times",
+            "hour",
+            "deadline",
+            "minute",
+            "v1",
+            "v2",
+            "v3",
+            "v4",
+            "v5",
+            "v6",
+            "v7",
+            "baseline",
+            "frequency",
+        )
+        return any(h in hay for h in hints)
+
+    @staticmethod
+    def _goal_match_score(goal: Goal, hay: str) -> int:
+        if not hay:
+            return 0
+        score = 0
+        title = (goal.title or "").lower()
+        domain = (goal.domain or "").lower()
+        if title and title in hay:
+            score += 6
+        if domain and domain in hay:
+            score += 6
+        tokens = set(re.findall(r"[a-z0-9]+", f"{title} {domain}"))
+        hay_tokens = set(re.findall(r"[a-z0-9]+", hay))
+        for token in tokens:
+            if len(token) < 4:
+                continue
+            if token in hay_tokens or token in hay:
+                score += 2
+            for word in hay_tokens:
+                if token.startswith(word[:4]) or word.startswith(token[:4]):
+                    score += 2
+                    break
+        if "climb" in title or "climb" in domain:
+            if "climb" in hay:
+                score += 4
+        if "read" in title or "read" in domain or "book" in title:
+            if "read" in hay or "book" in hay:
+                score += 4
+        if "save" in title or "saving" in domain or "£" in (goal.title or ""):
+            if "save" in hay or "saving" in hay:
+                score += 4
+        return score
+
     def _apply_operation(
         self,
         cid: str,
         op: dict[str, Any],
         goal: Goal | None,
         touched_goals: list[Goal],
+        *,
+        created_refs: dict[str, Goal],
+        user_text: str,
+        open_goals: list[Goal],
     ) -> dict[str, Any]:
         kind = op["kind"]
-        update: GoalUpdate | None = op.get("goal_update")
-        action: RequestedAction | None = op.get("requested_action")
-        cal_action: CalendarAction | None = op.get("calendar_action")
+        payload = op.get("payload") or {}
+        update = operation_goal_update(op) if kind in {"goal_create", "goal_update", "pause_others"} else None
+        cal_action = operation_calendar_action(op)
 
-        if kind in {"goal_create", "goal_update", "pause_others"} and update is not None:
-            if kind == "goal_create" or goal is None:
-                created = self.goals.create(
-                    cid,
-                    title=update.title or "Untitled goal",
-                    domain=update.domain,
-                    target=update.target,
-                    deadline=update.deadline,
-                    baseline=update.baseline,
-                    frequency=update.frequency,
-                    commitment=update.commitment,
-                    status=update.status or "gathering",
-                    facts=update.facts or {},
-                    pause_others=False,
-                )
-                return {"goal": created, "status": "succeeded", "detail": created.title}
+        if kind == "goal_create" and update is not None:
+            created = self.goals.create(
+                cid,
+                title=update.title or "Untitled goal",
+                domain=update.domain,
+                target=update.target,
+                deadline=update.deadline,
+                baseline=update.baseline,
+                frequency=update.frequency,
+                commitment=update.commitment,
+                status=update.status or "gathering",
+                facts=update.facts or {},
+                pause_others=False,
+            )
+            return {
+                "goal": created,
+                "status": "succeeded",
+                "detail": created.title,
+                "ref": op.get("target_ref"),
+            }
+
+        if kind in {"goal_update", "pause_others"} and update is not None:
+            target, clarify = self._resolve_goal_for_op(
+                cid,
+                op,
+                current=goal,
+                created_refs=created_refs,
+                open_goals=open_goals,
+                user_text=user_text,
+                require=True,
+            )
+            if clarify:
+                return clarify
+            if target is None:
+                return {"status": "needs_clarification", "detail": "Which goal should I update?"}
             if kind == "pause_others":
-                self.goals.pause_others(cid, keep_id=goal.id)
-            updated = self.goals.apply_update(goal, update)
+                self.goals.pause_others(cid, keep_id=target.id)
+            updated = self.goals.apply_update(target, update)
             return {"goal": updated, "status": "succeeded", "detail": updated.title}
 
         if kind == "spark_capture":
-            content = op.get("spark_content")
+            content = payload.get("spark_content") or op.get("spark_content")
             if not content:
                 return {"status": "failed", "detail": "missing spark content"}
             spark = self.sparks.capture(content)
             return {"sparks": [spark], "status": "succeeded", "detail": spark.content}
 
         if kind == "spark_dismiss":
-            spark_id = op.get("spark_id")
+            spark_id = payload.get("spark_id") or op.get("target_id")
             if spark_id:
                 self.sparks.dismiss(spark_id)
             return {"status": "succeeded"}
 
         if kind == "spark_promote":
-            spark_id = op.get("spark_id")
-            if spark_id and goal:
-                self.sparks.promote(spark_id, goal.id)
-            return {"status": "succeeded", "goal": goal}
+            spark_id = payload.get("spark_id") or op.get("target_id")
+            target, _ = self._resolve_goal_for_op(
+                cid, op, current=goal, created_refs=created_refs, open_goals=open_goals, user_text=user_text, require=False
+            )
+            if spark_id and target:
+                self.sparks.promote(spark_id, target.id)
+            return {"status": "succeeded", "goal": target or goal}
 
         if kind == "propose_sessions":
-            targets: list[Goal] = []
-            for item in [*touched_goals, *([goal] if goal else [])]:
-                if item.id not in {g.id for g in targets}:
-                    targets.append(item)
-            proposed: list[SessionOut] = []
-            summary = None
-            reply_text = None
-            last_goal = goal
-            for target in targets:
-                if target.status == "gathering" and not self._goal_has_cadence(target):
-                    continue
-                reply_text, sessions, raw_summary = propose_for_goal(self.calendar, target)
-                self.goals.save(target)
-                proposed.extend(sessions)
-                summary = self._public_proposal_summary(raw_summary)
-                last_goal = target
-            status = "succeeded" if proposed else "skipped"
+            target, clarify = self._resolve_goal_for_op(
+                cid,
+                op,
+                current=goal,
+                created_refs=created_refs,
+                open_goals=[*touched_goals, *open_goals],
+                user_text=user_text,
+                require=False,
+            )
+            if clarify:
+                return clarify
+            if target is None and len(touched_goals) == 1:
+                target = touched_goals[0]
+            if target is None and goal and len(open_goals) <= 1:
+                target = goal
+            if target is None:
+                return {
+                    "status": "needs_clarification",
+                    "detail": "Which goal should I propose sessions for?",
+                    "question": ClarificationQuestion(
+                        id="which-goal",
+                        label="Which goal should I put on the calendar?",
+                        answer_type="short_text",
+                    ),
+                }
+            if target.status == "gathering" and not self._goal_has_cadence(target):
+                return {"goal": target, "status": "skipped", "detail": "no cadence"}
+            _reply_text, sessions, raw_summary = propose_for_goal(self.calendar, target)
+            self.goals.save(target)
+            summary = self._public_proposal_summary(raw_summary)
+            group = None
+            if sessions:
+                batch_id = sessions[0].proposal_batch_id or ""
+                group = ProposalGroup(
+                    goal=target,
+                    proposal_batch_id=batch_id,
+                    summary=summary,
+                    sessions=sessions,
+                )
+            status = "succeeded" if sessions else "skipped"
             return {
-                "goal": last_goal,
-                "proposed": proposed,
+                "goal": target,
+                "proposed": sessions,
+                "proposal_group": group,
                 "proposal_summary": summary,
-                "reply_text": reply_text,
                 "status": status,
-                "detail": f"{len(proposed)} sessions" if proposed else "no cadence",
+                "detail": f"{len(sessions)} sessions" if sessions else "no cadence",
             }
 
-        if kind == "approve_proposals" and goal:
-            batch = (action.batch_id if action else None) or self.calendar.open_proposal_batch(goal.id)
+        if kind == "approve_proposals":
+            batch = payload.get("batch_id") or op.get("target_id")
+            target, _ = self._resolve_goal_for_op(
+                cid, op, current=goal, created_refs=created_refs, open_goals=open_goals, user_text=user_text, require=False
+            )
+            if not batch and target:
+                batch = self.calendar.open_proposal_batch(target.id)
             booked: list[SessionOut] = []
             undo = None
             if batch:
                 booked = self.calendar.approve_batch(batch, conversation_id=cid)
                 undo = batch if booked else None
-            return {"goal": goal, "booked": booked, "undo_batch_id": undo, "status": "succeeded"}
+            return {"goal": target or goal, "booked": booked, "undo_batch_id": undo, "status": "succeeded"}
 
-        if kind == "reject_proposals" and goal:
-            batch = (action.batch_id if action else None) or self.calendar.open_proposal_batch(goal.id)
+        if kind == "reject_proposals":
+            batch = payload.get("batch_id") or op.get("target_id")
+            target, _ = self._resolve_goal_for_op(
+                cid, op, current=goal, created_refs=created_refs, open_goals=open_goals, user_text=user_text, require=False
+            )
+            if not batch and target:
+                batch = self.calendar.open_proposal_batch(target.id)
             if batch:
                 self.calendar.reject_batch(batch)
-            return {"goal": goal, "status": "succeeded"}
+            return {"goal": target or goal, "status": "succeeded"}
 
         if kind == "session_outcome":
-            if action and action.session_id and action.outcome:
-                marked = self.calendar.mark_outcome(action.session_id, action.outcome)
+            session_id = payload.get("session_id") or op.get("target_id")
+            outcome = payload.get("outcome")
+            if session_id and outcome:
+                marked = self.calendar.mark_outcome(session_id, outcome)
                 return {"updated": [marked] if marked else [], "status": "succeeded", "goal": goal}
             if cal_action:
                 deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)

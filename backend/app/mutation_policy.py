@@ -65,11 +65,13 @@ def preview_payload(
     kind: str,
     records: list[dict[str, Any]],
     why: str,
+    match_reason: str | None = None,
 ) -> dict[str, Any]:
     return {
         "kind": kind,
         "count": len(records),
         "records": records,
         "why": why,
+        "match_reason": match_reason,
         "actions": ["approve", "adjust", "cancel"],
     }

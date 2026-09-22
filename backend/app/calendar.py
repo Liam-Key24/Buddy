@@ -1207,6 +1207,42 @@ class CalendarService:
                 errors.append(str(exc))
         return deleted, updated, errors
 
+    def apply_reviewed_action(
+        self,
+        action: CalendarAction,
+        session_ids: list[str],
+    ) -> tuple[list[str], list[SessionOut], list[str]]:
+        """Apply a mutation only to previously reviewed session IDs. Never re-runs selectors."""
+        deleted: list[str] = []
+        updated: list[SessionOut] = []
+        errors: list[str] = []
+        for session_id in session_ids:
+            pinned = action.model_copy(
+                update={
+                    "session_id": session_id,
+                    "title_contains": None,
+                    "date": None,
+                    "goal_id": None,
+                    "all_matching": False,
+                    "statuses": [],
+                }
+            )
+            d, u, e = self.apply_calendar_action(pinned)
+            deleted.extend(d)
+            updated.extend(u)
+            errors.extend(e)
+        return deleted, updated, errors
+
+    def fingerprints_match(self, session: SessionOut, fingerprint: dict[str, Any] | None) -> bool:
+        if not fingerprint:
+            return False
+        return (
+            session.title == fingerprint.get("title")
+            and session.start_at == fingerprint.get("start_at")
+            and session.end_at == fingerprint.get("end_at")
+            and session.status == fingerprint.get("status")
+        )
+
     def delete_session(self, session_id: str) -> bool:
         """Hard-delete a session by id. Returns False if missing."""
         row = self.conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -1242,4 +1278,5 @@ class CalendarService:
             notes=d.get("notes"),
             category_id=category_id,
             category=category,
+            updated_at=d.get("updated_at"),
         )

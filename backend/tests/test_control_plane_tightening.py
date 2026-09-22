@@ -130,6 +130,33 @@ def test_duplicate_request_id_replays_without_double_write(tmp_path: Path):
         plane.close()
 
 
+def test_cancel_closes_only_the_request_client():
+    shared = httpx.Client()
+    provider = GroqProvider(_settings(), client=shared)
+    plane = ControlPlane(ai=provider)
+    plane._ai_owned = False
+    dedicated = httpx.Client()
+    try:
+        plane._active_requests["r1"] = {
+            "cancelled": False,
+            "http_client": dedicated,
+            "owns_http_client": True,
+        }
+        plane.cancel_request("r1")
+        assert dedicated.is_closed
+        assert not shared.is_closed
+        plane._active_requests["r2"] = {
+            "cancelled": False,
+            "http_client": shared,
+            "owns_http_client": False,
+        }
+        plane.cancel_request("r2")
+        assert not shared.is_closed
+    finally:
+        shared.close()
+        plane.close()
+
+
 def test_groq_does_not_retry_ordinary_4xx():
     posts = {"n": 0}
 

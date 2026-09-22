@@ -49,17 +49,28 @@ class GroqProvider:
             self._client.close()
             self._client = None
 
+    def _client_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.groq_api_key}",
+            "Content-Type": "application/json",
+        }
+
     def _http(self) -> httpx.Client:
         if self._client is None:
             self._client = httpx.Client(
                 base_url=self.settings.groq_base_url,
                 timeout=self.settings.request_timeout_s,
-                headers={
-                    "Authorization": f"Bearer {self.settings.groq_api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=self._client_headers(),
             )
         return self._client
+
+    def open_request_client(self) -> httpx.Client:
+        """Dedicated client for one cancellable request. Caller must close it."""
+        return httpx.Client(
+            base_url=self.settings.groq_base_url,
+            timeout=self.settings.request_timeout_s,
+            headers=self._client_headers(),
+        )
 
     def validate_model(self) -> None:
         """Confirm GROQ_MODEL exists. Never silently switches models."""
@@ -93,6 +104,7 @@ class GroqProvider:
         *,
         allow_retry: bool = True,
         cancel_check=None,
+        http_client: httpx.Client | None = None,
     ) -> dict[str, Any]:
         """One physical Groq POST. HTTP/transport errors are not retried here."""
         del allow_retry
@@ -111,17 +123,25 @@ class GroqProvider:
                 {"role": "user", "content": user},
             ],
         }
-        return self._request_json(payload, retried=False, cancel_check=cancel_check)
+        return self._request_json(
+            payload, retried=False, cancel_check=cancel_check, http_client=http_client
+        )
 
     def _request_json(
-        self, payload: dict[str, Any], *, retried: bool, cancel_check=None
+        self,
+        payload: dict[str, Any],
+        *,
+        retried: bool,
+        cancel_check=None,
+        http_client: httpx.Client | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         status: int | None = None
+        client = http_client or self._http()
         try:
             if cancel_check and cancel_check():
                 raise GroqError("cancelled", "Stopped")
-            resp = self._http().post("/chat/completions", json=payload)
+            resp = client.post("/chat/completions", json=payload)
             status = resp.status_code
             if status == 429:
                 raise GroqError("rate_limit", "Cloud AI is rate-limited right now")

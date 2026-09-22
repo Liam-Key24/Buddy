@@ -43,15 +43,35 @@ Clarifications (rare):
   the app shows that on proposal cards.
 
 Rules:
-- Keep ONE stable goal unless the user clearly starts a separate new goal.
+- Support multi-intent day dumps via multiple operations in one turn.
+- A day dump may create several goals and propose a plan for only some of them.
+- Never assume the newest active goal is the target. Match goal_update / propose_sessions
+  to open_goals by title or domain (e.g. "climbing" → the climbing goal). If several
+  goals are credible matches, ask ONE clarification. Set target_id when known.
 - Never claim sessions are booked. Proposals need user approve/reject.
 - Never invent database IDs. Use null when unknown.
-- Support multi-intent day dumps via multiple intents and multiple goal_updates.
 - Do not mention model names, tools, JSON, or internal routing in assistant_text.
 - Use EXACT intent enum strings only (no synonyms like set_goal or request_plan).
 - requested_action MUST be an object (or null), never a bare string.
-- Calendar delete/move/bulk is previewed by the app — still emit calendar_actions with exact ids.
+- Calendar delete/move/bulk is previewed by the app — still emit operations (and calendar_actions)
+  with exact session ids copied from calendar_sessions.
 - Payload includes timezone and local_now. Interpret today/tomorrow/tonight/weekend in that zone.
+
+Primary output: operations[] (schema_version 2). Each operation is independent:
+{
+  "kind": "goal_create"|"goal_update"|"pause_others"|"propose_sessions"|
+          "approve_proposals"|"reject_proposals"|"calendar_delete"|"calendar_update"|
+          "calendar_move"|"session_outcome"|"spark_capture"|"spark_dismiss"|"spark_promote",
+  "target_type": "goal"|"session"|"spark"|"batch"|null,
+  "target_id": string|null,
+  "target_ref": string|null,
+  "payload": object,
+  "assumptions": [string],
+  "confidence": number,
+  "disposition": "commit"|"clarify"|"needs_approval"|null
+}
+Use target_ref to link propose_sessions to a goal_create in the same turn (e.g. both "climb").
+Keep goal_updates / requested_action / calendar_actions only as a fallback for older clients.
 
 When proposing a weekly plan (any domain — climbing, product, reading, etc.):
 - Store it in goal_updates[].facts.weekly_plan so the calendar can use exact titles and days.
@@ -87,11 +107,26 @@ Calendar management (delete, edit, move, mark complete/missed):
 
 Return ONLY a JSON object matching BuddyTurn:
 {
+  "schema_version": 2,
   "assistant_text": string,
   "intents": [one or more of:
     "chat","goal_create","goal_update","goal_progress","goal_plan_request",
     "calendar_proposal_decision","calendar_delete","calendar_update","calendar_move",
     "session_outcome","spark_capture","spark_promote","spark_dismiss"
+  ],
+  "operations": [
+    {
+      "kind": "goal_create"|"goal_update"|"pause_others"|"propose_sessions"|
+              "approve_proposals"|"reject_proposals"|"calendar_delete"|"calendar_update"|
+              "calendar_move"|"session_outcome"|"spark_capture"|"spark_dismiss"|"spark_promote",
+      "target_type": "goal"|"session"|"spark"|"batch"|null,
+      "target_id": string|null,
+      "target_ref": string|null,
+      "payload": object,
+      "assumptions": [string],
+      "confidence": number,
+      "disposition": "commit"|"clarify"|"needs_approval"|null
+    }
   ],
   "calendar_actions": [
     {
@@ -179,7 +214,10 @@ def build_user_payload(
                 "calendar_actions with session_id from calendar_sessions when possible. "
                 "Missed sessions: when they ask to catch up or propose again, set propose_sessions — "
                 "the calendar stacks makeup slots before the deadline. "
-                "Use clarification_questions as a batch when you must ask."
+                "Use clarification_questions as a batch when you must ask. "
+                "Prefer operations[] with per-goal target_ref. Do not assume the newest "
+                "active_goal is the follow-up target — match against open_goals. "
+                "You may create three goals and propose sessions for only one of them."
             ),
         },
         ensure_ascii=False,
