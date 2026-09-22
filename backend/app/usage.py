@@ -86,8 +86,18 @@ class UsageStore:
         last_reset = None
         for r in rows:
             d = dict(r)
-            # Count real outbound attempts (including retries and cancelled)
-            if d.get("status") in {"ok", "error", "cancelled", "rate_limited", "malformed"}:
+            # Count every recorded Cloud AI attempt today (incl. retries / failures).
+            if d.get("status") in {
+                "ok",
+                "error",
+                "cancelled",
+                "rate_limited",
+                "malformed",
+                "transport",
+                "auth",
+                "http",
+                "config",
+            }:
                 used += 1
             if d.get("rate_limit") is not None:
                 last_limit = d["rate_limit"]
@@ -95,14 +105,17 @@ class UsageStore:
                 last_remaining = d["rate_remaining"]
             if d.get("rate_reset"):
                 last_reset = d["rate_reset"]
-        limit = last_limit if last_limit is not None else 1000
-        remaining = last_remaining if last_remaining is not None else max(0, limit - used)
-        source = "groq_headers" if last_limit is not None else "local_attempts"
+        # Buddy's meter is local attempts. Groq header remaining is a rolling window and
+        # must not replace the local used count (that made "12 attempts" show as "1 / 1000").
+        limit = 1000
+        remaining = max(0, limit - used)
         return {
-            "used": used if last_remaining is None else max(0, limit - remaining),
+            "used": used,
             "limit": limit,
             "remaining": remaining,
             "reset": last_reset,
-            "source": source,
-            "label": f"Cloud requests {used if last_remaining is None else max(0, limit - remaining)} / {limit} today",
+            "source": "local_attempts",
+            "label": f"Cloud requests {used} / {limit} today",
+            "groq_limit": last_limit,
+            "groq_remaining": last_remaining,
         }

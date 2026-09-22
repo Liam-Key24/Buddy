@@ -11,10 +11,12 @@ from pydantic import BaseModel, Field
 from .config import load_settings
 from .control_plane import ControlPlane
 from .schemas import (
+    ChatCancelRequest,
     ChatRequest,
     ChatResponse,
     OutcomeRequest,
     ProposalDecision,
+    SessionUpdate,
     SparkCreate,
     SparkPromote,
     TodayResponse,
@@ -59,7 +61,16 @@ def health():
 def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message required")
-    return plane.handle_message(req.message, req.conversation_id)
+    return plane.handle_message(
+        req.message, req.conversation_id, request_id=req.request_id
+    )
+
+
+@app.post("/chat/cancel")
+def chat_cancel(body: ChatCancelRequest):
+    if not body.request_id.strip():
+        raise HTTPException(status_code=400, detail="request_id required")
+    return plane.cancel_request(body.request_id.strip())
 
 
 @app.get("/today", response_model=TodayResponse)
@@ -75,6 +86,57 @@ def calendar_sessions(start: str | None = None, end: str | None = None):
 @app.get("/calendar/fixed")
 def calendar_fixed():
     return plane.calendar.list_fixed_blocks()
+
+
+class FixedBlockCreate(BaseModel):
+    title: str
+    weekday: int
+    start_minute: int
+    end_minute: int
+
+
+class FixedBlockUpdate(BaseModel):
+    title: str | None = None
+    weekday: int | None = None
+    start_minute: int | None = None
+    end_minute: int | None = None
+
+
+@app.post("/calendar/fixed")
+def create_fixed(body: FixedBlockCreate):
+    try:
+        return plane.calendar.create_fixed_block(
+            title=body.title,
+            weekday=body.weekday,
+            start_minute=body.start_minute,
+            end_minute=body.end_minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/calendar/fixed/{block_id}")
+def update_fixed(block_id: str, body: FixedBlockUpdate):
+    try:
+        updated = plane.calendar.update_fixed_block(
+            block_id,
+            title=body.title,
+            weekday=body.weekday,
+            start_minute=body.start_minute,
+            end_minute=body.end_minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Fixed block not found")
+    return updated
+
+
+@app.delete("/calendar/fixed/{block_id}")
+def delete_fixed(block_id: str):
+    if not plane.calendar.delete_fixed_block(block_id):
+        raise HTTPException(status_code=404, detail="Fixed block not found")
+    return {"ok": True}
 
 
 @app.post("/calendar/proposals/decide")
@@ -117,6 +179,18 @@ def delete_session(session_id: str):
     if not plane.calendar.delete_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True}
+
+
+@app.patch("/calendar/sessions/{session_id}")
+def update_session(session_id: str, body: SessionUpdate):
+    try:
+        data = body.model_dump(exclude_unset=True)
+        updated = plane.calendar.update_session(session_id, **data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return updated
 
 
 class CategoryCreate(BaseModel):
@@ -209,7 +283,21 @@ def dismiss_spark(spark_id: str):
     return spark
 
 
-class ConversationRename(BaseModel):
+class ConversationPatch(BaseModel):
+    title: str | None = None
+    folder_id: str | None = None
+
+
+class ConversationPlace(BaseModel):
+    folder_id: str | None = None
+    before_id: str | None = None
+
+
+class FolderCreate(BaseModel):
+    title: str
+
+
+class FolderRename(BaseModel):
     title: str
 
 
@@ -228,10 +316,54 @@ def create_conversation():
 
 
 @app.patch("/conversations/{conversation_id}")
-def rename_conversation(conversation_id: str, body: ConversationRename):
-    row = plane.rename_conversation(conversation_id, body.title)
+def patch_conversation(conversation_id: str, body: ConversationPatch):
+    row = None
+    if body.title is not None:
+        row = plane.rename_conversation(conversation_id, body.title)
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+    if "folder_id" in body.model_fields_set:
+        row = plane.move_conversation(conversation_id, body.folder_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation or folder not found")
+    if row is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    return row
+
+
+@app.post("/conversations/{conversation_id}/place")
+def place_conversation(conversation_id: str, body: ConversationPlace):
+    row = plane.place_conversation(conversation_id, body.folder_id, body.before_id)
     if not row:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Conversation or folder not found")
+    return row
+
+
+@app.get("/folders")
+def list_folders():
+    return plane.list_folders()
+
+
+@app.post("/folders")
+def create_folder(body: FolderCreate):
+    if not body.title.strip():
+        raise HTTPException(status_code=400, detail="Title required")
+    return plane.create_folder(body.title)
+
+
+@app.patch("/folders/{folder_id}")
+def rename_folder(folder_id: str, body: FolderRename):
+    row = plane.rename_folder(folder_id, body.title)
+    if not row:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return row
+
+
+@app.delete("/folders/{folder_id}")
+def delete_folder(folder_id: str):
+    row = plane.delete_folder(folder_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Folder not found")
     return row
 
 
@@ -262,6 +394,11 @@ def save_draft(conversation_id: str, body: DraftBody):
 @app.get("/conversations/{conversation_id}/messages")
 def messages(conversation_id: str):
     return plane.list_messages(conversation_id)
+
+
+@app.get("/conversations/{conversation_id}/open-proposal")
+def open_proposal(conversation_id: str):
+    return plane.get_open_proposal(conversation_id)
 
 
 @app.get("/ai/usage")

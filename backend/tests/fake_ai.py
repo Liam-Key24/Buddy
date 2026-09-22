@@ -24,6 +24,55 @@ class FakeGroq:
         active = payload.get("active_goal")
         lower = message.lower()
 
+        # One-off / single event at a clock time
+        if "single event" in lower or (
+            ("8 pm" in lower or "8pm" in lower) and ("today" in lower or "once" in lower)
+        ):
+            from datetime import date as _date
+
+            today = _date.today().isoformat()
+            wd = _date.today().weekday()
+            hour = 20
+            m = re.search(r"\b(\d{1,2})\s*(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b", lower)
+            if m:
+                hour = int(m.group(1)) % 12
+                if "p" in (m.group(3) or ""):
+                    hour += 12
+            title = "Pick my nose" if "nose" in lower else "One-off"
+            return {
+                "assistant_text": f"One session today at {hour:02d}:00.",
+                "intents": ["goal_create", "goal_plan_request"],
+                "goal_updates": [
+                    {
+                        "action": "create",
+                        "title": title,
+                        "frequency": "once",
+                        "status": "ready_to_plan",
+                        "facts": {
+                            "weekly_plan": {
+                                "repeat": "once",
+                                "on_date": today,
+                                "pattern_summary": f"{hour:02d}:00",
+                                "prefer_after_hour": hour,
+                                "window_end_hour": min(23, hour + 1),
+                                "slots": [
+                                    {
+                                        "weekday": wd,
+                                        "title": title,
+                                        "start_hour": hour,
+                                        "start_minute": 0,
+                                        "duration_minutes": 15,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ],
+                "clarification": None,
+                "requested_action": {"type": "propose_sessions"},
+                "confidence": 0.95,
+            }
+
         # Day dump / spark
         if "spark:" in lower or lower.startswith("idea:"):
             content = re.sub(r"^(spark:|idea:)\s*", "", message, flags=re.I).strip()
@@ -230,6 +279,86 @@ class FakeGroq:
                     "requested_action": {"type": "none"},
                     "confidence": 0.91,
                 }
+
+        calendar_sessions = payload.get("calendar_sessions") or []
+
+        if "delete" in lower and calendar_sessions:
+            if "all proposed" in lower or "proposed sessions" in lower:
+                return {
+                    "assistant_text": "Removed the proposed sessions from your calendar.",
+                    "intents": ["calendar_delete"],
+                    "goal_updates": [],
+                    "calendar_actions": [
+                        {
+                            "op": "delete",
+                            "statuses": ["proposed"],
+                            "all_matching": True,
+                        }
+                    ],
+                    "requested_action": {"type": "none"},
+                    "confidence": 0.92,
+                }
+            target = calendar_sessions[0]
+            return {
+                "assistant_text": f"Removed {target['title']} from your calendar.",
+                "intents": ["calendar_delete"],
+                "goal_updates": [],
+                "calendar_actions": [{"op": "delete", "session_id": target["id"]}],
+                "requested_action": {"type": "none"},
+                "confidence": 0.92,
+            }
+
+        if "rename" in lower and calendar_sessions:
+            target = calendar_sessions[0]
+            new_title = "Updated climb session"
+            if "to " in lower:
+                new_title = lower.split("to ", 1)[1].strip().title() or new_title
+            return {
+                "assistant_text": f"Renamed {target['title']} to {new_title}.",
+                "intents": ["calendar_update"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {
+                        "op": "update",
+                        "session_id": target["id"],
+                        "new_title": new_title,
+                    }
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
+
+        if ("move" in lower or "reschedule" in lower) and calendar_sessions:
+            target = calendar_sessions[0]
+            return {
+                "assistant_text": f"Moved {target['title']} to Friday at 6pm.",
+                "intents": ["calendar_move"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {
+                        "op": "move",
+                        "session_id": target["id"],
+                        "new_start_at": "2026-12-05T18:00:00+00:00",
+                        "new_end_at": "2026-12-05T19:30:00+00:00",
+                    }
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
+
+        if ("completed" in lower or "missed" in lower) and calendar_sessions:
+            target = calendar_sessions[0]
+            outcome = "missed" if "missed" in lower else "completed"
+            return {
+                "assistant_text": f"Marked {target['title']} as {outcome}.",
+                "intents": ["session_outcome"],
+                "goal_updates": [],
+                "calendar_actions": [
+                    {"op": "mark_outcome", "session_id": target["id"], "outcome": outcome}
+                ],
+                "requested_action": {"type": "none"},
+                "confidence": 0.9,
+            }
 
         # Plan request
         if any(

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -166,5 +166,71 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 3)
         version = 3
+
+    if version < 4:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_folders (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if not _column_exists(conn, "conversations", "folder_id"):
+            conn.execute("ALTER TABLE conversations ADD COLUMN folder_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_folder ON conversations(folder_id)"
+        )
+        conn.commit()
+        set_schema_version(conn, 4)
+        version = 4
+
+    if version < 5:
+        if not _column_exists(conn, "conversations", "sort_order"):
+            conn.execute(
+                "ALTER TABLE conversations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            )
+        rows = conn.execute(
+            """
+            SELECT id FROM conversations
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        for i, r in enumerate(rows):
+            cid = r["id"] if isinstance(r, sqlite3.Row) else r[0]
+            conn.execute("UPDATE conversations SET sort_order=? WHERE id=?", (i, cid))
+        conn.commit()
+        set_schema_version(conn, 5)
+        version = 5
+
+    if version < 6:
+        # Remove used to archive as status='done'. Those rows are leftover deletes,
+        # not genuine completions. Hard-delete them (and related records) once.
+        now = datetime.now(timezone.utc).isoformat()
+        ids = [
+            r["id"] if isinstance(r, sqlite3.Row) else r[0]
+            for r in conn.execute("SELECT id FROM goals WHERE status='done'").fetchall()
+        ]
+        for goal_id in ids:
+            conn.execute("DELETE FROM sessions WHERE goal_id=?", (goal_id,))
+            conn.execute("DELETE FROM approval_events WHERE goal_id=?", (goal_id,))
+            conn.execute(
+                """
+                UPDATE sparks
+                SET promoted_goal_id=NULL,
+                    status=CASE WHEN status='promoted' THEN 'open' ELSE status END,
+                    updated_at=?
+                WHERE promoted_goal_id=?
+                """,
+                (now, goal_id),
+            )
+            conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+        conn.commit()
+        set_schema_version(conn, 6)
+        version = 6
 
     return version

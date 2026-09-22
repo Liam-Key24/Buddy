@@ -50,45 +50,58 @@ class GoalStore:
         return [self._row(r) for r in rows]
 
     def list_managed(self) -> list[Goal]:
-        """Open + paused goals for the Goals page (excludes done)."""
+        """Open + paused + completed goals for the Goals page.
+
+        Removed goals are hard-deleted (`remove`), so they never appear here.
+        Goals from soft-deleted chats are hidden unless the goal is completed (`done`).
+        """
         rows = self.conn.execute(
             """
-            SELECT * FROM goals
-            WHERE status IN (
-              'gathering', 'ready_to_plan', 'planned', 'active', 'paused'
+            SELECT g.* FROM goals g
+            LEFT JOIN conversations c ON c.id = g.conversation_id
+            WHERE g.status IN (
+              'gathering', 'ready_to_plan', 'planned', 'active', 'paused', 'done'
             )
+              AND (g.status = 'done' OR c.deleted_at IS NULL)
             ORDER BY
-              CASE status
+              CASE g.status
                 WHEN 'active' THEN 0
                 WHEN 'planned' THEN 1
                 WHEN 'ready_to_plan' THEN 2
                 WHEN 'gathering' THEN 3
-                ELSE 4
+                WHEN 'paused' THEN 4
+                WHEN 'done' THEN 5
+                ELSE 6
               END,
-              updated_at DESC
+              g.updated_at DESC
             """
         ).fetchall()
         return [self._row(r) for r in rows]
 
     def remove(self, goal_id: str) -> Goal | None:
-        """Archive a goal as done and drop open proposals for it."""
+        """Hard-delete a goal and every record that references it."""
         goal = self.get(goal_id)
         if not goal:
             return None
         now = _now()
-        self.conn.execute(
-            "UPDATE goals SET status='done', updated_at=? WHERE id=?",
-            (now, goal_id),
-        )
+        # Sessions: remove all statuses so the calendar is clean.
+        self.conn.execute("DELETE FROM sessions WHERE goal_id=?", (goal_id,))
+        # Approval undo history for this goal.
+        self.conn.execute("DELETE FROM approval_events WHERE goal_id=?", (goal_id,))
+        # Sparks that pointed at this goal — clear link and reopen if still promoted.
         self.conn.execute(
             """
-            UPDATE sessions SET status='rejected', updated_at=?
-            WHERE goal_id=? AND status='proposed'
+            UPDATE sparks
+            SET promoted_goal_id=NULL,
+                status=CASE WHEN status='promoted' THEN 'open' ELSE status END,
+                updated_at=?
+            WHERE promoted_goal_id=?
             """,
             (now, goal_id),
         )
+        self.conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
         self.conn.commit()
-        return self.get(goal_id)
+        return goal
 
     def pause_others(self, conversation_id: str, keep_id: str | None = None) -> None:
         now = _now()
@@ -111,6 +124,10 @@ class GoalStore:
                 (now, conversation_id),
             )
         self.conn.commit()
+
+    def pause_for_conversation(self, conversation_id: str) -> None:
+        """Pause every open goal tied to a conversation (e.g. chat soft-deleted)."""
+        self.pause_others(conversation_id, keep_id=None)
 
     def create(
         self,
@@ -180,11 +197,13 @@ class GoalStore:
             merged = dict(goal.facts or {})
             merged.update(update.facts)
             goal.facts = merged
-        # Promote readiness when cadence exists
-        if goal.frequency and goal.status == "gathering":
-            goal.status = "ready_to_plan"
-        if goal.commitment and goal.status == "gathering":
-            goal.status = "ready_to_plan"
+        # Promote readiness when cadence or a concrete weekly plan exists
+        if goal.status == "gathering":
+            facts = goal.facts or {}
+            plan = facts.get("weekly_plan") if isinstance(facts, dict) else None
+            has_plan = isinstance(plan, dict) and bool(plan.get("slots"))
+            if goal.frequency or goal.commitment or has_plan:
+                goal.status = "ready_to_plan"
         self.save(goal)
         return goal
 
@@ -231,6 +250,8 @@ class GoalStore:
             commitment=d.get("commitment"),
             status=d.get("status") or "gathering",
             facts=facts if isinstance(facts, dict) else {},
+            created_at=d.get("created_at"),
+            updated_at=d.get("updated_at"),
         )
 
 

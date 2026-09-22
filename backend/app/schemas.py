@@ -17,11 +17,16 @@ Intent = Literal[
     "goal_progress",
     "goal_plan_request",
     "calendar_proposal_decision",
+    "calendar_delete",
+    "calendar_update",
+    "calendar_move",
     "session_outcome",
     "spark_capture",
     "spark_promote",
     "spark_dismiss",
 ]
+
+CalendarOp = Literal["delete", "update", "move", "mark_outcome"]
 
 AnswerType = Literal[
     "short_text",
@@ -57,6 +62,18 @@ class Goal(BaseModel):
     commitment: str | None = None
     status: GoalStatus = "gathering"
     facts: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class GoalPublic(Goal):
+    """Goal plus session stats for the Goals page and detail panel."""
+
+    events_total: int = 0
+    events_completed: int = 0
+    events_missed: int = 0
+    started_at: str | None = None
+    ended_at: str | None = None
 
 
 class Message(BaseModel):
@@ -110,6 +127,23 @@ class GoalUpdate(BaseModel):
     facts: dict[str, Any] = Field(default_factory=dict)
 
 
+class CalendarAction(BaseModel):
+    """One calendar mutation requested from Chat."""
+
+    op: CalendarOp
+    session_id: str | None = None
+    title_contains: str | None = None
+    date: str | None = None  # YYYY-MM-DD
+    goal_id: str | None = None
+    statuses: list[str] = Field(default_factory=list)  # empty = any status
+    all_matching: bool = False
+    new_title: str | None = None
+    new_start_at: str | None = None
+    new_end_at: str | None = None
+    outcome: Literal["completed", "missed"] | None = None
+    notes: str | None = None
+
+
 class RequestedAction(BaseModel):
     type: Literal[
         "propose_sessions",
@@ -133,12 +167,18 @@ class BuddyTurn(BaseModel):
     clarification: str | None = None
     clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
     requested_action: RequestedAction | None = None
+    calendar_actions: list[CalendarAction] = Field(default_factory=list)
     confidence: float = 0.5
 
 
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    request_id: str | None = None
+
+
+class ChatCancelRequest(BaseModel):
+    request_id: str
 
 
 class ChatResponse(BaseModel):
@@ -156,12 +196,32 @@ class ChatResponse(BaseModel):
     activity: list[dict[str, Any]] = Field(default_factory=list)
     undo_batch_id: str | None = None
     request_id: str | None = None
+    deleted_session_ids: list[str] = Field(default_factory=list)
+    updated_sessions: list[SessionOut] = Field(default_factory=list)
+
+
+class SessionUpdate(BaseModel):
+    title: str | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    category_id: str | None = None
+
+
+class TodayNeed(BaseModel):
+    id: str
+    kind: Literal["gathering", "approve"]
+    title: str
+    detail: str | None = None
+    goal_id: str
+    conversation_id: str
+    proposal_batch_id: str | None = None
 
 
 class TodayResponse(BaseModel):
     goals: list[Goal]
     attention: list[str]
     pending_questions: list[str]
+    needs: list[TodayNeed] = Field(default_factory=list)
     todays_sessions: list[SessionOut] = Field(default_factory=list)
     progress: list[dict[str, Any]] = Field(default_factory=list)
     resurfaced_spark: Spark | None = None

@@ -80,11 +80,12 @@ def test_weekly_plan_proposes_titled_sessions_through_deadline(tmp_path: Path):
         # Through December, not only 4 weeks of Mon/Tue clones
         last = max(datetime.fromisoformat(s.start_at) for s in sessions)
         assert last.month >= 11 or last.year > datetime.now().year
-        # First week has 4 distinct session kinds
+        # Distinct session kinds across the plan (first ISO week may be partial)
+        assert len(titles) == 4
         sample = summary["sample"]
-        assert len(sample) == 4
+        assert sample
         sample_titles = [s.title for s in sample]
-        assert len(set(sample_titles)) == 4
+        assert len(set(sample_titles)) == len(sample_titles)
         assert "Weekly pattern" in text or "pattern" in text.lower()
         # No Wednesday sessions
         assert all(datetime.fromisoformat(s.start_at).weekday() != 2 for s in sessions)
@@ -98,3 +99,75 @@ def test_frequency_parses_ranges():
     assert frequency_to_weekly_count("3-4") == 4
     assert frequency_to_weekly_count("4 per week") == 4
     assert frequency_to_weekly_count("twice a week") == 2
+    assert frequency_to_weekly_count("8 pm") == 1
+    assert frequency_to_weekly_count("8pm") == 1
+    assert frequency_to_weekly_count("at 8pm") == 1
+    assert frequency_to_weekly_count("3 per week at 8pm") == 3
+    assert frequency_to_weekly_count("once") == 1
+    assert frequency_to_weekly_count("single event") == 1
+    assert frequency_to_weekly_count("once a week") == 1
+
+
+def test_one_off_8pm_is_a_single_session(tmp_path: Path):
+    from datetime import timedelta
+
+    plane = ControlPlane(db_path=tmp_path / "oneoff.db", ai=None)
+    try:
+        cid = plane._ensure_conversation(None)
+        stores = GoalStore(plane.conn)
+        on_date = (datetime.now().date() + timedelta(days=1)).isoformat()
+        goal = stores.create(
+            cid,
+            title="Pick my nose",
+            frequency="once",
+            status="ready_to_plan",
+            facts={
+                "weekly_plan": {
+                    "repeat": "once",
+                    "on_date": on_date,
+                    "pattern_summary": "Tue 20:00",
+                    "prefer_after_hour": 20,
+                    "window_end_hour": 21,
+                    "slots": [
+                        {
+                            "weekday": 1,
+                            "title": "Pick my nose",
+                            "start_hour": 20,
+                            "start_minute": 0,
+                            "duration_minutes": 15,
+                        }
+                    ],
+                }
+            },
+        )
+        from app.planning import propose_for_goal
+
+        text, sessions, summary = propose_for_goal(plane.calendar, goal)
+        assert len(sessions) == 1
+        assert summary["total"] == 1
+        start = datetime.fromisoformat(sessions[0].start_at)
+        assert start.hour == 20
+        assert start.date().isoformat() == on_date
+        assert "8 sessions" not in text.lower()
+        assert "weekly pattern" not in text.lower()
+        assert "one session" in text.lower()
+    finally:
+        plane.close()
+
+
+def test_chat_8pm_single_event_is_one_session(tmp_path: Path):
+    from tests.fake_ai import FakeGroq
+
+    plane = ControlPlane(db_path=tmp_path / "chat-oneoff.db", ai=FakeGroq())
+    try:
+        result = plane.handle_message(
+            "goal today to pick my nose at 8 pm today single event"
+        )
+        proposed = result.proposed_sessions or []
+        assert len(proposed) == 1
+        start = datetime.fromisoformat(proposed[0].start_at)
+        assert start.hour == 20
+        assert "weekly pattern" not in (result.reply or "").lower()
+        assert "8 sessions" not in (result.reply or "").lower()
+    finally:
+        plane.close()

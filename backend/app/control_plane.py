@@ -16,18 +16,21 @@ from .config import Settings, load_settings
 from .db import get_connection, init_db
 from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
-from .planning import propose_for_goal
+from .planning import propose_for_goal, summarize_proposal
 from .conversations import ConversationStore
+from .folders import FolderStore
 from .usage import UsageStore
 from .schemas import (
     BuddyTurn,
     ChatResponse,
     ClarificationQuestion,
     Goal,
+    GoalPublic,
     GoalUpdate,
     RequestedAction,
     SessionOut,
     Spark,
+    TodayNeed,
     TodayResponse,
 )
 from .sparks import SparkService
@@ -68,6 +71,7 @@ class ControlPlane:
         self.calendar = CalendarService(self.conn, categories=self.categories)
         self.sparks = SparkService(self.conn)
         self.conversations = ConversationStore(self.conn)
+        self.folders = FolderStore(self.conn)
         self.usage = UsageStore(self.conn)
         self._ai = ai
         self._ai_owned = ai is None
@@ -109,8 +113,41 @@ class ControlPlane:
     def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any] | None:
         return self.conversations.rename(conversation_id, title)
 
+    def move_conversation(
+        self, conversation_id: str, folder_id: str | None
+    ) -> dict[str, Any] | None:
+        if folder_id and not self.folders.get(folder_id):
+            return None
+        return self.conversations.move(conversation_id, folder_id)
+
+    def place_conversation(
+        self,
+        conversation_id: str,
+        folder_id: str | None,
+        before_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if folder_id and not self.folders.get(folder_id):
+            return None
+        return self.conversations.place(conversation_id, folder_id, before_id)
+
+    def list_folders(self) -> list[dict[str, Any]]:
+        return self.folders.list()
+
+    def create_folder(self, title: str) -> dict[str, Any]:
+        return self.folders.create(title)
+
+    def rename_folder(self, folder_id: str, title: str) -> dict[str, Any] | None:
+        return self.folders.rename(folder_id, title)
+
+    def delete_folder(self, folder_id: str) -> dict[str, Any] | None:
+        return self.folders.delete(folder_id)
+
     def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
-        return self.conversations.soft_delete(conversation_id)
+        row = self.conversations.soft_delete(conversation_id)
+        if row:
+            # Soft-deleted chats should not keep driving Today Needs you / open goals.
+            self.goals.pause_for_conversation(conversation_id)
+        return row
 
     def restore_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         return self.conversations.restore(conversation_id)
@@ -149,11 +186,30 @@ class ControlPlane:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_goal(self, goal_id: str) -> Goal | None:
-        return self.goals.get(goal_id)
+    def get_goal(self, goal_id: str) -> GoalPublic | None:
+        goal = self.goals.get(goal_id)
+        return self._goal_public(goal) if goal else None
 
-    def list_goals(self) -> list[Goal]:
-        return self.goals.list_managed()
+    def list_goals(self) -> list[GoalPublic]:
+        return [self._goal_public(g) for g in self.goals.list_managed()]
+
+    def _goal_public(self, goal: Goal) -> GoalPublic:
+        counts = self.calendar.progress_for_goal(goal.id)
+        span = self.calendar.span_for_goal(goal.id)
+        completed = counts.get("completed", 0)
+        missed = counts.get("missed", 0)
+        started = span.get("started_at") or goal.created_at
+        ended = span.get("ended_at")
+        if not ended:
+            ended = goal.updated_at if goal.status == "done" else goal.deadline
+        return GoalPublic(
+            **goal.model_dump(),
+            events_total=completed + missed,
+            events_completed=completed,
+            events_missed=missed,
+            started_at=started,
+            ended_at=ended,
+        )
 
     def remove_goal(self, goal_id: str) -> Goal | None:
         return self.goals.remove(goal_id)
@@ -177,10 +233,63 @@ class ControlPlane:
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None):
         return self.calendar.mark_outcome(session_id, outcome, notes)
 
+    # --- chat cancel ---
+
+    def cancel_request(self, request_id: str) -> dict[str, Any]:
+        entry = self._active_requests.get(request_id)
+        if entry is not None:
+            entry["cancelled"] = True
+        self.usage.mark_cancelled(request_id)
+        return {"ok": True, "request_id": request_id, "found": entry is not None}
+
+    def _is_cancelled(self, request_id: str | None) -> bool:
+        if not request_id:
+            return False
+        entry = self._active_requests.get(request_id)
+        return bool(entry and entry.get("cancelled"))
+
+    def get_open_proposal(self, conversation_id: str) -> dict[str, Any]:
+        """Rebuild proposal card state for a conversation from persisted proposed sessions."""
+        goal = self.goals.active_for_conversation(conversation_id)
+        if not goal:
+            return {"goal": None, "proposed_sessions": [], "proposal_summary": None}
+        batch_id = self.calendar.open_proposal_batch(goal.id)
+        if not batch_id:
+            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None}
+        sessions = self.calendar.list_proposed_for_batch(batch_id)
+        if not sessions:
+            return {"goal": goal, "proposed_sessions": [], "proposal_summary": None}
+        summary = summarize_proposal(goal, sessions)
+        return {
+            "goal": goal,
+            "proposed_sessions": sessions,
+            "proposal_summary": summary,
+        }
+
     # --- chat entry ---
 
-    def handle_message(self, message: str, conversation_id: str | None = None) -> ChatResponse:
+    def handle_message(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+        *,
+        request_id: str | None = None,
+    ) -> ChatResponse:
         text = message.strip()
+        rid = request_id or str(uuid.uuid4())
+        self._active_requests[rid] = {"cancelled": False}
+        try:
+            return self._handle_message_inner(text, conversation_id, request_id=rid)
+        finally:
+            self._active_requests.pop(rid, None)
+
+    def _handle_message_inner(
+        self,
+        text: str,
+        conversation_id: str | None,
+        *,
+        request_id: str,
+    ) -> ChatResponse:
         cid = self._ensure_conversation(conversation_id)
         self._add_message(cid, "user", text)
         self.conversations.touch_title_from_first_user_message(cid, text)
@@ -204,6 +313,7 @@ class ControlPlane:
                     booked_sessions=booked,
                     ai_available=True,
                     undo_batch_id=batch_id if booked else None,
+                    request_id=request_id,
                     activity=[
                         {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
                     ],
@@ -212,7 +322,13 @@ class ControlPlane:
                 n = self.calendar.reject_batch(batch_id)
                 reply = f"Rejected {n} proposed session(s). Say what to change and I'll propose again."
                 self._add_message(cid, "assistant", reply)
-                return ChatResponse(conversation_id=cid, reply=reply, goal=goal, ai_available=True)
+                return ChatResponse(
+                    conversation_id=cid,
+                    reply=reply,
+                    goal=goal,
+                    ai_available=True,
+                    request_id=request_id,
+                )
 
         if not self.settings.groq_configured and self._ai is None:
             reply = (
@@ -226,6 +342,17 @@ class ControlPlane:
                 reply=reply,
                 goal=goal,
                 ai_available=False,
+                request_id=request_id,
+            )
+
+        if self._is_cancelled(request_id):
+            return ChatResponse(
+                conversation_id=cid,
+                reply="Stopped.",
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                activity=[{"stage": "cancelled", "label": "Stopped", "detail": "No calendar changes"}],
             )
 
         try:
@@ -242,9 +369,35 @@ class ControlPlane:
                 reply=reply,
                 goal=goal,
                 ai_available=False,
+                request_id=request_id,
             )
 
-        return self._apply_turn(cid, turn, goal)
+        if self._is_cancelled(request_id):
+            self.usage.record(
+                conversation_id=cid,
+                model=self.settings.groq_model,
+                status="cancelled",
+                cancelled=True,
+                request_id=request_id,
+            )
+            return ChatResponse(
+                conversation_id=cid,
+                reply="Stopped.",
+                goal=goal,
+                ai_available=True,
+                request_id=request_id,
+                activity=[
+                    {
+                        "stage": "cancelled",
+                        "label": "Stopped",
+                        "detail": "Cloud AI response discarded — no calendar changes",
+                    }
+                ],
+            )
+
+        response = self._apply_turn(cid, turn, goal)
+        response.request_id = request_id
+        return response
 
     def _run_ai_turn(self, cid: str, text: str, goal: Goal | None) -> BuddyTurn:
         recent = [
@@ -256,12 +409,24 @@ class ControlPlane:
             {"id": s.id, "content": s.content}
             for s in self.sparks.list_open()[:8]
         ]
+        calendar_sessions = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "start_at": s.start_at,
+                "end_at": s.end_at,
+                "status": s.status,
+                "goal_id": s.goal_id,
+            }
+            for s in self.calendar.list_sessions()[:40]
+        ]
         payload = build_user_payload(
             message=text,
             active_goal=goal.model_dump() if goal else None,
             recent_messages=recent,
             open_proposal_batch_id=batch_id,
             open_sparks=sparks,
+            calendar_sessions=calendar_sessions,
         )
         self._call_count += 1
         try:
@@ -302,9 +467,11 @@ class ControlPlane:
                 self.usage.record(
                     conversation_id=cid,
                     model=self.settings.groq_model,
-                    status="malformed",
+                    status=getattr(exc, "category", None) or "malformed",
                     attempt=2,
                 )
+                if isinstance(exc, GroqError):
+                    raise
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
 
     def _apply_turn(self, cid: str, turn: BuddyTurn, goal: Goal | None) -> ChatResponse:
@@ -312,6 +479,8 @@ class ControlPlane:
         booked: list[SessionOut] = []
         captured: list[Spark] = []
         unresolved: list[str] = []
+        deleted_session_ids: list[str] = []
+        updated_sessions: list[SessionOut] = []
 
         # Apply goal updates in order
         for update in turn.goal_updates:
@@ -355,7 +524,12 @@ class ControlPlane:
         action = turn.requested_action or RequestedAction()
         proposal_summary = None
         if action.type == "propose_sessions" and goal:
-            if goal.status == "gathering" and not (goal.frequency or goal.commitment):
+            facts = goal.facts or {}
+            has_plan = isinstance(facts.get("weekly_plan"), dict) and bool(
+                (facts.get("weekly_plan") or {}).get("slots")
+            )
+            has_cadence = bool(goal.frequency or goal.commitment or has_plan)
+            if goal.status == "gathering" and not has_cadence:
                 # Don't propose without a workable cadence — ask instead
                 pass
             else:
@@ -388,9 +562,27 @@ class ControlPlane:
                 self.calendar.reject_batch(batch)
 
         if "session_outcome" in turn.intents and action.session_id and action.outcome:
-            self.calendar.mark_outcome(action.session_id, action.outcome)
+            outcome = self.calendar.mark_outcome(action.session_id, action.outcome)
+            if outcome:
+                updated_sessions.append(outcome)
+
+        for cal_action in turn.calendar_actions:
+            deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
+            deleted_session_ids.extend(deleted)
+            updated_sessions.extend(updated)
+            unresolved.extend(errors)
 
         reply = turn.assistant_text.strip()
+        if deleted_session_ids and not proposed:
+            n = len(deleted_session_ids)
+            suffix = f" Removed {n} calendar session{'s' if n != 1 else ''}."
+            if suffix.strip() not in reply:
+                reply = f"{reply.rstrip()}{suffix}"
+        if updated_sessions and not proposed and not deleted_session_ids:
+            n = len(updated_sessions)
+            suffix = f" Updated {n} calendar session{'s' if n != 1 else ''}."
+            if suffix.strip() not in reply:
+                reply = f"{reply.rstrip()}{suffix}"
         if proposed and proposal_summary and proposal_summary.get("text"):
             reply = proposal_summary["text"]
 
@@ -398,7 +590,16 @@ class ControlPlane:
             {"stage": "understanding", "label": "Understanding your goal", "detail": None},
             {"stage": "calendar_read", "label": "Checking calendar availability", "detail": None},
         ]
-        if proposed:
+        if deleted_session_ids or updated_sessions:
+            activity.append(
+                {
+                    "stage": "calendar_write",
+                    "label": "Updated your calendar",
+                    "detail": f"{len(deleted_session_ids)} removed, {len(updated_sessions)} changed",
+                }
+            )
+            activity.append({"stage": "completed", "label": "Calendar updated", "detail": None})
+        elif proposed:
             activity.append(
                 {
                     "stage": "proposal_building",
@@ -428,12 +629,13 @@ class ControlPlane:
             clarification_questions=turn.clarification_questions,
             activity=activity,
             undo_batch_id=locals().get("undo_batch_id"),
+            deleted_session_ids=deleted_session_ids,
+            updated_sessions=updated_sessions,
         )
 
     def get_today(self) -> TodayResponse:
         goals = self.goals.list_open()
-        attention: list[str] = []
-        pending: list[str] = []
+        needs: list[TodayNeed] = []
         progress = []
         today = datetime.now().date().isoformat()
         todays = self.calendar.list_sessions(start=today, end=today + "T23:59:59")
@@ -443,14 +645,34 @@ class ControlPlane:
             counts = self.calendar.progress_for_goal(g.id)
             summary = progress_summary(g, counts)
             progress.append({"goal_id": g.id, "title": g.title, "summary": summary, **counts})
+            conv = self.conversations.get(g.conversation_id)
+            if not conv or conv.get("deleted_at"):
+                # Chat gone from sidebar — don't surface Needs you for it.
+                continue
             batch = self.calendar.open_proposal_batch(g.id)
             if batch:
-                attention.append(f"{g.title} has sessions waiting for approval")
-                pending.append("Approve or reject the proposed sessions?")
+                needs.append(
+                    TodayNeed(
+                        id=f"approve-{g.id}",
+                        kind="approve",
+                        title=f"{g.title} has sessions waiting for approval",
+                        detail="Approve, reject, or adjust the proposed plan",
+                        goal_id=g.id,
+                        conversation_id=g.conversation_id,
+                        proposal_batch_id=batch,
+                    )
+                )
             elif g.status == "gathering":
-                attention.append(f"{g.title} still needs a clearer plan")
-                if not pending:
-                    pending.append("What would make this goal realistic this week?")
+                needs.append(
+                    TodayNeed(
+                        id=f"gather-{g.id}",
+                        kind="gathering",
+                        title=f"{g.title} still needs a clearer plan",
+                        detail="What would make this goal realistic this week?",
+                        goal_id=g.id,
+                        conversation_id=g.conversation_id,
+                    )
+                )
 
         spark = None
         open_sparks = self.sparks.list_open()
@@ -458,10 +680,15 @@ class ControlPlane:
             # Deterministic resurfacing — no AI call
             spark = open_sparks[0]
 
+        # Legacy string lists kept for older clients; count should use `needs`.
+        attention = [n.title for n in needs]
+        pending_questions = [n.detail for n in needs if n.detail]
+
         return TodayResponse(
             goals=goals,
             attention=attention,
-            pending_questions=pending,
+            pending_questions=pending_questions,
+            needs=needs,
             todays_sessions=[s for s in todays if s.start_at[:10] == today],
             progress=progress,
             resurfaced_spark=spark,
