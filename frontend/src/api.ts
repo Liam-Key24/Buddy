@@ -10,6 +10,13 @@ export type Goal = {
   commitment?: string | null;
   status: string;
   facts?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+  events_total?: number;
+  events_completed?: number;
+  events_missed?: number;
+  started_at?: string | null;
+  ended_at?: string | null;
 };
 
 export type Category = {

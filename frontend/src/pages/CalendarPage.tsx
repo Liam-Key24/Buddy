@@ -327,6 +327,7 @@ export function CalendarPage() {
         classNames: [
           "evt-soft",
           proposed ? "evt-hatched" : "evt-solid",
+          s.status === "completed" ? "evt-completed-soft" : "",
           s.status === "missed" ? "evt-missed-soft" : "",
         ].filter(Boolean),
         extendedProps: { session: s, color },
@@ -414,19 +415,40 @@ export function CalendarPage() {
     const session = arg.event.extendedProps.session as Session | undefined;
     const color = (arg.event.extendedProps.color as string) || "#c5d9a0";
     if (!session) return true;
+    const completed = session.status === "completed";
+    const missed = session.status === "missed";
+    const mark = completed ? (
+      <CheckCircle className="evt-soft-mark" size={14} weight="fill" aria-label="Completed" />
+    ) : missed ? (
+      <X className="evt-soft-mark" size={14} weight="bold" aria-label="Missed" />
+    ) : null;
     const compact = arg.view.type === "dayGridMonth";
     if (compact) {
       return (
-        <div className="evt-month-chip" style={{ ["--cat-color" as string]: color }}>
-          {session.title}
+        <div
+          className={cn(
+            "evt-month-chip",
+            completed && "is-completed",
+            missed && "is-missed",
+          )}
+          style={{ ["--cat-color" as string]: color }}
+        >
+          {mark}
+          <span>{session.title}</span>
         </div>
       );
     }
     return (
       <div
-        className={`evt-soft-inner${session.status === "proposed" ? " is-proposed" : ""}`}
+        className={cn(
+          "evt-soft-inner",
+          session.status === "proposed" && "is-proposed",
+          completed && "is-completed",
+          missed && "is-missed",
+        )}
         style={{ ["--cat-color" as string]: color }}
       >
+        {mark}
         <div className="evt-soft-title">{session.title}</div>
         <div className="evt-soft-time">{formatRange(session)}</div>
       </div>

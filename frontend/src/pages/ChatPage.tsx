@@ -17,6 +17,7 @@ import {
 import { useChatNav } from "../chatNav";
 import { ProposalCards } from "../components/ProposalCards";
 import { Button } from "../components/ui/Button";
+import { useGoalComplete } from "../components/ui/GoalCompleteOverlay";
 import { Tag } from "../components/ui/Tag";
 import { useToast } from "../components/ui/Toast";
 import {
@@ -48,15 +49,10 @@ const GREETING: Msg = {
   content: "Tell me a goal. I’ll ask a few things, then propose calendar sessions you control.",
 };
 
-function activityIcon(stage: string) {
-  if (stage === "error") return <Stop size={12} />;
-  if (stage === "cancelled") return <Stop size={12} />;
-  return <CircleNotch size={12} className="spin" />;
-}
-
 export function ChatPage() {
   const { conversationId, conversations, setConversationId, renameChat, refresh } = useChatNav();
   const { pushToast } = useToast();
+  const { celebrateGoalComplete } = useGoalComplete();
   const [messages, setMessages] = useState<Msg[]>([GREETING]);
   const [input, setInput] = useState("");
   const [goal, setGoal] = useState<Goal | null>(null);
@@ -209,7 +205,11 @@ export function ChatPage() {
 
   function applyChatResult(res: ChatResponse) {
     setConversationId(res.conversation_id);
+    const prevStatus = goal?.status;
     setGoal(res.goal);
+    if (res.goal?.status === "done" && prevStatus !== "done") {
+      celebrateGoalComplete(res.goal.title);
+    }
     setActivity(res.activity || []);
     if (res.proposed_sessions?.length) {
       setProposals(res.proposed_sessions);
@@ -524,24 +524,26 @@ export function ChatPage() {
             onKeyDown={onStepsKeyDown}
           >
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 text-xs text-muted"
-                onClick={() => {
-                  if (busy) return;
-                  if (questions.length) setStepsCollapsed((v) => !v);
-                }}
-                aria-expanded={stepsExpanded}
-              >
-                {busy ? <CircleNotch className="spin" size={14} /> : <CheckCircle size={14} />}
-                <span>{busy ? activityLabel || "Generating…" : stepsExpanded ? "Next steps" : activityLabel}</span>
-              </button>
-              {busy &&
-                activity.map((step) => (
-                  <Tag key={`${step.stage}-${step.label}`} icon={activityIcon(step.stage)} tone="mint">
-                    {step.label}
-                  </Tag>
-                ))}
+              {busy ? (
+                <Tag
+                  icon={<CircleNotch className="spin" size={12} />}
+                  tone="mint"
+                >
+                  {activityLabel || "Generating…"}
+                </Tag>
+              ) : (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted"
+                  onClick={() => {
+                    if (questions.length) setStepsCollapsed((v) => !v);
+                  }}
+                  aria-expanded={stepsExpanded}
+                >
+                  <CheckCircle size={14} />
+                  <span>{stepsExpanded ? "Next steps" : activityLabel}</span>
+                </button>
+              )}
             </div>
 
             {stepsExpanded && (

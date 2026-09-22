@@ -56,7 +56,7 @@ export function ConfirmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-40 grid place-items-center bg-overlay p-4"
+      className="fixed inset-0 z-[90] grid place-items-center bg-overlay p-4"
       onClick={() => !busy && onCancel()}
       role="presentation"
     >

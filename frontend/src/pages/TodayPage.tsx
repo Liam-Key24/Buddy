@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   CalendarBlank,
+  CaretDown,
+  CaretRight,
   ChatCircle,
   CheckCircle,
   Clock,
@@ -9,6 +11,7 @@ import {
   Target,
   WarningCircle,
 } from "@phosphor-icons/react";
+import { CategoryIcon } from "../components/CategoryIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionHead } from "../components/ui/SectionHead";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -31,8 +34,28 @@ import { useNavigate } from "react-router-dom";
 import { useToast } from "../components/ui/Toast";
 
 const CONTINUE_HINT_KEY = "buddy.continueHint";
+/** Upcoming shows today through the next 2 calendar days (3 days total). */
+const UPCOMING_DAY_COUNT = 3;
 
 const GOAL_BAR_COLORS = ["#eaf6cb", "#9dde9a", "#e8c56b", "#c5d9a0", "#f0a0a0", "#a8c5a0"];
+
+type UpcomingDay = {
+  key: string;
+  label: string;
+  rows: UpcomingRow[];
+};
+
+type UpcomingRow =
+  | { kind: "session"; session: Session }
+  | {
+      kind: "group";
+      key: string;
+      label: string;
+      iconName: string;
+      color?: string;
+      sessions: Session[];
+      status: string;
+    };
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
@@ -55,6 +78,121 @@ function formatShortTime(iso: string) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function startOfLocalDay(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function dayKey(d: Date) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function dayLabel(day: Date, today: Date) {
+  const diffDays = Math.round(
+    (startOfLocalDay(day).getTime() - startOfLocalDay(today).getTime()) / 86_400_000,
+  );
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Tomorrow";
+  return day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+/** Strip trailing "· Session N" so similar titles collapse together. */
+function titleBase(title: string) {
+  return title.replace(/\s*[·•\-–]\s*session\s*\d+\s*$/i, "").trim() || title;
+}
+
+function groupKeyFor(s: Session) {
+  if (s.category_id) return `cat:${s.category_id}`;
+  if (s.category?.name) return `name:${s.category.name.toLowerCase()}`;
+  return `title:${titleBase(s.title).toLowerCase()}`;
+}
+
+function groupLabelFor(s: Session) {
+  return s.category?.name || titleBase(s.title);
+}
+
+function groupStatus(sessions: Session[]) {
+  const statuses = new Set(sessions.map((s) => s.status));
+  if (statuses.size === 1) return sessions[0].status;
+  if (statuses.has("proposed")) return "proposed";
+  return "scheduled";
+}
+
+function formatGroupTime(sessions: Session[]) {
+  return formatShortTime(sessions[0].start_at);
+}
+
+function buildUpcomingDays(sessions: Session[], now: Date): UpcomingDay[] {
+  const todayStart = startOfLocalDay(now);
+  const horizonEnd = new Date(todayStart);
+  horizonEnd.setDate(horizonEnd.getDate() + UPCOMING_DAY_COUNT);
+  const nowMs = now.getTime() - 60_000;
+
+  const inWindow = sessions
+    .filter((s) => {
+      const start = new Date(s.start_at);
+      if (Number.isNaN(start.getTime())) return false;
+      if (start.getTime() < nowMs) return false;
+      if (start >= horizonEnd) return false;
+      if (s.status === "missed" || s.status === "rejected") return false;
+      return true;
+    })
+    .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
+
+  const byDay = new Map<string, Session[]>();
+  for (const s of inWindow) {
+    const start = new Date(s.start_at);
+    const key = dayKey(start);
+    const list = byDay.get(key);
+    if (list) list.push(s);
+    else byDay.set(key, [s]);
+  }
+
+  const days: UpcomingDay[] = [];
+  for (let offset = 0; offset < UPCOMING_DAY_COUNT; offset++) {
+    const day = new Date(todayStart);
+    day.setDate(day.getDate() + offset);
+    const key = dayKey(day);
+    const daySessions = byDay.get(key);
+    if (!daySessions?.length) continue;
+
+    const buckets = new Map<string, Session[]>();
+    for (const s of daySessions) {
+      const gk = groupKeyFor(s);
+      const list = buckets.get(gk);
+      if (list) list.push(s);
+      else buckets.set(gk, [s]);
+    }
+
+    const rows: UpcomingRow[] = [];
+    for (const [gk, group] of buckets) {
+      if (group.length === 1) {
+        rows.push({ kind: "session", session: group[0] });
+        continue;
+      }
+      const head = group[0];
+      rows.push({
+        kind: "group",
+        key: `${key}:${gk}`,
+        label: groupLabelFor(head),
+        iconName: head.category?.icon || head.category?.name || groupLabelFor(head),
+        color: head.category?.color || undefined,
+        sessions: group,
+        status: groupStatus(group),
+      });
+    }
+
+    rows.sort((a, b) => {
+      const aStart = a.kind === "session" ? a.session.start_at : a.sessions[0].start_at;
+      const bStart = b.kind === "session" ? b.session.start_at : b.sessions[0].start_at;
+      return aStart.localeCompare(bStart);
+    });
+
+    days.push({ key, label: dayLabel(day, todayStart), rows });
+  }
+
+  return days;
 }
 
 function progressRatio(p: {
@@ -85,6 +223,7 @@ export function TodayPage() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [busyBatch, setBusyBatch] = useState<string | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const loading = !data && !error;
 
   useEffect(() => {
@@ -135,14 +274,16 @@ export function TodayPage() {
     };
   }, []);
 
-  const upcoming = useMemo(() => {
+  const upcomingDays = useMemo(() => {
     const source = sessions.length ? sessions : data?.todays_sessions ?? [];
-    const t = now.getTime();
-    return [...source]
-      .filter((s) => new Date(s.start_at).getTime() >= t - 60_000)
-      .filter((s) => s.status !== "missed" && s.status !== "rejected")
-      .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime());
+    return buildUpcomingDays(source, now);
   }, [sessions, data?.todays_sessions, now]);
+
+  const hasUpcoming = upcomingDays.some((d) => d.rows.length > 0);
+
+  function toggleGroup(key: string) {
+    setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
 
   const needs = useMemo(() => {
     if (data?.needs?.length) return data.needs;
@@ -271,7 +412,7 @@ export function TodayPage() {
               <Skeleton className="h-10" />
             </div>
           )}
-          {!loading && !upcoming.length && (
+          {!loading && !hasUpcoming && (
             <EmptyState
               icon={<Clock size={22} />}
               action={
@@ -280,23 +421,102 @@ export function TodayPage() {
                 </Link>
               }
             >
-              Nothing upcoming.
+              Nothing in the next 3 days.
             </EmptyState>
           )}
-          <ul className="m-0 flex list-none flex-col gap-1 p-0">
-            {upcoming.map((s) => (
-              <li key={s.id}>
-                <Link
-                  to="/calendar"
-                  className="flex items-center gap-3 rounded-xl px-1 py-1.5 text-ink no-underline hover:bg-raised-soft"
-                >
-                  <div className="w-14 shrink-0 text-xs text-muted">{formatShortTime(s.start_at)}</div>
-                  <strong className="min-w-0 flex-1 truncate text-sm font-medium">{s.title}</strong>
-                  <Tag tone={s.status === "proposed" ? "warn" : "mint"}>{s.status}</Tag>
-                </Link>
-              </li>
+          <div className="flex flex-col gap-3">
+            {upcomingDays.map((day) => (
+              <div key={day.key}>
+                <p className="m-0 mb-1 px-1 text-[11px] font-medium tracking-wide text-muted uppercase">
+                  {day.label}
+                </p>
+                <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                  {day.rows.map((row) => {
+                    if (row.kind === "session") {
+                      const s = row.session;
+                      return (
+                        <li key={s.id}>
+                          <Link
+                            to="/calendar"
+                            className="flex items-center gap-3 rounded-xl px-1 py-1.5 text-ink no-underline hover:bg-raised-soft"
+                          >
+                            <div className="w-14 shrink-0 text-xs text-muted">
+                              {formatShortTime(s.start_at)}
+                            </div>
+                            <strong className="min-w-0 flex-1 truncate text-sm font-medium">
+                              {s.title}
+                            </strong>
+                            <Tag tone={s.status === "proposed" ? "warn" : "mint"}>{s.status}</Tag>
+                          </Link>
+                        </li>
+                      );
+                    }
+
+                    const open = !!expandedGroups[row.key];
+                    return (
+                      <li key={row.key}>
+                        <button
+                          type="button"
+                          onClick={() => toggleGroup(row.key)}
+                          className="flex w-full items-center gap-3 rounded-xl px-1 py-1.5 text-left text-ink hover:bg-raised-soft"
+                        >
+                          <div className="w-14 shrink-0 text-xs text-muted">
+                            {formatGroupTime(row.sessions)}
+                          </div>
+                          <span
+                            className="flex min-w-0 flex-1 items-center gap-1.5"
+                            style={row.color ? { color: row.color } : undefined}
+                          >
+                            {open ? (
+                              <CaretDown size={12} className="shrink-0 text-muted" />
+                            ) : (
+                              <CaretRight size={12} className="shrink-0 text-muted" />
+                            )}
+                            <CategoryIcon name={row.iconName} size={14} />
+                            <strong className="min-w-0 truncate text-sm font-medium text-ink">
+                              {row.label}
+                              <span className="font-normal text-muted">
+                                {" "}
+                                · {row.sessions.length} sessions
+                              </span>
+                            </strong>
+                          </span>
+                          <Tag
+                            tone={row.status === "proposed" ? "warn" : "mint"}
+                            color={row.color}
+                          >
+                            {row.status}
+                          </Tag>
+                        </button>
+                        {open && (
+                          <ul className="m-0 mt-0.5 mb-1 ml-3 flex list-none flex-col gap-0.5 border-l border-hairline py-0.5 pl-2">
+                            {row.sessions.map((s) => (
+                              <li key={s.id}>
+                                <Link
+                                  to="/calendar"
+                                  className="flex items-center gap-3 rounded-lg px-1 py-1 text-ink no-underline hover:bg-raised-soft"
+                                >
+                                  <div className="w-14 shrink-0 text-xs text-muted">
+                                    {formatShortTime(s.start_at)}
+                                  </div>
+                                  <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">
+                                    {s.title}
+                                  </span>
+                                  <Tag tone={s.status === "proposed" ? "warn" : "mint"}>
+                                    {s.status}
+                                  </Tag>
+                                </Link>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
             ))}
-          </ul>
+          </div>
         </Surface>
 
         <Surface>

@@ -24,6 +24,7 @@
   --radius-card: 1rem;
   --radius-float: 1.25rem;
   --shadow-float: 0 18px 50px rgb(10 16 14 / 0.35);
+  --z-index-100: 100;
 }
 
 @layer base {
@@ -291,8 +292,10 @@
 }
 
 .evt-soft-inner {
+  position: relative;
   height: 100%;
   padding: 0.35rem 0.5rem;
+  padding-right: 1.35rem;
   background: color-mix(in srgb, var(--cat-color, var(--color-mint-dim)) 78%, white 8%);
   color: #1a2422;
   border-radius: calc(var(--cal-soft-radius) - 1px);
@@ -309,6 +312,21 @@
   color: var(--color-ink);
 }
 
+.evt-soft-mark {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  flex-shrink: 0;
+}
+
+.evt-soft-inner.is-completed .evt-soft-mark {
+  color: #1f5c3a;
+}
+
+.evt-soft-inner.is-missed .evt-soft-mark {
+  color: #7a2e2e;
+}
+
 .evt-soft-title {
   font-size: 0.78rem;
   font-weight: 600;
@@ -321,6 +339,9 @@
 }
 
 .evt-month-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   background: color-mix(in srgb, var(--cat-color, var(--color-mint-dim)) 80%, white);
   color: #1a2422;
   border-radius: var(--cal-soft-radius);
@@ -330,8 +351,21 @@
   box-shadow: 0 2px 6px rgb(10 16 14 / 0.14);
 }
 
+.evt-month-chip .evt-soft-mark {
+  position: static;
+}
+
+.evt-month-chip.is-completed .evt-soft-mark {
+  color: #1f5c3a;
+}
+
+.evt-month-chip.is-missed .evt-soft-mark {
+  color: #7a2e2e;
+}
+
+.evt-completed-soft,
 .evt-missed-soft {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .now-pill {
