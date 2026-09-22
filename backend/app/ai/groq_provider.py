@@ -116,8 +116,10 @@ class GroqProvider:
         payload = {
             "model": self.settings.groq_model,
             "temperature": 0.2,
+            "max_completion_tokens": self.settings.max_output_tokens,
             "max_tokens": self.settings.max_output_tokens,
-            "response_format": {"type": "json_object"},
+            "reasoning_effort": "low",
+            "include_reasoning": True,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -148,9 +150,13 @@ class GroqProvider:
             if status >= 500:
                 raise GroqError("http", f"Cloud AI server error ({status})")
             if status >= 400:
+                kind = _client_error_kind(resp)
+                if kind == "malformed":
+                    raise GroqError("malformed", "Cloud AI returned unusable JSON")
                 raise GroqError("http", f"Cloud AI request failed ({status})")
             body = resp.json()
-            content = body["choices"][0]["message"]["content"]
+            message = body["choices"][0]["message"]
+            content = _message_text(message)
             usage = body.get("usage") or {}
             rate_limit, rate_remaining, rate_reset = _rate_headers(resp)
             self.last_stats = GroqCallStats(
@@ -164,14 +170,26 @@ class GroqProvider:
                 rate_reset=rate_reset,
             )
             log.info(
-                "groq_ok latency_ms=%s status=%s prompt_tokens=%s completion_tokens=%s retried=%s",
+                "groq_ok latency_ms=%s status=%s prompt_tokens=%s completion_tokens=%s content_len=%s retried=%s",
                 self.last_stats.latency_ms,
                 status,
                 self.last_stats.tokens_prompt,
                 self.last_stats.tokens_completion,
+                len(content or ""),
                 retried,
             )
-            return _parse_json_object(content)
+            try:
+                return _parse_json_object(content)
+            except json.JSONDecodeError:
+                log.warning(
+                    "groq_err category=malformed latency_ms=%s status=%s content_len=%s keys=%s retried=%s",
+                    self.last_stats.latency_ms,
+                    status,
+                    len(content or ""),
+                    sorted(message.keys()) if isinstance(message, dict) else [],
+                    retried,
+                )
+                raise GroqError("malformed", "Cloud AI returned unusable JSON") from None
         except GroqError as exc:
             self.last_stats = GroqCallStats(
                 latency_ms=int((time.perf_counter() - started) * 1000),
@@ -194,6 +212,12 @@ class GroqProvider:
                 retried=retried,
                 error_category="malformed",
             )
+            log.warning(
+                "groq_err category=malformed latency_ms=%s status=%s retried=%s",
+                self.last_stats.latency_ms,
+                status,
+                retried,
+            )
             raise GroqError("malformed", "Cloud AI returned unusable output") from exc
         except httpx.HTTPError as exc:
             category = "cancelled" if (cancel_check and cancel_check()) else "transport"
@@ -206,6 +230,49 @@ class GroqProvider:
             if category == "cancelled":
                 raise GroqError("cancelled", "Stopped") from exc
             raise GroqError("transport", f"Cloud AI unreachable ({exc.__class__.__name__})") from exc
+
+
+def _client_error_kind(resp: httpx.Response) -> str:
+    """Classify a 4xx without logging provider content."""
+    try:
+        payload = resp.json()
+    except Exception:
+        return "http"
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(err, dict):
+        return "http"
+    code = str(err.get("code") or "")
+    err_type = str(err.get("type") or "")
+    message = str(err.get("message") or "").lower()
+    if (
+        code in {"json_validate_failed", "failed_generation"}
+        or "json_validate_failed" in err_type
+        or "json_validate_failed" in message
+        or "failed to validate json" in message
+        or "failed_generation" in message
+    ):
+        return "malformed"
+    return "http"
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+        content = "".join(parts)
+    text = str(content or "").strip()
+    if text:
+        return text
+    for key in ("reasoning", "reasoning_content"):
+        extra = message.get(key)
+        if isinstance(extra, str) and extra.strip():
+            return extra.strip()
+    return text
 
 
 def _rate_headers(resp: httpx.Response) -> tuple[int | None, int | None, str | None]:
@@ -228,7 +295,29 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(text)
-    if not isinstance(data, dict):
-        raise json.JSONDecodeError("expected object", text, 0)
-    return data
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        data = None
+    decoder = json.JSONDecoder()
+    idx = 0
+    fallback: dict[str, Any] | None = None
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            break
+        try:
+            data, _end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(data, dict):
+            if any(key in data for key in ("assistant_text", "operations", "intents")):
+                return data
+            fallback = data if fallback is None else fallback
+        idx = start + 1
+    if fallback is not None:
+        return fallback
+    raise json.JSONDecodeError("expected object", text, 0)

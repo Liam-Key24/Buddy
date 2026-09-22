@@ -177,6 +177,70 @@ def test_groq_does_not_retry_ordinary_4xx():
     assert posts["n"] == 1
 
 
+def test_json_validate_failed_is_malformed_and_not_retried_by_provider():
+    posts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "openai/gpt-oss-120b"}]})
+        posts["n"] += 1
+        return httpx.Response(
+            400,
+            json={"error": {"code": "json_validate_failed", "message": "failed to validate json"}},
+        )
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.groq.com/openai/v1",
+    )
+    provider = GroqProvider(_settings(), client=client)
+    with pytest.raises(GroqError) as exc:
+        provider.complete_json("system", "user")
+    assert exc.value.category == "malformed"
+    assert posts["n"] == 1
+
+
+def test_parse_json_object_skips_preamble():
+    from app.ai.groq_provider import _parse_json_object
+
+    data = _parse_json_object(
+        'note {"foo": 1}\n{"assistant_text": "Hi", "intents": ["chat"]}\nThanks'
+    )
+    assert data["assistant_text"] == "Hi"
+    assert data["intents"] == ["chat"]
+
+
+def test_json_validate_failed_gets_one_control_plane_repair(tmp_path: Path):
+    class RepairThenOk:
+        def __init__(self):
+            self.n = 0
+
+        def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict:
+            del system, user, allow_retry, kwargs
+            self.n += 1
+            if self.n == 1:
+                raise GroqError("malformed", "Cloud AI returned unusable JSON")
+            return {
+                "assistant_text": "I'm with you.",
+                "intents": ["chat"],
+                "goal_updates": [],
+                "requested_action": {"type": "none"},
+                "confidence": 0.5,
+            }
+
+        def close(self) -> None:
+            return None
+
+    ai = RepairThenOk()
+    plane = ControlPlane(db_path=tmp_path / "test.db", ai=ai)
+    try:
+        res = plane.handle_message("Just a chat")
+        assert ai.n == 2
+        assert "with you" in res.reply.lower()
+    finally:
+        plane.close()
+
+
 def test_user_message_is_not_duplicated_in_history(tmp_path: Path):
     ai = ScriptedAI(
         {
