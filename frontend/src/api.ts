@@ -137,6 +137,13 @@ export type ChatResponse = {
   request_id?: string | null;
   deleted_session_ids?: string[];
   updated_sessions?: Session[];
+  operations?: Array<{
+    id?: string;
+    kind: string;
+    status: string;
+    goal_id?: string | null;
+    detail?: string | null;
+  }>;
 };
 
 /** Notify Calendar/Today views to reload sessions after Chat changes the calendar. */

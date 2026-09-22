@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from .ai.groq_provider import GroqError, GroqProvider
 from .ai.prompt import SYSTEM_PROMPT, build_user_payload
-from .buddy_turn import parse_buddy_turn
+from .buddy_turn import operations_from_turn, parse_buddy_turn
 from .calendar import CalendarService
 from .categories import CategoryStore
 from .config import Settings, load_settings
@@ -22,6 +22,7 @@ from .folders import FolderStore
 from .usage import UsageStore
 from .schemas import (
     BuddyTurn,
+    CalendarAction,
     ChatResponse,
     ClarificationQuestion,
     Goal,
@@ -474,6 +475,32 @@ class ControlPlane:
                     raise
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from exc
 
+    @staticmethod
+    def _goal_has_cadence(goal: Goal) -> bool:
+        facts = goal.facts or {}
+        has_plan = isinstance(facts.get("weekly_plan"), dict) and bool(
+            (facts.get("weekly_plan") or {}).get("slots")
+        )
+        return bool(goal.frequency or goal.commitment or has_plan)
+
+    @staticmethod
+    def _public_proposal_summary(summary: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not summary:
+            return None
+        return {
+            "pattern": summary.get("pattern"),
+            "total": summary.get("total"),
+            "through": summary.get("through"),
+            "text": summary.get("text"),
+            "why": summary.get("why") or {},
+            "why_lines": summary.get("why_lines") or [],
+            "goal_card": summary.get("goal_card") or {},
+            "sample": [
+                s.model_dump() if hasattr(s, "model_dump") else s
+                for s in (summary.get("sample") or [])
+            ],
+        }
+
     def _apply_turn(self, cid: str, turn: BuddyTurn, goal: Goal | None) -> ChatResponse:
         proposed: list[SessionOut] = []
         booked: list[SessionOut] = []
@@ -481,96 +508,53 @@ class ControlPlane:
         unresolved: list[str] = []
         deleted_session_ids: list[str] = []
         updated_sessions: list[SessionOut] = []
-
-        # Apply goal updates in order
-        for update in turn.goal_updates:
-            if update.action == "create" or goal is None:
-                title = update.title or "Untitled goal"
-                if goal is not None and update.action == "create":
-                    self.goals.pause_others(cid)
-                goal = self.goals.create(
-                    cid,
-                    title=title,
-                    domain=update.domain,
-                    target=update.target,
-                    deadline=update.deadline,
-                    baseline=update.baseline,
-                    frequency=update.frequency,
-                    commitment=update.commitment,
-                    status=update.status or "gathering",
-                    facts=update.facts or {},
-                    pause_others=True,
-                )
-            else:
-                assert goal is not None
-                if update.action == "pause_others":
-                    self.goals.pause_others(cid, keep_id=goal.id)
-                goal = self.goals.apply_update(goal, update)
-
-        # Spark intents without waiting for requested_action
-        for intent in turn.intents:
-            if intent == "spark_capture":
-                content = None
-                if turn.requested_action and turn.requested_action.spark_content:
-                    content = turn.requested_action.spark_content
-                if content:
-                    captured.append(self.sparks.capture(content))
-            if intent == "spark_dismiss" and turn.requested_action and turn.requested_action.spark_id:
-                self.sparks.dismiss(turn.requested_action.spark_id)
-            if intent == "spark_promote" and turn.requested_action and turn.requested_action.spark_id:
-                if goal:
-                    self.sparks.promote(turn.requested_action.spark_id, goal.id)
-
-        action = turn.requested_action or RequestedAction()
+        operations: list[dict[str, Any]] = []
+        touched_goals: list[Goal] = []
+        undo_batch_id: str | None = None
         proposal_summary = None
-        if action.type == "propose_sessions" and goal:
-            facts = goal.facts or {}
-            has_plan = isinstance(facts.get("weekly_plan"), dict) and bool(
-                (facts.get("weekly_plan") or {}).get("slots")
-            )
-            has_cadence = bool(goal.frequency or goal.commitment or has_plan)
-            if goal.status == "gathering" and not has_cadence:
-                # Don't propose without a workable cadence — ask instead
-                pass
-            else:
-                reply_text, proposed, proposal_summary = propose_for_goal(self.calendar, goal)
-                self.goals.save(goal)
-                # Deterministic proposal copy so titles/pattern match the calendar, not AI drift.
-                turn.assistant_text = reply_text
-                # JSON-safe summary for the UI (sample sessions as plain dicts).
-                proposal_summary = {
-                    "pattern": proposal_summary.get("pattern"),
-                    "total": proposal_summary.get("total"),
-                    "through": proposal_summary.get("through"),
-                    "text": proposal_summary.get("text"),
-                    "why": proposal_summary.get("why") or {},
-                    "why_lines": proposal_summary.get("why_lines") or [],
-                    "goal_card": proposal_summary.get("goal_card") or {},
-                    "sample": [
-                        s.model_dump() if hasattr(s, "model_dump") else s
-                        for s in (proposal_summary.get("sample") or [])
-                    ],
+
+        for op in operations_from_turn(turn):
+            try:
+                outcome = self._apply_operation(cid, op, goal, touched_goals)
+            except Exception as exc:  # noqa: BLE001
+                operations.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "kind": op["kind"],
+                        "status": "failed",
+                        "goal_id": goal.id if goal else None,
+                        "detail": exc.__class__.__name__,
+                    }
+                )
+                unresolved.append(op["kind"])
+                log.exception("turn_op_failed kind=%s", op["kind"])
+                continue
+
+            if outcome.get("goal") is not None:
+                goal = outcome["goal"]
+                if goal and all(g.id != goal.id for g in touched_goals):
+                    touched_goals.append(goal)
+            proposed.extend(outcome.get("proposed") or [])
+            booked.extend(outcome.get("booked") or [])
+            captured.extend(outcome.get("sparks") or [])
+            deleted_session_ids.extend(outcome.get("deleted") or [])
+            updated_sessions.extend(outcome.get("updated") or [])
+            unresolved.extend(outcome.get("errors") or [])
+            if outcome.get("proposal_summary"):
+                proposal_summary = outcome["proposal_summary"]
+                if outcome.get("reply_text"):
+                    turn.assistant_text = outcome["reply_text"]
+            if outcome.get("undo_batch_id"):
+                undo_batch_id = outcome["undo_batch_id"]
+            operations.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "kind": op["kind"],
+                    "status": outcome.get("status") or "succeeded",
+                    "goal_id": (outcome.get("goal") or goal).id if (outcome.get("goal") or goal) else None,
+                    "detail": outcome.get("detail"),
                 }
-        elif action.type == "approve_proposals" and goal:
-            batch = action.batch_id or self.calendar.open_proposal_batch(goal.id)
-            if batch:
-                booked = self.calendar.approve_batch(batch, conversation_id=cid)
-                undo_batch_id = batch if booked else None
-        elif action.type == "reject_proposals" and goal:
-            batch = action.batch_id or self.calendar.open_proposal_batch(goal.id)
-            if batch:
-                self.calendar.reject_batch(batch)
-
-        if "session_outcome" in turn.intents and action.session_id and action.outcome:
-            outcome = self.calendar.mark_outcome(action.session_id, action.outcome)
-            if outcome:
-                updated_sessions.append(outcome)
-
-        for cal_action in turn.calendar_actions:
-            deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
-            deleted_session_ids.extend(deleted)
-            updated_sessions.extend(updated)
-            unresolved.extend(errors)
+            )
 
         reply = turn.assistant_text.strip()
         if deleted_session_ids and not proposed:
@@ -628,10 +612,131 @@ class ControlPlane:
             proposal_summary=proposal_summary,
             clarification_questions=turn.clarification_questions,
             activity=activity,
-            undo_batch_id=locals().get("undo_batch_id"),
+            undo_batch_id=undo_batch_id,
             deleted_session_ids=deleted_session_ids,
             updated_sessions=updated_sessions,
+            operations=operations,
         )
+
+    def _apply_operation(
+        self,
+        cid: str,
+        op: dict[str, Any],
+        goal: Goal | None,
+        touched_goals: list[Goal],
+    ) -> dict[str, Any]:
+        kind = op["kind"]
+        update: GoalUpdate | None = op.get("goal_update")
+        action: RequestedAction | None = op.get("requested_action")
+        cal_action: CalendarAction | None = op.get("calendar_action")
+
+        if kind in {"goal_create", "goal_update", "pause_others"} and update is not None:
+            if kind == "goal_create" or goal is None:
+                created = self.goals.create(
+                    cid,
+                    title=update.title or "Untitled goal",
+                    domain=update.domain,
+                    target=update.target,
+                    deadline=update.deadline,
+                    baseline=update.baseline,
+                    frequency=update.frequency,
+                    commitment=update.commitment,
+                    status=update.status or "gathering",
+                    facts=update.facts or {},
+                    pause_others=False,
+                )
+                return {"goal": created, "status": "succeeded", "detail": created.title}
+            if kind == "pause_others":
+                self.goals.pause_others(cid, keep_id=goal.id)
+            updated = self.goals.apply_update(goal, update)
+            return {"goal": updated, "status": "succeeded", "detail": updated.title}
+
+        if kind == "spark_capture":
+            content = op.get("spark_content")
+            if not content:
+                return {"status": "failed", "detail": "missing spark content"}
+            spark = self.sparks.capture(content)
+            return {"sparks": [spark], "status": "succeeded", "detail": spark.content}
+
+        if kind == "spark_dismiss":
+            spark_id = op.get("spark_id")
+            if spark_id:
+                self.sparks.dismiss(spark_id)
+            return {"status": "succeeded"}
+
+        if kind == "spark_promote":
+            spark_id = op.get("spark_id")
+            if spark_id and goal:
+                self.sparks.promote(spark_id, goal.id)
+            return {"status": "succeeded", "goal": goal}
+
+        if kind == "propose_sessions":
+            targets: list[Goal] = []
+            for item in [*touched_goals, *([goal] if goal else [])]:
+                if item.id not in {g.id for g in targets}:
+                    targets.append(item)
+            proposed: list[SessionOut] = []
+            summary = None
+            reply_text = None
+            last_goal = goal
+            for target in targets:
+                if target.status == "gathering" and not self._goal_has_cadence(target):
+                    continue
+                reply_text, sessions, raw_summary = propose_for_goal(self.calendar, target)
+                self.goals.save(target)
+                proposed.extend(sessions)
+                summary = self._public_proposal_summary(raw_summary)
+                last_goal = target
+            status = "succeeded" if proposed else "skipped"
+            return {
+                "goal": last_goal,
+                "proposed": proposed,
+                "proposal_summary": summary,
+                "reply_text": reply_text,
+                "status": status,
+                "detail": f"{len(proposed)} sessions" if proposed else "no cadence",
+            }
+
+        if kind == "approve_proposals" and goal:
+            batch = (action.batch_id if action else None) or self.calendar.open_proposal_batch(goal.id)
+            booked: list[SessionOut] = []
+            undo = None
+            if batch:
+                booked = self.calendar.approve_batch(batch, conversation_id=cid)
+                undo = batch if booked else None
+            return {"goal": goal, "booked": booked, "undo_batch_id": undo, "status": "succeeded"}
+
+        if kind == "reject_proposals" and goal:
+            batch = (action.batch_id if action else None) or self.calendar.open_proposal_batch(goal.id)
+            if batch:
+                self.calendar.reject_batch(batch)
+            return {"goal": goal, "status": "succeeded"}
+
+        if kind == "session_outcome":
+            if action and action.session_id and action.outcome:
+                marked = self.calendar.mark_outcome(action.session_id, action.outcome)
+                return {"updated": [marked] if marked else [], "status": "succeeded", "goal": goal}
+            if cal_action:
+                deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
+                return {
+                    "deleted": deleted,
+                    "updated": updated,
+                    "errors": errors,
+                    "status": "succeeded" if not errors else "failed",
+                    "goal": goal,
+                }
+
+        if kind.startswith("calendar_") and cal_action:
+            deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
+            return {
+                "deleted": deleted,
+                "updated": updated,
+                "errors": errors,
+                "status": "succeeded" if not errors else "failed",
+                "goal": goal,
+            }
+
+        return {"status": "skipped", "goal": goal}
 
     def get_today(self) -> TodayResponse:
         goals = self.goals.list_open()

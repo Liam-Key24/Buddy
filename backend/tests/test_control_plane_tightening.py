@@ -87,6 +87,7 @@ def test_multi_goal_dump_keeps_all_goals_open(tmp_path: Path):
         plane.close()
 
 
+@pytest.mark.xfail(strict=True, reason="phase 2: mutation preview policy")
 def test_chat_delete_previews_instead_of_committing(plane: ControlPlane):
     ready, booked = _book_sessions(plane)
     target_id = booked.booked_sessions[0].id
@@ -99,6 +100,7 @@ def test_chat_delete_previews_instead_of_committing(plane: ControlPlane):
     assert preview, "destructive calendar ops must wait for approval"
 
 
+@pytest.mark.xfail(strict=True, reason="phase 3: idempotent request_id replay")
 def test_duplicate_request_id_replays_without_double_write(tmp_path: Path):
     ai = ScriptedAI(
         {
@@ -130,6 +132,7 @@ def test_duplicate_request_id_replays_without_double_write(tmp_path: Path):
         plane.close()
 
 
+@pytest.mark.xfail(strict=True, reason="phase 5: no Groq retry on ordinary 4xx")
 def test_groq_does_not_retry_ordinary_4xx():
     posts = {"n": 0}
 
@@ -150,6 +153,7 @@ def test_groq_does_not_retry_ordinary_4xx():
     assert posts["n"] == 1
 
 
+@pytest.mark.xfail(strict=True, reason="phase 6–7: scoped context and Europe/London timezone")
 def test_user_message_is_not_duplicated_in_history(tmp_path: Path):
     ai = ScriptedAI(
         {

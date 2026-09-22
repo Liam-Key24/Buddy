@@ -198,6 +198,7 @@ class ChatResponse(BaseModel):
     request_id: str | None = None
     deleted_session_ids: list[str] = Field(default_factory=list)
     updated_sessions: list[SessionOut] = Field(default_factory=list)
+    operations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SessionUpdate(BaseModel):

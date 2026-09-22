@@ -248,3 +248,41 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
 
 def parse_buddy_turn(raw: dict[str, Any]) -> BuddyTurn:
     return BuddyTurn.model_validate(normalize_buddy_turn_dict(raw))
+
+
+def operations_from_turn(turn: BuddyTurn) -> list[dict[str, Any]]:
+    """Map today's BuddyTurn fields into ordered operations (temporary adapter)."""
+    ops: list[dict[str, Any]] = []
+    for update in turn.goal_updates:
+        if update.action == "create":
+            kind = "goal_create"
+        elif update.action == "pause_others":
+            kind = "pause_others"
+        else:
+            kind = "goal_update"
+        ops.append({"kind": kind, "goal_update": update})
+
+    action = turn.requested_action
+    spark_content = action.spark_content if action else None
+    spark_id = action.spark_id if action else None
+    if "spark_capture" in turn.intents and spark_content:
+        ops.append({"kind": "spark_capture", "spark_content": spark_content})
+    if "spark_dismiss" in turn.intents and spark_id:
+        ops.append({"kind": "spark_dismiss", "spark_id": spark_id})
+    if "spark_promote" in turn.intents and spark_id:
+        ops.append({"kind": "spark_promote", "spark_id": spark_id})
+
+    if action and action.type == "propose_sessions":
+        ops.append({"kind": "propose_sessions", "requested_action": action})
+    elif action and action.type == "approve_proposals":
+        ops.append({"kind": "approve_proposals", "requested_action": action})
+    elif action and action.type == "reject_proposals":
+        ops.append({"kind": "reject_proposals", "requested_action": action})
+
+    if "session_outcome" in turn.intents and action and action.session_id and action.outcome:
+        ops.append({"kind": "session_outcome", "requested_action": action})
+
+    for cal_action in turn.calendar_actions:
+        kind = "session_outcome" if cal_action.op == "mark_outcome" else f"calendar_{cal_action.op}"
+        ops.append({"kind": kind, "calendar_action": cal_action})
+    return ops
