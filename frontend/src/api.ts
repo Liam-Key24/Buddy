@@ -118,8 +118,38 @@ export type OpenProposal = {
   goal: Goal | null;
   proposed_sessions: Session[];
   proposal_summary: ProposalSummary | null;
-  mutation_preview?: Record<string, unknown> | null;
+  proposal_groups?: ProposalGroup[];
+  mutation_preview?: MutationPreview | null;
   clarification_questions?: ClarificationQuestion[];
+  entered_answers?: Record<string, string>;
+  clarification_answers?: Record<string, string>;
+};
+
+export type ProposalGroup = {
+  goal: Goal | null;
+  proposal_batch_id: string;
+  summary: ProposalSummary | null;
+  sessions: Session[];
+};
+
+export type MutationPreviewRecord = {
+  id: string;
+  title?: string;
+  start_at?: string;
+  end_at?: string;
+  status?: string;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  match_reason?: string | null;
+};
+
+export type MutationPreview = {
+  kind?: string;
+  count?: number;
+  records?: MutationPreviewRecord[];
+  why?: string;
+  match_reason?: string | null;
+  actions?: string[];
 };
 
 export type ChatResponse = {
@@ -133,6 +163,7 @@ export type ChatResponse = {
   unresolved?: string[];
   ai_available?: boolean;
   proposal_summary?: ProposalSummary | null;
+  proposal_groups?: ProposalGroup[];
   clarification_questions?: ClarificationQuestion[];
   activity?: ActivityStep[];
   undo_batch_id?: string | null;
@@ -146,7 +177,7 @@ export type ChatResponse = {
     goal_id?: string | null;
     detail?: string | null;
   }>;
-  mutation_preview?: Record<string, unknown> | null;
+  mutation_preview?: MutationPreview | null;
   stopped?: boolean;
   stop_committed?: boolean;
 };
@@ -448,7 +479,13 @@ export async function decideProposal(
   batchId: string,
   decision: "approve" | "reject" | "adjust" | "undo",
   conversationId?: string | null,
-): Promise<{ booked?: Session[]; rejected?: number; undone?: Session[]; undo_batch_id?: string }> {
+): Promise<{
+  booked?: Session[];
+  rejected?: number;
+  undone?: Session[];
+  undo_batch_id?: string;
+  proposal_groups?: ProposalGroup[];
+}> {
   return json(
     await fetch(`${API_BASE}/calendar/proposals/decide`, {
       method: "POST",

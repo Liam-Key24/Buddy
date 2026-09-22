@@ -15,7 +15,7 @@ import {
   useState,
 } from "react";
 import { useChatNav } from "../chatNav";
-import { ProposalCards } from "../components/ProposalCards";
+import { ProposalCards, MutationPreviewCard } from "../components/ProposalCards";
 import { Button } from "../components/ui/Button";
 import { useGoalComplete } from "../components/ui/GoalCompleteOverlay";
 import { Tag } from "../components/ui/Tag";
@@ -33,6 +33,8 @@ import {
   type ChatResponse,
   type ClarificationQuestion,
   type Goal,
+  type MutationPreview,
+  type ProposalGroup,
   type ProposalSummary,
   type Session,
 } from "../api";
@@ -58,13 +60,15 @@ export function ChatPage() {
   const [goal, setGoal] = useState<Goal | null>(null);
   const [proposals, setProposals] = useState<Session[]>([]);
   const [proposalSummary, setProposalSummary] = useState<ProposalSummary | null>(null);
+  const [proposalGroups, setProposalGroups] = useState<ProposalGroup[]>([]);
+  const [mutationPreview, setMutationPreview] = useState<MutationPreview | null>(null);
   const [proposalOpen, setProposalOpen] = useState(true);
   const [questions, setQuestions] = useState<ClarificationQuestion[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [activity, setActivity] = useState<ActivityStep[]>([]);
   const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [focusStep, setFocusStep] = useState(0);
-  const [whyOpen, setWhyOpen] = useState(false);
+  const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
   const [undoBatchId, setUndoBatchId] = useState<string | null>(null);
   const [modeTag, setModeTag] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -145,6 +149,8 @@ export function ChatPage() {
       setGoal(null);
       setProposals([]);
       setProposalSummary(null);
+      setProposalGroups([]);
+      setMutationPreview(null);
       setQuestions([]);
       setAnswers({});
       setUndoBatchId(null);
@@ -174,17 +180,31 @@ export function ChatPage() {
       .then((open) => {
         if (cancelled) return;
         setGoal(open.goal);
-        if (open.proposed_sessions?.length && open.proposal_summary) {
+        const groups = open.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        if (groups.length) {
+          setProposalGroups(groups);
+          setProposals(groups[0].sessions);
+          setProposalSummary(groups[0].summary);
+          setProposalOpen(true);
+        } else if (open.proposed_sessions?.length && open.proposal_summary) {
           setProposals(open.proposed_sessions);
           setProposalSummary(open.proposal_summary);
+          setProposalGroups([]);
           setProposalOpen(true);
         } else {
           setProposals([]);
           setProposalSummary(null);
+          setProposalGroups([]);
         }
+        const preview = open.mutation_preview;
+        setMutationPreview(preview?.records?.length ? preview : null);
         if (open.clarification_questions?.length) {
           setQuestions(open.clarification_questions);
+        } else {
+          setQuestions([]);
         }
+        const entered = open.entered_answers || open.clarification_answers || {};
+        setAnswers(entered);
       })
       .catch(() => undefined);
     return () => {
@@ -195,7 +215,7 @@ export function ChatPage() {
   useEffect(() => {
     if (!conversationId || !input) return;
     const t = window.setTimeout(() => {
-      saveDraft(conversationId, { composer: input, answers }).catch(() => undefined);
+      saveDraft(conversationId, { composer: input, answers, clarification_answers: answers }).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(t);
   }, [input, answers, conversationId]);
@@ -232,24 +252,31 @@ export function ChatPage() {
       celebrateGoalComplete(res.goal.title, `${res.conversation_id}:${res.goal.id}`);
     }
     setActivity(res.activity || []);
-    if (res.proposed_sessions?.length) {
+    const groups = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+    if (groups.length) {
+      setProposalGroups(groups);
+      setProposals(groups[0].sessions);
+      setProposalSummary(groups[0].summary);
+      setProposalOpen(true);
+      setQuestions([]);
+      setModeTag(groups.length > 1 ? `${groups.length} plans` : "Plan");
+    } else if (res.proposed_sessions?.length) {
       setProposals(res.proposed_sessions);
       setProposalSummary(res.proposal_summary ?? null);
+      setProposalGroups([]);
       setProposalOpen(true);
       setQuestions([]);
       setModeTag("Plan");
     }
+    if (res.mutation_preview?.records?.length) {
+      setMutationPreview(res.mutation_preview);
+    } else {
+      setMutationPreview(null);
+    }
     if (res.clarification_questions?.length) {
       setQuestions(res.clarification_questions);
-      const next: Record<string, string> = {};
-      for (const q of res.clarification_questions) {
-        if (q.suggested_answer) next[q.id] = q.suggested_answer;
-      }
-      setAnswers(next);
     }
     if (res.booked_sessions?.length) {
-      setProposals([]);
-      setProposalSummary(null);
       setUndoBatchId(res.undo_batch_id ?? null);
     }
     if (res.deleted_session_ids?.length || res.updated_sessions?.length) {
@@ -303,10 +330,10 @@ export function ChatPage() {
           }
         }
         if (committed) {
-          setActivity([{ stage: "completed", label: "Finished before Stop", detail: "Changes were saved" }]);
+          setActivity([{ stage: "completed", label: "Finished before Stop", detail: "Changes may have been applied" }]);
           setMessages((m) => [
             ...m,
-            { role: "assistant", content: "That turn finished before Stop — calendar changes were saved." },
+            { role: "assistant", content: "That turn was already saving — some calendar changes may have been applied." },
           ]);
         } else {
           setActivity([{ stage: "cancelled", label: "Stopped", detail: "No calendar changes" }]);
@@ -349,27 +376,32 @@ export function ChatPage() {
     await sendMessage("Answered the questions.", payload);
   }
 
-  async function onDecide(decision: "approve" | "reject" | "adjust" | "undo") {
-    const batchId = proposals[0]?.proposal_batch_id || undoBatchId;
-    if (!batchId || busy) return;
+  async function onDecide(
+    decision: "approve" | "reject" | "adjust" | "undo",
+    batchId?: string | null,
+  ) {
+    const resolvedBatch = batchId || proposalGroups[0]?.proposal_batch_id || proposals[0]?.proposal_batch_id || undoBatchId;
     if (decision === "adjust") {
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          content: "What should change? e.g. “move Thursday to 19:00” or “drop one session”.",
+          content: "What should change? Describe the adjustment — I won't apply the current preview until you approve a new one.",
         },
       ]);
-      setProposalOpen(false);
+      if (!batchId) setProposalOpen(false);
       return;
     }
+    if (!resolvedBatch || busy) return;
     setBusy(true);
     try {
-      const res = await decideProposal(batchId, decision, conversationId);
+      const res = await decideProposal(resolvedBatch, decision, conversationId);
       if (decision === "approve") {
-        setProposals([]);
-        setProposalSummary(null);
-        setUndoBatchId(res.undo_batch_id || batchId);
+        const remaining = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        setProposalGroups(remaining);
+        setProposals(remaining[0]?.sessions || []);
+        setProposalSummary(remaining[0]?.summary ?? null);
+        setUndoBatchId(res.undo_batch_id || resolvedBatch);
         pushToast("Booked. You can undo without Cloud AI.");
         setMessages((m) => [
           ...m,
@@ -380,8 +412,10 @@ export function ChatPage() {
         ]);
         notifyCalendarChanged();
       } else if (decision === "reject") {
-        setProposals([]);
-        setProposalSummary(null);
+        const remaining = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        setProposalGroups(remaining);
+        setProposals(remaining[0]?.sessions || []);
+        setProposalSummary(remaining[0]?.summary ?? null);
         setMessages((m) => [
           ...m,
           { role: "assistant", content: `Rejected ${res.rejected ?? 0} proposed session(s).` },
@@ -392,6 +426,7 @@ export function ChatPage() {
         const undone = res.undone || [];
         setProposals(undone);
         setProposalSummary(buildProposalSummary(goal, undone));
+        setProposalGroups([]);
         setProposalOpen(true);
         pushToast("Booking undone — sessions are proposals again.");
         setMessages((m) => [
@@ -502,6 +537,11 @@ export function ChatPage() {
             {goal.frequency ? ` · ${goal.frequency}` : ""}
           </Tag>
         )}
+        {!goal && proposalGroups.length > 1 && (
+          <Tag icon={<Target size={12} weight="duotone" />} tone="mint">
+            {proposalGroups.length} goals
+          </Tag>
+        )}
       </header>
 
       {error && (
@@ -524,7 +564,7 @@ export function ChatPage() {
             </div>
           ))}
 
-          {undoBatchId && !proposals.length && (
+          {undoBatchId && !proposals.length && !proposalGroups.length && (
             <div>
               <Button onClick={() => onDecide("undo")} disabled={busy}>
                 Undo booking
@@ -535,24 +575,48 @@ export function ChatPage() {
         </div>
       </div>
 
-      {!!proposals.length && proposalSummary && proposalOpen && (
+      {(!!proposalGroups.length || (!!proposals.length && proposalSummary) || !!mutationPreview) && proposalOpen && (
         <div className="pointer-events-none absolute inset-x-0 bottom-28 z-10 flex justify-center px-4 md:bottom-32 md:justify-end md:pr-8">
-          <div className="pointer-events-auto w-full max-w-md">
-            <ProposalCards
-              goal={goal}
-              summary={proposalSummary}
-              proposals={proposals}
-              whyOpen={whyOpen}
-              busy={busy}
-              onToggleWhy={() => setWhyOpen((v) => !v)}
-              onClose={() => setProposalOpen(false)}
-              onDecide={(decision) => onDecide(decision)}
-            />
+          <div className="pointer-events-auto flex w-full max-w-md max-h-[55vh] flex-col gap-3 overflow-y-auto">
+            {mutationPreview && (
+              <MutationPreviewCard
+                preview={mutationPreview}
+                busy={busy}
+                onApprove={() => sendMessage("Approve")}
+                onAdjust={() => onDecide("adjust")}
+                onCancel={() => sendMessage("Cancel")}
+              />
+            )}
+            {(proposalGroups.length
+              ? proposalGroups
+              : proposalSummary
+                ? [{ goal, proposal_batch_id: proposals[0]?.proposal_batch_id || "", summary: proposalSummary, sessions: proposals }]
+                : []
+            ).map((group) => (
+              group.summary ? (
+                <ProposalCards
+                  key={group.proposal_batch_id}
+                  goal={group.goal}
+                  summary={group.summary}
+                  proposals={group.sessions}
+                  whyOpen={Boolean(whyOpen[group.proposal_batch_id])}
+                  busy={busy}
+                  onToggleWhy={() =>
+                    setWhyOpen((current) => ({
+                      ...current,
+                      [group.proposal_batch_id]: !current[group.proposal_batch_id],
+                    }))
+                  }
+                  onClose={() => setProposalOpen(false)}
+                  onDecide={(decision) => onDecide(decision, group.proposal_batch_id)}
+                />
+              ) : null
+            ))}
           </div>
         </div>
       )}
 
-      {!!proposals.length && proposalSummary && !proposalOpen && (
+      {(!!proposalGroups.length || (!!proposals.length && proposalSummary) || !!mutationPreview) && !proposalOpen && (
         <div className="absolute right-5 bottom-28 z-10">
           <Button tone="primary" onClick={() => setProposalOpen(true)}>
             Review plan
@@ -627,9 +691,20 @@ export function ChatPage() {
                           value={answers[q.id] || ""}
                           onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
                           onFocus={() => setFocusStep(i)}
-                          placeholder={q.suggested_answer || q.help_text || ""}
+                          placeholder={q.help_text || "Your answer"}
                           className="w-full rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
                         />
+                      )}
+                      {q.suggested_answer && (
+                        <button
+                          type="button"
+                          className="mt-1 text-left text-xs text-mint"
+                          onClick={() =>
+                            setAnswers((a) => ({ ...a, [q.id]: a[q.id] || q.suggested_answer || "" }))
+                          }
+                        >
+                          Suggestion: {q.suggested_answer}
+                        </button>
                       )}
                     </li>
                   ))}
