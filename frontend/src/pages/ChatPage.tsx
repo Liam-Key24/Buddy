@@ -3,6 +3,7 @@ import {
   ArrowUp,
   CheckCircle,
   CircleNotch,
+  PencilSimple,
   Stop,
   Target,
 } from "@phosphor-icons/react";
@@ -73,6 +74,7 @@ export function ChatPage() {
   const [modeTag, setModeTag] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const composingRef = useRef(false);
@@ -155,6 +157,8 @@ export function ChatPage() {
       setAnswers({});
       setUndoBatchId(null);
       setActivity([]);
+      setEditingId(null);
+      setError(null);
       return;
     }
     let cancelled = false;
@@ -293,13 +297,50 @@ export function ChatPage() {
     refresh().catch(() => undefined);
   }
 
+  async function reloadMessages(cid: string) {
+    const rows = await fetchMessages(cid);
+    if (!rows.length) {
+      setMessages([GREETING]);
+      return;
+    }
+    setMessages(
+      rows
+        .filter((r) => r.role === "user" || r.role === "assistant")
+        .map((r) => ({
+          id: r.id,
+          role: r.role as "user" | "assistant",
+          content: r.content,
+        })),
+    );
+  }
+
+  function startEdit(message: Msg) {
+    if (!message.id || message.role !== "user" || busy) return;
+    setEditingId(message.id);
+    setInput(message.content);
+    setError(null);
+    requestAnimationFrame(() => {
+      resizeComposer();
+      composerRef.current?.focus();
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setInput("");
+    requestAnimationFrame(resizeComposer);
+  }
+
   async function sendMessage(
     text: string,
     clarificationAnswers?: Array<{ question_id: string; answer: string }>,
+    revisionOf?: string | null,
   ) {
     if (!text.trim() || busy) return;
     setError(null);
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    if (!revisionOf) {
+      setMessages((m) => [...m, { role: "user", content: text }]);
+    }
     setBusy(true);
     setActivity([{ stage: "started", label: "Understanding your goal", detail: null }]);
     setStepsCollapsed(true);
@@ -315,8 +356,18 @@ export function ChatPage() {
     try {
       const res = await sendChat(text, conversationId, controller.signal, requestId, {
         clarification_answers: clarificationAnswers,
+        revision_of: revisionOf || null,
       });
       applyChatResult(res, originId);
+      const cid = res.conversation_id || conversationId;
+      if (cid) {
+        try {
+          await reloadMessages(cid);
+        } catch {
+          /* keep optimistic transcript */
+        }
+      }
+      setEditingId(null);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         let committed = false;
@@ -345,11 +396,17 @@ export function ChatPage() {
       } else {
         const message = err instanceof Error ? err.message : "Something went wrong";
         setError(message);
-        setActivity([{ stage: "error", label: "Could not reach Cloud AI", detail: "No calendar changes made" }]);
-        setMessages((m) => [
-          ...m,
-          { role: "assistant", content: `I couldn't finish that turn (${message}). Your message is preserved.` },
-        ]);
+        if (revisionOf) {
+          pushToast(message);
+          setInput(text);
+          setActivity([{ stage: "error", label: "Edit blocked", detail: "Calendar records were kept" }]);
+        } else {
+          setActivity([{ stage: "error", label: "Could not reach Cloud AI", detail: "No calendar changes made" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: `I couldn't finish that turn (${message}). Your message is preserved.` },
+          ]);
+        }
       }
     } finally {
       setBusy(false);
@@ -365,7 +422,7 @@ export function ChatPage() {
     if (!text || busy) return;
     setInput("");
     requestAnimationFrame(resizeComposer);
-    await sendMessage(text);
+    await sendMessage(text, undefined, editingId);
   }
 
   async function submitQuestionStack() {
@@ -554,13 +611,24 @@ export function ChatPage() {
             <div
               key={m.id || `${m.role}-${i}`}
               className={cn(
-                "max-w-[85%] rounded-card border border-hairline px-3.5 py-2.5 text-sm leading-relaxed",
+                "group relative max-w-[85%] rounded-card border border-hairline px-3.5 py-2.5 text-sm leading-relaxed",
                 m.role === "user"
                   ? "ml-auto bg-raised/60"
                   : "bg-page-deep/40 text-ink-soft",
+                editingId && m.id === editingId && "border-mint/50",
               )}
             >
               {m.content}
+              {m.role === "user" && m.id && !busy && (
+                <button
+                  type="button"
+                  className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted hover:text-ink"
+                  onClick={() => startEdit(m)}
+                >
+                  <PencilSimple size={12} />
+                  Edit
+                </button>
+              )}
             </div>
           ))}
 
@@ -737,6 +805,14 @@ export function ChatPage() {
           onSubmit={onSubmit}
         >
           <div className="min-w-0 flex-1">
+            {editingId && (
+              <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-ink-soft">
+                <span>Editing this message undoes later goal and calendar changes.</span>
+                <button type="button" className="text-muted hover:text-ink" onClick={cancelEdit}>
+                  Cancel
+                </button>
+              </div>
+            )}
             {modeTag && (
               <div className="mb-1">
                 <Tag tone="mint" onDismiss={() => setModeTag(null)}>
@@ -752,7 +828,7 @@ export function ChatPage() {
               ref={composerRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="What do you want to work toward?"
+              placeholder={editingId ? "Edit your message" : "What do you want to work toward?"}
               rows={1}
               className="max-h-[180px] w-full resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-dim"
               onCompositionStart={() => {
@@ -763,6 +839,11 @@ export function ChatPage() {
               }}
               onInput={resizeComposer}
               onKeyDown={(e) => {
+                if (e.key === "Escape" && editingId) {
+                  e.preventDefault();
+                  cancelEdit();
+                  return;
+                }
                 if (e.key !== "Enter") return;
                 if (composingRef.current || e.nativeEvent.isComposing) return;
                 if (e.shiftKey) return;

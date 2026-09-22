@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.control_plane import ControlPlane
+import pytest
+
+from app.control_plane import ControlPlane, RevertBlocked
 from tests.fake_ai import FakeGroq
 from tests.test_calendar_actions import _book_sessions
 from tests.test_control_plane_tightening import ScriptedAI
@@ -354,5 +356,83 @@ def test_clarification_answers_survive_reload(tmp_path: Path):
         assert not (other_open.get("clarification_questions") or [])
         back = plane.get_open_proposal(res.conversation_id)
         assert (back.get("entered_answers") or back.get("clarification_answers") or {}).get("grade") == "V3 indoors"
+    finally:
+        plane.close()
+
+
+def _chat_payload() -> dict:
+    return {
+        "schema_version": 2,
+        "assistant_text": "I'm with you.",
+        "intents": ["chat"],
+        "operations": [],
+        "goal_updates": [],
+        "requested_action": {"type": "none"},
+        "confidence": 0.5,
+    }
+
+
+def test_edit_undoes_later_goal_create(tmp_path: Path):
+    ai = ScriptedAI(_chat_payload())
+    plane = ControlPlane(db_path=tmp_path / "t.db", ai=ai)
+    try:
+        first = plane.handle_message("Just thinking")
+        ai.payload = {
+            "schema_version": 2,
+            "assistant_text": "Climbing is on the list.",
+            "intents": ["goal_create"],
+            "operations": [
+                {
+                    "kind": "goal_create",
+                    "payload": {"title": "Climb V6", "domain": "climbing", "status": "gathering"},
+                    "confidence": 0.9,
+                }
+            ],
+            "confidence": 0.9,
+        }
+        plane.handle_message("I want to climb V6", conversation_id=first.conversation_id)
+        titles = [g.title.lower() for g in plane.list_goals()]
+        assert any("climb" in t for t in titles)
+        first_user = next(
+            m for m in plane.list_messages(first.conversation_id) if m["role"] == "user"
+        )
+        ai.payload = _chat_payload()
+        plane.handle_message(
+            "Just thinking out loud",
+            conversation_id=first.conversation_id,
+            revision_of=first_user["id"],
+        )
+        titles = [g.title.lower() for g in plane.list_goals()]
+        assert not any("climb" in t for t in titles)
+        visible = plane.list_messages(first.conversation_id)
+        user_lines = [m["content"] for m in visible if m["role"] == "user"]
+        assert user_lines == ["Just thinking out loud"]
+    finally:
+        plane.close()
+
+
+def test_revert_blocked_when_completed_session_exists(tmp_path: Path):
+    plane = ControlPlane(db_path=tmp_path / "t.db", ai=FakeGroq())
+    try:
+        ready, booked = _book_sessions(plane)
+        sid = booked.booked_sessions[0].id
+        plane.mark_outcome(sid, "completed")
+        first_user = next(
+            m for m in plane.list_messages(ready.conversation_id) if m["role"] == "user"
+        )
+        result = plane.revert_to(ready.conversation_id, first_user["id"])
+        assert result["ok"] is False
+        assert result.get("blocked") is True
+        session = plane.calendar.get_session(sid)
+        assert session is not None
+        assert session.status == "completed"
+        with pytest.raises(RevertBlocked):
+            plane.handle_message(
+                "rewrite the start",
+                conversation_id=ready.conversation_id,
+                revision_of=first_user["id"],
+            )
+        still = plane.calendar.get_session(sid)
+        assert still is not None and still.status == "completed"
     finally:
         plane.close()

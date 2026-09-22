@@ -84,6 +84,7 @@ class TurnStore:
             "user_message_id",
             "assistant_message_id",
             "revision_group",
+            "effects_json",
         }
         sets = ["updated_at=?"]
         values: list[Any] = [_now()]
@@ -101,6 +102,27 @@ class TurnStore:
         )
         self.conn.commit()
         return self.get(request_id)
+
+    def list_since(
+        self,
+        conversation_id: str,
+        *,
+        created_at: str,
+        include_user_message_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM turns
+            WHERE conversation_id=?
+              AND (
+                created_at > ?
+                OR (? IS NOT NULL AND user_message_id = ?)
+              )
+            ORDER BY created_at DESC
+            """,
+            (conversation_id, created_at, include_user_message_id, include_user_message_id),
+        ).fetchall()
+        return [self._row(r) for r in rows]
 
     def executing_for_conversation(self, conversation_id: str, exclude_id: str | None = None) -> bool:
         sql = """
@@ -128,6 +150,13 @@ class TurnStore:
                 data[key.replace("_json", "")] = json.loads(raw)
             except json.JSONDecodeError:
                 data[key.replace("_json", "")] = []
+        effects_raw = data.get("effects_json") or "{}"
+        try:
+            data["effects"] = json.loads(effects_raw)
+        except json.JSONDecodeError:
+            data["effects"] = {}
+        if not isinstance(data.get("effects"), dict):
+            data["effects"] = {}
         if data.get("response_json"):
             try:
                 data["response"] = json.loads(data["response_json"])

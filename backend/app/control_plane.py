@@ -53,6 +53,12 @@ from .sparks import SparkService
 log = logging.getLogger("buddy.control_plane")
 
 
+class RevertBlocked(Exception):
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
 class AIClient(Protocol):
     def complete_json(self, system: str, user: str, *, allow_retry: bool = True) -> dict: ...
 
@@ -188,23 +194,191 @@ class ControlPlane:
     def restore_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         return self.conversations.restore(conversation_id)
 
-    def revert_to(self, conversation_id: str, message_id: str) -> dict[str, Any]:
+    def revert_to(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        include_target: bool = False,
+    ) -> dict[str, Any]:
         row = self.conn.execute(
             "SELECT * FROM messages WHERE id=? AND conversation_id=?",
             (message_id, conversation_id),
         ).fetchone()
         if not row:
             return {"ok": False, "reverted": 0}
+        cutoff = row["created_at"]
+        revision_group = row["revision_group"] or message_id
+        blocked = self._revert_block_reason(conversation_id, cutoff)
+        if blocked:
+            return {
+                "ok": False,
+                "blocked": True,
+                "detail": blocked,
+                "reverted": 0,
+                "revision_group": revision_group,
+            }
+
+        later_turns = self.turns.list_since(
+            conversation_id,
+            created_at=cutoff,
+            include_user_message_id=message_id if include_target else None,
+        )
+        for turn in later_turns:
+            self._undo_effects(turn.get("effects") or {})
+            if turn.get("status") == "awaiting_approval":
+                self.turns.update(turn["request_id"], status="cancelled", pending_ops_json=[])
+
+        self._undo_approvals_since(conversation_id, cutoff)
+
         self.conn.execute(
             """
             UPDATE messages SET superseded=1
             WHERE conversation_id=? AND superseded=0 AND created_at>?
             """,
-            (conversation_id, row["created_at"]),
+            (conversation_id, cutoff),
         )
-        changed = self.conn.execute("SELECT changes() AS n").fetchone()
+        later = self.conn.execute("SELECT changes() AS n").fetchone()
+        if include_target:
+            self.conn.execute(
+                "UPDATE messages SET superseded=1 WHERE id=? AND conversation_id=?",
+                (message_id, conversation_id),
+            )
         self.conn.commit()
-        return {"ok": True, "reverted": int(changed["n"] if changed else 0)}
+        return {
+            "ok": True,
+            "reverted": int(later["n"] if later else 0) + (1 if include_target else 0),
+            "revision_group": revision_group,
+        }
+
+    def _revert_block_reason(self, conversation_id: str, cutoff: str) -> str | None:
+        later = self.turns.list_since(conversation_id, created_at=cutoff)
+        session_ids: set[str] = set()
+        for turn in later:
+            session_ids.update(self._session_ids_touched_by_turn(turn))
+        events = self.conn.execute(
+            """
+            SELECT session_ids_json FROM approval_events
+            WHERE conversation_id=? AND approved_at>? AND undone_at IS NULL
+            """,
+            (conversation_id, cutoff),
+        ).fetchall()
+        for event in events:
+            try:
+                session_ids.update(json.loads(event["session_ids_json"] or "[]"))
+            except json.JSONDecodeError:
+                continue
+        for sid in session_ids:
+            session = self.calendar.get_session(sid)
+            if session and session.status in {"completed", "missed"}:
+                return (
+                    "Can't edit that — a later calendar session was already marked "
+                    f"{session.status}. Undo or keep those records first."
+                )
+        return None
+
+    def _session_ids_touched_by_turn(self, turn: dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+        effects = turn.get("effects") or {}
+        ids.update(effects.get("sessions_created") or [])
+        ids.update((effects.get("sessions_before") or {}).keys())
+        for snap in effects.get("sessions_deleted") or []:
+            if isinstance(snap, dict) and snap.get("id"):
+                ids.add(str(snap["id"]))
+        for key in ("batches_approved", "batches_proposed", "batches_rejected"):
+            for batch in effects.get(key) or []:
+                rows = self.conn.execute(
+                    "SELECT id FROM sessions WHERE proposal_batch_id=?",
+                    (batch,),
+                ).fetchall()
+                for row in rows:
+                    ids.add(row["id"])
+        resp = turn.get("response") or {}
+        for key in ("booked_sessions", "proposed_sessions", "updated_sessions"):
+            for session in resp.get(key) or []:
+                if isinstance(session, dict) and session.get("id"):
+                    ids.add(str(session["id"]))
+        ids.update(str(sid) for sid in (resp.get("deleted_session_ids") or []) if sid)
+        return ids
+
+    def _undo_approvals_since(self, conversation_id: str, cutoff: str) -> None:
+        events = self.conn.execute(
+            """
+            SELECT batch_id FROM approval_events
+            WHERE conversation_id=? AND approved_at>? AND undone_at IS NULL
+            ORDER BY approved_at DESC
+            """,
+            (conversation_id, cutoff),
+        ).fetchall()
+        for event in events:
+            self.calendar.undo_batch(event["batch_id"])
+
+    def _empty_effects(self) -> dict[str, Any]:
+        return {
+            "goals_created": [],
+            "goals_before": {},
+            "sessions_created": [],
+            "sessions_deleted": [],
+            "sessions_before": {},
+            "batches_proposed": [],
+            "batches_approved": [],
+            "batches_rejected": [],
+            "sparks_created": [],
+        }
+
+    def _record_goal_before(self, effects: dict[str, Any], goal: Goal | None) -> None:
+        if not goal or goal.id in effects["goals_before"] or goal.id in effects["goals_created"]:
+            return
+        effects["goals_before"][goal.id] = goal.model_dump(mode="json")
+
+    def _snapshot_session(
+        self,
+        effects: dict[str, Any],
+        session: SessionOut | None,
+        *,
+        deleted: bool = False,
+    ) -> None:
+        if not session:
+            return
+        snap = self.calendar.session_snapshot(session)
+        effects["sessions_before"].setdefault(session.id, snap)
+        if deleted:
+            effects["sessions_deleted"].append(snap)
+
+    def _undo_effects(self, effects: dict[str, Any]) -> None:
+        if not effects:
+            return
+        for batch in reversed(list(effects.get("batches_approved") or [])):
+            self.calendar.undo_batch(batch)
+        for batch in effects.get("batches_proposed") or []:
+            self.calendar.reject_batch(batch)
+        for sid in effects.get("sessions_created") or []:
+            self.calendar.delete_session(sid)
+        for snap in effects.get("sessions_deleted") or []:
+            if isinstance(snap, dict):
+                self.calendar.restore_session_snapshot(snap)
+        for snap in (effects.get("sessions_before") or {}).values():
+            if isinstance(snap, dict):
+                self.calendar.restore_session_snapshot(snap)
+        for snap in (effects.get("goals_before") or {}).values():
+            if isinstance(snap, dict):
+                self.goals.restore_snapshot(snap)
+        for gid in effects.get("goals_created") or []:
+            self.goals.remove(gid)
+
+    def _record_decision_turn(
+        self,
+        cid: str | None,
+        *,
+        decision: str,
+        batch_id: str,
+        effects: dict[str, Any],
+    ) -> None:
+        if not cid:
+            return
+        rid = f"decide-{uuid.uuid4()}"
+        self.turns.try_begin(rid, cid, f"{decision}:{batch_id}")
+        self.turns.update(rid, status="completed", effects_json=effects)
 
     def save_draft(self, conversation_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
         return self.conversations.save_draft(conversation_id, draft)
@@ -247,31 +421,6 @@ class ControlPlane:
         )
         self.conn.commit()
         return mid
-
-    def _supersede_revision_path(self, conversation_id: str, message_id: str) -> str:
-        row = self.conn.execute(
-            "SELECT * FROM messages WHERE id=? AND conversation_id=?",
-            (message_id, conversation_id),
-        ).fetchone()
-        if not row:
-            return message_id
-        group = row["revision_group"] or message_id
-        self.conn.execute(
-            """
-            UPDATE messages SET superseded=1
-            WHERE conversation_id=? AND revision_group=? AND superseded=0
-              AND created_at >= ?
-            """,
-            (conversation_id, group, row["created_at"]),
-        )
-        # Unapproved proposals from the old revision are dropped.
-        goal = self.goals.active_for_conversation(conversation_id)
-        if goal:
-            batch = self.calendar.open_proposal_batch(goal.id)
-            if batch:
-                self.calendar.reject_batch(batch)
-        self.conn.commit()
-        return group
 
     def list_messages(self, conversation_id: str, *, include_superseded: bool = False) -> list[dict[str, Any]]:
         sql = """
@@ -326,13 +475,22 @@ class ControlPlane:
                 cid = goal.conversation_id if goal else None
         if decision == "approve":
             booked = self.calendar.approve_batch(batch_id, conversation_id=cid)
+            effects = self._empty_effects()
+            if booked:
+                effects["batches_approved"].append(batch_id)
+            self._record_decision_turn(cid, decision=decision, batch_id=batch_id, effects=effects)
             return {
                 "booked": booked,
                 "undo_batch_id": batch_id if booked else None,
                 "proposal_groups": self._proposal_groups_for(cid) if cid else [],
             }
         if decision == "reject":
+            effects = self._empty_effects()
+            for session in self.calendar.list_proposed_for_batch(batch_id):
+                self._snapshot_session(effects, session)
+            effects["batches_rejected"].append(batch_id)
             n = self.calendar.reject_batch(batch_id)
+            self._record_decision_turn(cid, decision=decision, batch_id=batch_id, effects=effects)
             return {
                 "rejected": n,
                 "proposal_groups": self._proposal_groups_for(cid) if cid else [],
@@ -513,13 +671,6 @@ class ControlPlane:
         if existing and existing.get("response"):
             return ChatResponse.model_validate(existing["response"])
 
-        begun = existing or self.turns.try_begin(request_id, cid, text)
-        if begun is None:
-            stored = self.turns.get(request_id)
-            if stored and stored.get("response"):
-                return ChatResponse.model_validate(stored["response"])
-            begun = stored
-
         answers = []
         for item in clarification_answers:
             if hasattr(item, "model_dump"):
@@ -528,8 +679,18 @@ class ControlPlane:
                 answers.append(item)
 
         revision_group = None
-        if revision_of:
-            revision_group = self._supersede_revision_path(cid, revision_of)
+        if revision_of and not (existing and existing.get("user_message_id")):
+            reverted = self.revert_to(cid, revision_of, include_target=True)
+            if not reverted.get("ok"):
+                raise RevertBlocked(reverted.get("detail") or "Can't edit that message.")
+            revision_group = reverted.get("revision_group")
+
+        begun = existing or self.turns.try_begin(request_id, cid, text)
+        if begun is None:
+            stored = self.turns.get(request_id)
+            if stored and stored.get("response"):
+                return ChatResponse.model_validate(stored["response"])
+            begun = stored
 
         user_mid = None
         if not (begun and begun.get("user_message_id")):
@@ -593,9 +754,16 @@ class ControlPlane:
                     {"stage": "completed", "label": "Booked after your approval", "detail": "No Cloud AI used"},
                 ],
             )
-            return self._finish_response(request_id, cid, response)
+            effects = self._empty_effects()
+            if booked:
+                effects["batches_approved"].append(batch_id)
+            return self._finish_response(request_id, cid, response, effects=effects)
         if len(open_groups) == 1 and lower in reject_words:
             batch_id = open_groups[0].proposal_batch_id
+            effects = self._empty_effects()
+            for session in self.calendar.list_proposed_for_batch(batch_id):
+                self._snapshot_session(effects, session)
+            effects["batches_rejected"].append(batch_id)
             n = self.calendar.reject_batch(batch_id)
             reply = f"Rejected {n} proposed session(s). Say what to change and I'll propose again."
             self._add_message(cid, "assistant", reply)
@@ -607,7 +775,7 @@ class ControlPlane:
                 proposal_groups=[],
                 request_id=request_id,
             )
-            return self._finish_response(request_id, cid, response)
+            return self._finish_response(request_id, cid, response, effects=effects)
 
         if not self.settings.groq_configured and self._ai is None:
             reply = (
@@ -733,12 +901,16 @@ class ControlPlane:
         response: ChatResponse,
         *,
         status: str = "completed",
+        effects: dict[str, Any] | None = None,
     ) -> ChatResponse:
         response.request_id = request_id
         if not response.proposal_groups:
             response.proposal_groups = self._proposal_groups_for(cid)
         payload = response.model_dump(mode="json")
-        self.turns.update(request_id, status=status, response_json=payload)
+        fields: dict[str, Any] = {"status": status, "response_json": payload}
+        if effects is not None:
+            fields["effects_json"] = effects
+        self.turns.update(request_id, **fields)
         if status in {"completed", "cancelled", "failed"} and not response.clarification_questions:
             conv = self.conversations.get(cid) or {}
             draft = dict(conv.get("draft") or {})
@@ -768,11 +940,15 @@ class ControlPlane:
         stale = False
         refreshed_records: list[dict[str, Any]] = []
         refreshed_ops: list[dict[str, Any]] = []
+        effects = self._empty_effects()
 
         for raw in ops:
             if raw.get("kind") == "pause_others":
                 keep_id = raw.get("target_id") or (goal.id if goal else None)
                 if keep_id:
+                    for other in self.goals.list_open():
+                        if other.conversation_id == cid and other.id != keep_id:
+                            self._record_goal_before(effects, other)
                     self.goals.pause_others(cid, keep_id=keep_id)
                 continue
             action_data = raw.get("calendar_action") or {}
@@ -806,6 +982,8 @@ class ControlPlane:
                 refreshed_ops.append(self._pending_op(raw.get("kind") or f"calendar_{action.op}", action, records, preview))
                 refreshed_records.extend(records)
                 continue
+            for session in current:
+                self._snapshot_session(effects, session, deleted=action.op == "delete")
             d, u, errors = self.calendar.apply_reviewed_action(action, reviewed_ids)
             deleted.extend(d)
             updated.extend(u)
@@ -839,6 +1017,8 @@ class ControlPlane:
             )
 
         self.turns.update(pending["request_id"], status="completed", pending_ops_json=[])
+        if request_id:
+            self.turns.update(request_id, effects_json=effects)
         n = len(deleted) + len(updated)
         reply = f"Applied {n} calendar change{'s' if n != 1 else ''}."
         if unresolved:
@@ -980,7 +1160,12 @@ class ControlPlane:
                 raw = provider.complete_json(SYSTEM_PROMPT, payload, allow_retry=False)
             try:
                 parsed = parse_buddy_turn(raw)
-            except (ValidationError, ValueError) as parse_exc:
+            except ValidationError as parse_exc:
+                paths = [".".join(str(part) for part in err.get("loc", ())) for err in parse_exc.errors()[:12]]
+                log.warning("buddy_turn_invalid paths=%s", paths)
+                raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from parse_exc
+            except ValueError as parse_exc:
+                log.warning("buddy_turn_invalid detail=%s", str(parse_exc)[:120])
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from parse_exc
             stats = getattr(provider, "last_stats", None)
             _record("ok", attempt=1, stats=stats)
@@ -1010,19 +1195,6 @@ class ControlPlane:
                 if isinstance(repair_exc, GroqError):
                     raise
                 raise GroqError("malformed", "Cloud AI returned an invalid BuddyTurn") from repair_exc
-        except ValidationError:
-            self._call_count += 1
-            repair = (
-                payload
-                + "\n\nPrevious output was invalid. Return ONLY valid BuddyTurn JSON using exact intent enums."
-            )
-            try:
-                raw2 = provider.complete_json(SYSTEM_PROMPT, repair, **complete_kwargs)
-            except TypeError:
-                raw2 = provider.complete_json(SYSTEM_PROMPT, repair, allow_retry=False)
-            stats = getattr(provider, "last_stats", None)
-            _record("ok", attempt=2, stats=stats)
-            return parse_buddy_turn(raw2), categories
         finally:
             if request_client is not None:
                 if entry is not None and entry.get("http_client") is request_client:
@@ -1118,6 +1290,7 @@ class ControlPlane:
         preview_records: list[dict[str, Any]] = []
         questions = list(turn.clarification_questions)
         open_goals = [g for g in self.goals.list_open() if g.conversation_id == cid]
+        effects = self._empty_effects()
 
         action = turn.requested_action
         if action and action.type not in KNOWN_REQUESTED_ACTIONS:
@@ -1219,6 +1392,7 @@ class ControlPlane:
                     created_refs=created_refs,
                     user_text=user_text,
                     open_goals=open_goals,
+                    effects=effects,
                 )
             except Exception as exc:  # noqa: BLE001
                 operations.append(
@@ -1366,6 +1540,9 @@ class ControlPlane:
             )
         elif request_id and questions:
             self.turns.update(request_id, clarifications_json=[q.model_dump() for q in questions])
+
+        if request_id:
+            self.turns.update(request_id, effects_json=effects)
 
         self._add_message(cid, "assistant", reply)
         pending_q = None
@@ -1669,11 +1846,13 @@ class ControlPlane:
         created_refs: dict[str, Goal],
         user_text: str,
         open_goals: list[Goal],
+        effects: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         kind = op["kind"]
         payload = op.get("payload") or {}
         update = operation_goal_update(op) if kind in {"goal_create", "goal_update", "pause_others"} else None
         cal_action = operation_calendar_action(op)
+        effects = effects if effects is not None else self._empty_effects()
 
         if kind == "goal_create" and update is not None:
             created = self.goals.create(
@@ -1689,6 +1868,7 @@ class ControlPlane:
                 facts=update.facts or {},
                 pause_others=False,
             )
+            effects["goals_created"].append(created.id)
             return {
                 "goal": created,
                 "status": "succeeded",
@@ -1711,7 +1891,11 @@ class ControlPlane:
             if target is None:
                 return {"status": "needs_clarification", "detail": "Which goal should I update?"}
             if kind == "pause_others":
+                for other in self.goals.list_open():
+                    if other.conversation_id == cid and other.id != target.id:
+                        self._record_goal_before(effects, other)
                 self.goals.pause_others(cid, keep_id=target.id)
+            self._record_goal_before(effects, target)
             updated = self.goals.apply_update(target, update)
             return {"goal": updated, "status": "succeeded", "detail": updated.title}
 
@@ -1765,6 +1949,7 @@ class ControlPlane:
                 }
             if target.status == "gathering" and not self._goal_has_cadence(target):
                 return {"goal": target, "status": "skipped", "detail": "no cadence"}
+            self._record_goal_before(effects, target)
             _reply_text, sessions, raw_summary = propose_for_goal(self.calendar, target)
             self.goals.save(target)
             summary = self._public_proposal_summary(raw_summary)
@@ -1777,6 +1962,10 @@ class ControlPlane:
                     summary=summary,
                     sessions=sessions,
                 )
+                for session in sessions:
+                    effects["sessions_created"].append(session.id)
+                if batch_id and batch_id not in effects["batches_proposed"]:
+                    effects["batches_proposed"].append(batch_id)
             status = "succeeded" if sessions else "skipped"
             return {
                 "goal": target,
@@ -1799,6 +1988,8 @@ class ControlPlane:
             if batch:
                 booked = self.calendar.approve_batch(batch, conversation_id=cid)
                 undo = batch if booked else None
+                if booked:
+                    effects["batches_approved"].append(batch)
             return {"goal": target or goal, "booked": booked, "undo_batch_id": undo, "status": "succeeded"}
 
         if kind == "reject_proposals":
@@ -1809,6 +2000,9 @@ class ControlPlane:
             if not batch and target:
                 batch = self.calendar.open_proposal_batch(target.id)
             if batch:
+                for session in self.calendar.list_proposed_for_batch(batch):
+                    self._snapshot_session(effects, session)
+                effects["batches_rejected"].append(batch)
                 self.calendar.reject_batch(batch)
             return {"goal": target or goal, "status": "succeeded"}
 
@@ -1816,9 +2010,12 @@ class ControlPlane:
             session_id = payload.get("session_id") or op.get("target_id")
             outcome = payload.get("outcome")
             if session_id and outcome:
+                self._snapshot_session(effects, self.calendar.get_session(session_id))
                 marked = self.calendar.mark_outcome(session_id, outcome)
                 return {"updated": [marked] if marked else [], "status": "succeeded", "goal": goal}
             if cal_action:
+                for session in self.calendar.resolve_action_targets(cal_action):
+                    self._snapshot_session(effects, session)
                 deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
                 return {
                     "deleted": deleted,
@@ -1829,6 +2026,8 @@ class ControlPlane:
                 }
 
         if kind.startswith("calendar_") and cal_action:
+            for session in self.calendar.resolve_action_targets(cal_action):
+                self._snapshot_session(effects, session, deleted=cal_action.op == "delete")
             deleted, updated, errors = self.calendar.apply_calendar_action(cal_action)
             return {
                 "deleted": deleted,

@@ -231,6 +231,51 @@ class GoalStore:
         )
         self.conn.commit()
 
+    def restore_snapshot(self, snap: dict[str, Any]) -> Goal | None:
+        """Put a goal back to a recorded snapshot, including re-insert after delete."""
+        gid = snap.get("id")
+        if not gid:
+            return None
+        existing = self.get(gid)
+        now = _now()
+        if existing:
+            existing.title = snap.get("title") or existing.title
+            existing.domain = snap.get("domain")
+            existing.target = snap.get("target")
+            existing.deadline = snap.get("deadline")
+            existing.baseline = snap.get("baseline")
+            existing.frequency = snap.get("frequency")
+            existing.commitment = snap.get("commitment")
+            existing.status = snap.get("status") or existing.status
+            existing.facts = snap.get("facts") if isinstance(snap.get("facts"), dict) else existing.facts
+            self.save(existing)
+            return self.get(gid)
+        self.conn.execute(
+            """
+            INSERT INTO goals (
+                id, conversation_id, title, domain, target, deadline,
+                baseline, frequency, commitment, status, facts_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                gid,
+                snap.get("conversation_id") or "",
+                snap.get("title") or "Untitled goal",
+                snap.get("domain"),
+                snap.get("target"),
+                snap.get("deadline"),
+                snap.get("baseline"),
+                snap.get("frequency"),
+                snap.get("commitment"),
+                snap.get("status") or "gathering",
+                json.dumps(snap.get("facts") or {}),
+                snap.get("created_at") or now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return self.get(gid)
+
     def _row(self, row: Any) -> Goal:
         d = dict(row)
         facts_raw = d.get("facts_json") or "{}"

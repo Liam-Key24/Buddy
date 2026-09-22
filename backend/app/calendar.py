@@ -1065,6 +1065,76 @@ class CalendarService:
             return None
         return self._row_to_session(row)
 
+    def session_snapshot(self, session: SessionOut) -> dict[str, Any]:
+        return {
+            "id": session.id,
+            "goal_id": session.goal_id,
+            "title": session.title,
+            "start_at": session.start_at,
+            "end_at": session.end_at,
+            "kind": session.kind,
+            "status": session.status,
+            "proposal_batch_id": session.proposal_batch_id,
+            "notes": session.notes,
+            "category_id": session.category_id,
+            "created_at": None,
+            "updated_at": session.updated_at,
+        }
+
+    def restore_session_snapshot(self, snap: dict[str, Any]) -> SessionOut | None:
+        sid = snap.get("id")
+        if not sid:
+            return None
+        now = _now()
+        existing = self.conn.execute("SELECT id FROM sessions WHERE id=?", (sid,)).fetchone()
+        if existing:
+            self.conn.execute(
+                """
+                UPDATE sessions SET
+                    goal_id=?, title=?, start_at=?, end_at=?, kind=?, status=?,
+                    proposal_batch_id=?, notes=?, category_id=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    snap.get("goal_id"),
+                    snap.get("title") or "",
+                    snap.get("start_at"),
+                    snap.get("end_at"),
+                    snap.get("kind") or "flexible",
+                    snap.get("status") or "scheduled",
+                    snap.get("proposal_batch_id"),
+                    snap.get("notes"),
+                    snap.get("category_id"),
+                    now,
+                    sid,
+                ),
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, goal_id, title, start_at, end_at, kind, status,
+                    proposal_batch_id, notes, created_at, updated_at, category_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sid,
+                    snap.get("goal_id"),
+                    snap.get("title") or "",
+                    snap.get("start_at"),
+                    snap.get("end_at"),
+                    snap.get("kind") or "flexible",
+                    snap.get("status") or "scheduled",
+                    snap.get("proposal_batch_id"),
+                    snap.get("notes"),
+                    snap.get("created_at") or now,
+                    now,
+                    snap.get("category_id"),
+                ),
+            )
+        self.conn.commit()
+        return self.get_session(sid)
+
     def resolve_action_targets(self, action: CalendarAction) -> list[SessionOut]:
         if action.session_id:
             session = self.get_session(action.session_id)

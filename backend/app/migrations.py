@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -270,5 +270,14 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 7)
         version = 7
+
+    if version < 8:
+        if not _column_exists(conn, "turns", "effects_json"):
+            conn.execute(
+                "ALTER TABLE turns ADD COLUMN effects_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        conn.commit()
+        set_schema_version(conn, 8)
+        version = 8
 
     return version

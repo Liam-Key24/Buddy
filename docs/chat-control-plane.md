@@ -24,6 +24,6 @@ A turn may create three goals and propose a plan for only one of them. Follow-up
 
 Unknown calendar ops and unknown `requested_action` types are validation failures, not silent `none`. Mixed success/failure is reported as a partial result, never as overall success.
 
-## Remaining work
+Edit/resend uses `revision_of`. Before the new turn runs, later (and the original) turn `effects_json` are undone: created goals are removed, calendar rows are restored or deleted, and unapproved previews are cancelled. Edit is refused with HTTP 409 when a later session is already `completed` or `missed`, so the transcript cannot lie about calendar history.
 
-Message edit/revert is not exposed in Chat. `revert_to` only hides later messages and rejects the active goal’s open batch; it does not roll back committed goal or calendar writes. A cosmetic edit control would break the relationship between messages and what actually landed, so it stays out until that mapping is durable.
+`openai/gpt-oss-120b` cannot use Groq `json_object` mode (`json_validate_failed`). Completions are parsed from message text. Live three-goal dumps still often fail BuddyTurn validation after HTTP 200, so Chat is not ready to move onto the server.
