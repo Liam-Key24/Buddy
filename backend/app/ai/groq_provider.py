@@ -86,9 +86,21 @@ class GroqProvider:
         self._model_validated = True
         log.info("groq_model_ok model=%s", self.settings.groq_model)
 
-    def complete_json(self, system: str, user: str, *, allow_retry: bool = True) -> dict[str, Any]:
-        """One chat completion expecting a JSON object. At most one retry."""
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        allow_retry: bool = True,
+        cancel_check=None,
+    ) -> dict[str, Any]:
+        """One physical Groq POST. HTTP/transport errors are not retried here."""
+        del allow_retry
+        if cancel_check and cancel_check():
+            raise GroqError("cancelled", "Stopped")
         self.validate_model()
+        if cancel_check and cancel_check():
+            raise GroqError("cancelled", "Stopped")
         payload = {
             "model": self.settings.groq_model,
             "temperature": 0.2,
@@ -99,20 +111,16 @@ class GroqProvider:
                 {"role": "user", "content": user},
             ],
         }
-        try:
-            return self._request_json(payload, retried=False)
-        except GroqError as exc:
-            if not allow_retry or exc.category not in {"transport", "malformed", "http"}:
-                raise
-            if exc.category == "http" and "429" not in str(exc) and "5" not in str(exc)[:20]:
-                # Only retry rate-limit / 5xx-style categories flagged below
-                pass
-            return self._request_json(payload, retried=True)
+        return self._request_json(payload, retried=False, cancel_check=cancel_check)
 
-    def _request_json(self, payload: dict[str, Any], *, retried: bool) -> dict[str, Any]:
+    def _request_json(
+        self, payload: dict[str, Any], *, retried: bool, cancel_check=None
+    ) -> dict[str, Any]:
         started = time.perf_counter()
         status: int | None = None
         try:
+            if cancel_check and cancel_check():
+                raise GroqError("cancelled", "Stopped")
             resp = self._http().post("/chat/completions", json=payload)
             status = resp.status_code
             if status == 429:
@@ -168,12 +176,15 @@ class GroqProvider:
             )
             raise GroqError("malformed", "Cloud AI returned unusable output") from exc
         except httpx.HTTPError as exc:
+            category = "cancelled" if (cancel_check and cancel_check()) else "transport"
             self.last_stats = GroqCallStats(
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 status=status,
                 retried=retried,
-                error_category="transport",
+                error_category=category,
             )
+            if category == "cancelled":
+                raise GroqError("cancelled", "Stopped") from exc
             raise GroqError("transport", f"Cloud AI unreachable ({exc.__class__.__name__})") from exc
 
 

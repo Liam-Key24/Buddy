@@ -34,19 +34,24 @@ Inference cheatsheet (use these; do not re-ask):
 Clarifications (rare):
 - Ask at most ONE clarification total, and only if you cannot propose without it
   (e.g. no goal at all, or two conflicting goals with no way to choose).
-- Prefer a single clarification string over clarification_questions.
-- If you must use clarification_questions, max 2, never stack cadence + days + time as separate asks.
+- Prefer clarification_questions (id, label, answer_type, options, suggested_answer)
+  as a single batch over a prose clarification string.
+- Max 2 questions. Never stack cadence + days + time as separate asks.
 - Do NOT ask: exact weekday list, exact start time, exact session count when a range was given,
   or permission to propose once cadence is clear.
+- assistant_text is a short summary plus assumptions. Do not paste the full dated schedule;
+  the app shows that on proposal cards.
 
 Rules:
 - Keep ONE stable goal unless the user clearly starts a separate new goal.
 - Never claim sessions are booked. Proposals need user approve/reject.
 - Never invent database IDs. Use null when unknown.
-- Support multi-intent day dumps via multiple intents.
+- Support multi-intent day dumps via multiple intents and multiple goal_updates.
 - Do not mention model names, tools, JSON, or internal routing in assistant_text.
 - Use EXACT intent enum strings only (no synonyms like set_goal or request_plan).
 - requested_action MUST be an object (or null), never a bare string.
+- Calendar delete/move/bulk is previewed by the app — still emit calendar_actions with exact ids.
+- Payload includes timezone and local_now. Interpret today/tomorrow/tonight/weekend in that zone.
 
 When proposing a weekly plan (any domain — climbing, product, reading, etc.):
 - Store it in goal_updates[].facts.weekly_plan so the calendar can use exact titles and days.
@@ -140,6 +145,11 @@ def build_user_payload(
     open_proposal_batch_id: str | None,
     open_sparks: list[dict],
     calendar_sessions: list[dict] | None = None,
+    timezone: str = "Europe/London",
+    local_now: str | None = None,
+    today: str | None = None,
+    open_goals: list[dict] | None = None,
+    clarification_answers: list[dict] | None = None,
 ) -> str:
     from datetime import date
     import json
@@ -148,14 +158,18 @@ def build_user_payload(
         {
             "user_message": message,
             "active_goal": active_goal,
-            "recent_messages": recent_messages[-12:],
+            "open_goals": (open_goals or [])[:8],
+            "recent_messages": recent_messages[-8:],
             "open_proposal_batch_id": open_proposal_batch_id,
             "open_sparks": open_sparks[:8],
-            "calendar_sessions": (calendar_sessions or [])[:40],
-            "today": date.today().isoformat(),
+            "calendar_sessions": calendar_sessions or [],
+            "timezone": timezone,
+            "local_now": local_now,
+            "today": today or date.today().isoformat(),
+            "clarification_answers": clarification_answers or [],
             "notes": (
-                "Today's date is in 'today'. Clock times (8pm, 8 pm, 20:00) are start times, "
-                "never session counts. If they want a single/today/one-off event, set "
+                "Today's date is in 'today' in the user's timezone. Clock times (8pm, 8 pm, 20:00) "
+                "are start times, never session counts. If they want a single/today/one-off event, set "
                 "weekly_plan.repeat=once, weekly_plan.on_date to that date, frequency=once, "
                 "and propose_sessions — the app creates one session only. Infer a weekly_plan "
                 "only when they give a repeating cadence. Pick concrete days/times; state "
@@ -164,7 +178,8 @@ def build_user_payload(
                 "If they approve an open batch, use approve_proposals. For delete/edit/move, use "
                 "calendar_actions with session_id from calendar_sessions when possible. "
                 "Missed sessions: when they ask to catch up or propose again, set propose_sessions — "
-                "the calendar stacks makeup slots before the deadline."
+                "the calendar stacks makeup slots before the deadline. "
+                "Use clarification_questions as a batch when you must ask."
             ),
         },
         ensure_ascii=False,

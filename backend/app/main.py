@@ -62,7 +62,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message required")
     return plane.handle_message(
-        req.message, req.conversation_id, request_id=req.request_id
+        req.message,
+        req.conversation_id,
+        request_id=req.request_id,
+        clarification_answers=req.clarification_answers,
+        revision_of=req.revision_of,
     )
 
 
@@ -389,6 +393,14 @@ def save_draft(conversation_id: str, body: DraftBody):
     if not row:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return row
+
+
+@app.post("/conversations/{conversation_id}/messages/{message_id}/revert")
+def revert_message(conversation_id: str, message_id: str):
+    result = plane.revert_to(conversation_id, message_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail="Message not found")
+    return result
 
 
 @app.get("/conversations/{conversation_id}/messages")

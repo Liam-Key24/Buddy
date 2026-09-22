@@ -26,7 +26,7 @@ class ScriptedAI:
         self.calls = 0
         self.last_user: dict | None = None
 
-    def complete_json(self, system: str, user: str, *, allow_retry: bool = True) -> dict:
+    def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict:
         self.calls += 1
         self.last_user = json.loads(user)
         return self.payload
@@ -87,7 +87,6 @@ def test_multi_goal_dump_keeps_all_goals_open(tmp_path: Path):
         plane.close()
 
 
-@pytest.mark.xfail(strict=True, reason="phase 2: mutation preview policy")
 def test_chat_delete_previews_instead_of_committing(plane: ControlPlane):
     ready, booked = _book_sessions(plane)
     target_id = booked.booked_sessions[0].id
@@ -100,7 +99,6 @@ def test_chat_delete_previews_instead_of_committing(plane: ControlPlane):
     assert preview, "destructive calendar ops must wait for approval"
 
 
-@pytest.mark.xfail(strict=True, reason="phase 3: idempotent request_id replay")
 def test_duplicate_request_id_replays_without_double_write(tmp_path: Path):
     ai = ScriptedAI(
         {
@@ -132,7 +130,6 @@ def test_duplicate_request_id_replays_without_double_write(tmp_path: Path):
         plane.close()
 
 
-@pytest.mark.xfail(strict=True, reason="phase 5: no Groq retry on ordinary 4xx")
 def test_groq_does_not_retry_ordinary_4xx():
     posts = {"n": 0}
 
@@ -153,7 +150,6 @@ def test_groq_does_not_retry_ordinary_4xx():
     assert posts["n"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason="phase 6–7: scoped context and Europe/London timezone")
 def test_user_message_is_not_duplicated_in_history(tmp_path: Path):
     ai = ScriptedAI(
         {
@@ -178,5 +174,63 @@ def test_user_message_is_not_duplicated_in_history(tmp_path: Path):
         assert payload.get("timezone") == "Europe/London"
         # Chat-only turns must not send the whole calendar.
         assert payload.get("calendar_sessions") in ([], None)
+    finally:
+        plane.close()
+
+
+def test_london_bst_tomorrow(tmp_path: Path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.timeutil import resolve_relative_date
+
+    # 22 June 2026 23:30 UTC is already 23 June 00:30 in London BST.
+    at = datetime(2026, 6, 22, 23, 30, tzinfo=ZoneInfo("UTC"))
+    assert resolve_relative_date("tomorrow", "Europe/London", at=at) == "2026-06-24"
+    assert resolve_relative_date("today", "Europe/London", at=at) == "2026-06-23"
+
+
+def test_revert_hides_later_messages(tmp_path: Path):
+    ai = ScriptedAI(
+        {
+            "assistant_text": "I'm with you.",
+            "intents": ["chat"],
+            "goal_updates": [],
+            "requested_action": {"type": "none"},
+            "confidence": 0.5,
+        }
+    )
+    plane = ControlPlane(db_path=tmp_path / "test.db", ai=ai)
+    try:
+        first = plane.handle_message("Keep this first line")
+        plane.handle_message("second turn please", conversation_id=first.conversation_id)
+        messages = plane.list_messages(first.conversation_id)
+        first_user = next(m for m in messages if m["role"] == "user")
+        plane.revert_to(first.conversation_id, first_user["id"])
+        visible = plane.list_messages(first.conversation_id)
+        user_lines = [m["content"] for m in visible if m["role"] == "user"]
+        assert user_lines == ["Keep this first line"]
+        again = plane.revert_to(first.conversation_id, first_user["id"])
+        assert again["ok"] is True
+    finally:
+        plane.close()
+
+
+def test_unknown_requested_action_does_not_succeed(tmp_path: Path):
+    ai = ScriptedAI(
+        {
+            "assistant_text": "I wiped the calendar.",
+            "intents": ["chat"],
+            "goal_updates": [],
+            "requested_action": {"type": "explode_calendar"},
+            "confidence": 0.9,
+        }
+    )
+    plane = ControlPlane(db_path=tmp_path / "test.db", ai=ai)
+    try:
+        res = plane.handle_message("Please explode the calendar")
+        assert res.unresolved
+        assert any(op.get("status") == "failed" for op in res.operations)
+        assert "wiped" not in res.reply.lower() or res.unresolved
     finally:
         plane.close()

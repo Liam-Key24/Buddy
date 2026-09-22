@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -232,5 +232,43 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 6)
         version = 6
+
+    if version < 7:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS turns (
+                request_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                user_message TEXT,
+                response_json TEXT,
+                pending_ops_json TEXT NOT NULL DEFAULT '[]',
+                clarifications_json TEXT NOT NULL DEFAULT '[]',
+                activity_json TEXT NOT NULL DEFAULT '[]',
+                context_categories_json TEXT NOT NULL DEFAULT '[]',
+                user_message_id TEXT,
+                assistant_message_id TEXT,
+                revision_group TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_turns_conversation ON turns(conversation_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_turns_status ON turns(conversation_id, status)"
+        )
+        row = conn.execute(
+            "SELECT value FROM buddy_meta WHERE key='timezone'"
+        ).fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO buddy_meta (key, value) VALUES ('timezone', 'Europe/London')"
+            )
+        conn.commit()
+        set_schema_version(conn, 7)
+        version = 7
 
     return version

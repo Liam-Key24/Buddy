@@ -17,7 +17,7 @@ class FakeGroq:
     def close(self) -> None:
         self.closed = True
 
-    def complete_json(self, system: str, user: str, *, allow_retry: bool = True) -> dict[str, Any]:
+    def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict[str, Any]:
         self.calls += 1
         payload = json.loads(user)
         message = payload["user_message"]

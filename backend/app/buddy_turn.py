@@ -96,6 +96,7 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data.get("assistant_text"), str) or not data["assistant_text"].strip():
         data["assistant_text"] = "I'm here — tell me a bit more and we'll shape a plan you control."
 
+    errors: list[dict[str, str]] = list(data.get("validation_errors") or [])
     intents_in = data.get("intents") or ["chat"]
     if isinstance(intents_in, str):
         intents_in = [intents_in]
@@ -103,8 +104,11 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
     for item in intents_in:
         key = str(item).strip().lower().replace(" ", "_")
         mapped = INTENT_ALIASES.get(key, key)
-        if mapped in VALID_INTENTS and mapped not in intents:
-            intents.append(mapped)
+        if mapped in VALID_INTENTS:
+            if mapped not in intents:
+                intents.append(mapped)
+        else:
+            errors.append({"path": "intents", "error": f"unknown intent {key}"})
     if not intents:
         intents = ["chat"]
     data["intents"] = intents
@@ -144,13 +148,16 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
     if ra is None or ra == "":
         data["requested_action"] = {"type": "none"}
     elif isinstance(ra, str):
-        mapped = ACTION_TYPE_ALIASES.get(ra.strip().lower().replace(" ", "_"), "none")
+        key = ra.strip().lower().replace(" ", "_")
+        mapped = ACTION_TYPE_ALIASES.get(key, key)
+        if mapped not in {"propose_sessions", "approve_proposals", "reject_proposals", "none"}:
+            errors.append({"path": "requested_action.type", "error": f"unknown action {mapped}"})
         data["requested_action"] = {"type": mapped}
     elif isinstance(ra, dict):
         t = str(ra.get("type") or "none").lower().replace(" ", "_")
         t = ACTION_TYPE_ALIASES.get(t, t)
         if t not in {"propose_sessions", "approve_proposals", "reject_proposals", "none"}:
-            t = "none"
+            errors.append({"path": "requested_action.type", "error": f"unknown action {t}"})
         data["requested_action"] = {
             "type": t,
             "batch_id": ra.get("batch_id"),
@@ -160,6 +167,7 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
             "spark_content": ra.get("spark_content"),
         }
     else:
+        errors.append({"path": "requested_action", "error": "requested_action must be an object"})
         data["requested_action"] = {"type": "none"}
 
     try:
@@ -218,6 +226,7 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
         op_raw = str(item.get("op") or item.get("action") or item.get("type") or "").lower().replace(" ", "_")
         op = CALENDAR_OP_ALIASES.get(op_raw)
         if not op:
+            errors.append({"path": "calendar_actions[].op", "error": f"unknown calendar op {op_raw or 'missing'}"})
             continue
         statuses = item.get("statuses") or item.get("status_in") or []
         if isinstance(statuses, str):
@@ -242,6 +251,8 @@ def normalize_buddy_turn_dict(raw: dict[str, Any]) -> dict[str, Any]:
             }
         )
     data["calendar_actions"] = clean_actions
+    data["validation_errors"] = errors
+    data.setdefault("schema_version", 1)
 
     return data
 

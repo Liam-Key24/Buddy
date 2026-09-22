@@ -145,12 +145,7 @@ class CalendarAction(BaseModel):
 
 
 class RequestedAction(BaseModel):
-    type: Literal[
-        "propose_sessions",
-        "approve_proposals",
-        "reject_proposals",
-        "none",
-    ] = "none"
+    type: str = "none"
     batch_id: str | None = None
     session_id: str | None = None
     outcome: Literal["completed", "missed"] | None = None
@@ -158,9 +153,18 @@ class RequestedAction(BaseModel):
     spark_content: str | None = None
 
 
+KNOWN_REQUESTED_ACTIONS = {
+    "propose_sessions",
+    "approve_proposals",
+    "reject_proposals",
+    "none",
+}
+
+
 class BuddyTurn(BaseModel):
     """Canonical structured result from one Cloud AI call."""
 
+    schema_version: int = 1
     assistant_text: str
     intents: list[Intent] = Field(default_factory=lambda: ["chat"])
     goal_updates: list[GoalUpdate] = Field(default_factory=list)
@@ -169,12 +173,20 @@ class BuddyTurn(BaseModel):
     requested_action: RequestedAction | None = None
     calendar_actions: list[CalendarAction] = Field(default_factory=list)
     confidence: float = 0.5
+    validation_errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClarificationAnswer(BaseModel):
+    question_id: str
+    answer: str
 
 
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
     request_id: str | None = None
+    clarification_answers: list[ClarificationAnswer] = Field(default_factory=list)
+    revision_of: str | None = None
 
 
 class ChatCancelRequest(BaseModel):
@@ -199,6 +211,9 @@ class ChatResponse(BaseModel):
     deleted_session_ids: list[str] = Field(default_factory=list)
     updated_sessions: list[SessionOut] = Field(default_factory=list)
     operations: list[dict[str, Any]] = Field(default_factory=list)
+    mutation_preview: dict[str, Any] | None = None
+    stopped: bool = False
+    stop_committed: bool = False
 
 
 class SessionUpdate(BaseModel):
