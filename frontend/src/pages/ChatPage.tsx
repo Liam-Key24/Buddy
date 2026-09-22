@@ -38,7 +38,7 @@ import {
 } from "../api";
 import { cn } from "../lib/cn";
 
-type Msg = { role: "user" | "assistant"; content: string };
+type Msg = { id?: string; role: "user" | "assistant"; content: string };
 
 const EDIT_HINT_KEY = "buddy.editGoalHint";
 const CONTINUE_HINT_KEY = "buddy.continueHint";
@@ -74,6 +74,9 @@ export function ChatPage() {
   const composingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
+  const conversationIdRef = useRef<string | null>(conversationId);
+  const originRef = useRef<string | null>(null);
+  const lateReadyRef = useRef<Set<string>>(new Set());
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stepsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +87,10 @@ export function ChatPage() {
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
   }, []);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   useEffect(() => {
     const raw = localStorage.getItem(EDIT_HINT_KEY);
@@ -155,7 +162,11 @@ export function ChatPage() {
         setMessages(
           rows
             .filter((r) => r.role === "user" || r.role === "assistant")
-            .map((r) => ({ role: r.role as "user" | "assistant", content: r.content })),
+            .map((r) => ({
+              id: r.id,
+              role: r.role as "user" | "assistant",
+              content: r.content,
+            })),
         );
       })
       .catch(() => undefined);
@@ -170,6 +181,9 @@ export function ChatPage() {
         } else {
           setProposals([]);
           setProposalSummary(null);
+        }
+        if (open.clarification_questions?.length) {
+          setQuestions(open.clarification_questions);
         }
       })
       .catch(() => undefined);
@@ -203,12 +217,19 @@ export function ChatPage() {
     }
   }, [busy, questions.length]);
 
-  function applyChatResult(res: ChatResponse) {
-    setConversationId(res.conversation_id);
+  function applyChatResult(res: ChatResponse, originId: string | null) {
+    if (conversationIdRef.current && originId && conversationIdRef.current !== originId) {
+      lateReadyRef.current.add(res.conversation_id);
+      refresh().catch(() => undefined);
+      return;
+    }
+    if (!conversationIdRef.current) {
+      setConversationId(res.conversation_id);
+    }
     const prevStatus = goal?.status;
     setGoal(res.goal);
     if (res.goal?.status === "done" && prevStatus !== "done") {
-      celebrateGoalComplete(res.goal.title);
+      celebrateGoalComplete(res.goal.title, `${res.conversation_id}:${res.goal.id}`);
     }
     setActivity(res.activity || []);
     if (res.proposed_sessions?.length) {
@@ -245,7 +266,10 @@ export function ChatPage() {
     refresh().catch(() => undefined);
   }
 
-  async function sendMessage(text: string) {
+  async function sendMessage(
+    text: string,
+    clarificationAnswers?: Array<{ question_id: string; answer: string }>,
+  ) {
     if (!text.trim() || busy) return;
     setError(null);
     setMessages((m) => [...m, { role: "user", content: text }]);
@@ -259,16 +283,38 @@ export function ChatPage() {
         ? crypto.randomUUID()
         : `req-${Date.now()}`;
     requestIdRef.current = requestId;
+    const originId = conversationId;
+    originRef.current = originId;
     try {
-      const res = await sendChat(text, conversationId, controller.signal, requestId);
-      applyChatResult(res);
+      const res = await sendChat(text, conversationId, controller.signal, requestId, {
+        clarification_answers: clarificationAnswers,
+      });
+      applyChatResult(res, originId);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        setActivity([{ stage: "cancelled", label: "Stopped", detail: "No database or calendar changes" }]);
-        setMessages((m) => [
-          ...m,
-          { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." },
-        ]);
+        let committed = false;
+        const rid = requestIdRef.current;
+        if (rid) {
+          try {
+            const info = await cancelChat(rid);
+            committed = Boolean(info.committed);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (committed) {
+          setActivity([{ stage: "completed", label: "Finished before Stop", detail: "Changes were saved" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: "That turn finished before Stop — calendar changes were saved." },
+          ]);
+        } else {
+          setActivity([{ stage: "cancelled", label: "Stopped", detail: "No calendar changes" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." },
+          ]);
+        }
       } else {
         const message = err instanceof Error ? err.message : "Something went wrong";
         setError(message);
@@ -296,13 +342,11 @@ export function ChatPage() {
   }
 
   async function submitQuestionStack() {
-    const lines = questions.map((q) => {
-      const a = (answers[q.id] || "").trim() || "(skipped)";
-      return `${q.label}: ${a}`;
-    });
-    const payload = `Here are my answers:\n${lines.join("\n")}\nPlease continue with the plan.`;
+    const payload = questions
+      .map((q) => ({ question_id: q.id, answer: (answers[q.id] || "").trim() }))
+      .filter((row) => row.answer);
     setQuestions([]);
-    await sendMessage(payload);
+    await sendMessage("Answered the questions.", payload);
   }
 
   async function onDecide(decision: "approve" | "reject" | "adjust" | "undo") {
@@ -468,7 +512,7 @@ export function ChatPage() {
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
           {messages.map((m, i) => (
             <div
-              key={`${m.role}-${i}`}
+              key={m.id || `${m.role}-${i}`}
               className={cn(
                 "max-w-[85%] rounded-card border border-hairline px-3.5 py-2.5 text-sm leading-relaxed",
                 m.role === "user"

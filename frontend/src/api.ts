@@ -118,6 +118,8 @@ export type OpenProposal = {
   goal: Goal | null;
   proposed_sessions: Session[];
   proposal_summary: ProposalSummary | null;
+  mutation_preview?: Record<string, unknown> | null;
+  clarification_questions?: ClarificationQuestion[];
 };
 
 export type ChatResponse = {
@@ -144,6 +146,16 @@ export type ChatResponse = {
     goal_id?: string | null;
     detail?: string | null;
   }>;
+  mutation_preview?: Record<string, unknown> | null;
+  stopped?: boolean;
+  stop_committed?: boolean;
+};
+
+export type ChatMessage = {
+  id?: string;
+  role: string;
+  content: string;
+  superseded?: number;
 };
 
 /** Notify Calendar/Today views to reload sessions after Chat changes the calendar. */
@@ -229,6 +241,10 @@ export async function sendChat(
   conversationId?: string | null,
   signal?: AbortSignal,
   requestId?: string | null,
+  extras?: {
+    clarification_answers?: Array<{ question_id: string; answer: string }>;
+    revision_of?: string | null;
+  },
 ): Promise<ChatResponse> {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -237,13 +253,17 @@ export async function sendChat(
       message,
       conversation_id: conversationId || null,
       request_id: requestId || null,
+      clarification_answers: extras?.clarification_answers || [],
+      revision_of: extras?.revision_of || null,
     }),
     signal,
   });
   return json(res);
 }
 
-export async function cancelChat(requestId: string): Promise<{ ok: boolean }> {
+export async function cancelChat(
+  requestId: string,
+): Promise<{ ok: boolean; committed?: boolean; turn_status?: string }> {
   return json(
     await fetch(`${API_BASE}/chat/cancel`, {
       method: "POST",
@@ -457,7 +477,7 @@ export async function markSessionOutcome(
 
 export async function fetchMessages(
   conversationId: string,
-): Promise<Array<{ role: string; content: string }>> {
+): Promise<Array<{ id?: string; role: string; content: string }>> {
   return json(await fetch(`${API_BASE}/conversations/${conversationId}/messages`));
 }
 
