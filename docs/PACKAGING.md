@@ -8,6 +8,8 @@ Tauri is a thin window + process supervisor only. Product logic stays in FastAPI
 - `backend/` — FastAPI + SQLite + Groq
 - `src-tauri/` — macOS wrapper
 - `scripts/build_sidecar.sh` — PyInstaller sidecar for the Python backend
+- `backend/buddy-backend.spec` + `backend/sidecar_entry.py` — sidecar build inputs
+- `src-tauri/sidecars/buddy-backend-<triple>` — local binary (gitignored), bundled via `externalBin`
 
 ## Secrets
 

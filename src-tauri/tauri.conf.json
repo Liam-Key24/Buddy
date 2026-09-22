@@ -37,7 +37,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0"
-    }
+    },
+    "externalBin": ["sidecars/buddy-backend"]
   },
   "plugins": {}
 }
