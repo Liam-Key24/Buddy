@@ -234,6 +234,51 @@ def test_stale_preview_does_not_mutate_unreviewed_records(tmp_path: Path):
         plane.close()
 
 
+def test_stale_second_operation_does_not_apply_the_first(tmp_path: Path):
+    plane = ControlPlane(db_path=tmp_path / "t.db", ai=FakeGroq())
+    try:
+        ready, booked = _book_sessions(plane)
+        assert len(booked.booked_sessions) >= 2
+        first, second = booked.booked_sessions[0], booked.booked_sessions[1]
+        plane._ai = ScriptedAI(
+            {
+                "assistant_text": "I can remove those two sessions if you approve.",
+                "intents": ["calendar_delete"],
+                "operations": [
+                    {
+                        "kind": "calendar_delete",
+                        "payload": {"op": "delete", "session_id": first.id},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "kind": "calendar_delete",
+                        "payload": {"op": "delete", "session_id": second.id},
+                        "confidence": 0.9,
+                    },
+                ],
+                "requested_action": {"type": "none"},
+            }
+        )
+        previewed = plane.handle_message(
+            "Delete those two sessions", conversation_id=ready.conversation_id
+        )
+        records = (previewed.mutation_preview or {}).get("records") or []
+        assert {first.id, second.id} <= {r["id"] for r in records}
+        plane.calendar.update_session(second.id, title=second.title + " changed")
+        approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
+        assert plane.calendar.get_session(first.id) is not None
+        assert plane.calendar.get_session(second.id) is not None
+        assert not (approved.deleted_session_ids or [])
+        assert "stale" in (approved.reply or "").lower() or "didn't apply" in (approved.reply or "").lower()
+        assert "applied" not in (approved.reply or "").lower()
+        details = " ".join(
+            f"{step.get('label') or ''} {step.get('detail') or ''}" for step in (approved.activity or [])
+        ).lower()
+        assert "no calendar" in details
+    finally:
+        plane.close()
+
+
 def test_follow_up_updates_the_named_goal_not_the_latest(tmp_path: Path):
     dump = ScriptedAI(_dump_payload())
     plane = ControlPlane(db_path=tmp_path / "t.db", ai=dump)
@@ -407,6 +452,44 @@ def test_edit_undoes_later_goal_create(tmp_path: Path):
         visible = plane.list_messages(first.conversation_id)
         user_lines = [m["content"] for m in visible if m["role"] == "user"]
         assert user_lines == ["Just thinking out loud"]
+    finally:
+        plane.close()
+
+
+def test_edit_undoes_spark_capture(tmp_path: Path):
+    ai = ScriptedAI(_chat_payload())
+    plane = ControlPlane(db_path=tmp_path / "t.db", ai=ai)
+    try:
+        first = plane.handle_message("Just thinking")
+        ai.payload = {
+            "schema_version": 2,
+            "assistant_text": "Saved spark (not a commitment): standing desk",
+            "intents": ["spark_capture"],
+            "operations": [
+                {
+                    "kind": "spark_capture",
+                    "payload": {"spark_content": "standing desk"},
+                    "confidence": 0.9,
+                }
+            ],
+            "requested_action": {"type": "none", "spark_content": "standing desk"},
+            "confidence": 0.9,
+        }
+        plane.handle_message("spark: standing desk", conversation_id=first.conversation_id)
+        assert any("standing desk" in s.content.lower() for s in plane.sparks.list_open())
+        spark_user = [
+            m
+            for m in plane.list_messages(first.conversation_id)
+            if m["role"] == "user" and "standing desk" in m["content"].lower()
+        ][-1]
+        ai.payload = _chat_payload()
+        plane.handle_message(
+            "never mind the spark",
+            conversation_id=first.conversation_id,
+            revision_of=spark_user["id"],
+        )
+        assert not any("standing desk" in s.content.lower() for s in plane.sparks.list_all())
+        assert not plane.sparks.list_open()
     finally:
         plane.close()
 

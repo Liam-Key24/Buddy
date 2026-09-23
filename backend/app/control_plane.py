@@ -324,6 +324,7 @@ class ControlPlane:
             "batches_approved": [],
             "batches_rejected": [],
             "sparks_created": [],
+            "sparks_before": {},
         }
 
     def _record_goal_before(self, effects: dict[str, Any], goal: Goal | None) -> None:
@@ -365,6 +366,11 @@ class ControlPlane:
                 self.goals.restore_snapshot(snap)
         for gid in effects.get("goals_created") or []:
             self.goals.remove(gid)
+        for snap in (effects.get("sparks_before") or {}).values():
+            if isinstance(snap, dict):
+                self.sparks.restore_snapshot(snap)
+        for sid in effects.get("sparks_created") or []:
+            self.sparks.remove(sid)
 
     def _record_decision_turn(
         self,
@@ -934,28 +940,22 @@ class ControlPlane:
         request_id: str,
     ) -> ChatResponse:
         ops = pending.get("pending_ops") or []
-        deleted: list[str] = []
-        updated: list[SessionOut] = []
         unresolved: list[str] = []
-        stale = False
-        refreshed_records: list[dict[str, Any]] = []
-        refreshed_ops: list[dict[str, Any]] = []
         effects = self._empty_effects()
+        stale = False
+        pause_ops: list[dict[str, Any]] = []
+        calendar_plans: list[tuple[dict[str, Any], CalendarAction, list[str], list[SessionOut]]] = []
 
         for raw in ops:
             if raw.get("kind") == "pause_others":
-                keep_id = raw.get("target_id") or (goal.id if goal else None)
-                if keep_id:
-                    for other in self.goals.list_open():
-                        if other.conversation_id == cid and other.id != keep_id:
-                            self._record_goal_before(effects, other)
-                    self.goals.pause_others(cid, keep_id=keep_id)
+                pause_ops.append(raw)
                 continue
             action_data = raw.get("calendar_action") or {}
             try:
                 action = CalendarAction.model_validate(action_data)
             except ValidationError:
                 unresolved.append("invalid_preview")
+                stale = True
                 continue
             reviewed_ids = list(raw.get("reviewed_ids") or [])
             fingerprints = raw.get("fingerprints") or {}
@@ -963,57 +963,68 @@ class ControlPlane:
                 unresolved.append("preview_missing_ids")
                 stale = True
                 continue
-            current = []
+            current: list[SessionOut] = []
             for sid in reviewed_ids:
                 session = self.calendar.get_session(sid)
-                if session is None or not self.calendar.fingerprints_match(session, fingerprints.get(sid)):
+                if session is None or not self.calendar.fingerprints_match(
+                    session, fingerprints.get(sid)
+                ):
                     stale = True
                     break
                 current.append(session)
             if stale:
-                # Rebuild a preview from the original selector for the user to review again.
-                targets = self.calendar.resolve_action_targets(action)
-                records = [self._preview_record(t, action) for t in targets]
-                preview = preview_payload(
-                    kind=raw.get("kind") or f"calendar_{action.op}",
-                    records=records,
-                    why="The calendar changed after this preview. Approve again to apply only the sessions shown.",
-                )
-                refreshed_ops.append(self._pending_op(raw.get("kind") or f"calendar_{action.op}", action, records, preview))
-                refreshed_records.extend(records)
                 continue
+            calendar_plans.append((raw, action, reviewed_ids, current))
+
+        if stale:
+            return self._pending_turn_not_applied(
+                cid,
+                pending,
+                goal,
+                request_id,
+                ops,
+                unresolved,
+                reply=(
+                    "That preview is stale — matching calendar records changed, so I didn't apply it. "
+                    "Review the updated list and approve only if it still looks right."
+                ),
+            )
+
+        for raw in pause_ops:
+            keep_id = raw.get("target_id") or (goal.id if goal else None)
+            if keep_id:
+                for other in self.goals.list_open():
+                    if other.conversation_id == cid and other.id != keep_id:
+                        self._record_goal_before(effects, other)
+                self.goals.pause_others(cid, keep_id=keep_id)
+
+        deleted: list[str] = []
+        updated: list[SessionOut] = []
+        apply_failed = False
+        for _raw, action, reviewed_ids, current in calendar_plans:
             for session in current:
                 self._snapshot_session(effects, session, deleted=action.op == "delete")
             d, u, errors = self.calendar.apply_reviewed_action(action, reviewed_ids)
             deleted.extend(d)
             updated.extend(u)
-            unresolved.extend(errors)
+            if errors:
+                unresolved.extend(errors)
+                apply_failed = True
+                break
 
-        if stale:
-            preview = preview_payload(
-                kind="calendar",
-                records=refreshed_records,
-                why="The calendar changed after this preview. Nothing was applied.",
-            )
-            self.turns.update(pending["request_id"], status="cancelled", pending_ops_json=[])
-            self.turns.update(request_id, pending_ops_json=refreshed_ops)
-            reply = (
-                "That preview is stale — matching calendar records changed, so I didn't apply it. "
-                "Review the updated list and approve only if it still looks right."
-            )
-            self._add_message(cid, "assistant", reply)
-            return ChatResponse(
-                conversation_id=cid,
-                reply=reply,
-                goal=goal,
-                ai_available=True,
-                request_id=request_id,
-                mutation_preview=preview,
-                unresolved=unresolved,
-                activity=[
-                    {"stage": "preview", "label": "Preview is stale", "detail": "No calendar changes applied"},
-                    {"stage": "awaiting_approval", "label": "Review the updated preview", "detail": None},
-                ],
+        if apply_failed:
+            self._undo_effects(effects)
+            return self._pending_turn_not_applied(
+                cid,
+                pending,
+                goal,
+                request_id,
+                ops,
+                unresolved,
+                reply=(
+                    "I couldn't apply those calendar changes, so I left every record as it was. "
+                    "Review the updated list and approve only if it still looks right."
+                ),
             )
 
         self.turns.update(pending["request_id"], status="completed", pending_ops_json=[])
@@ -1021,8 +1032,6 @@ class ControlPlane:
             self.turns.update(request_id, effects_json=effects)
         n = len(deleted) + len(updated)
         reply = f"Applied {n} calendar change{'s' if n != 1 else ''}."
-        if unresolved:
-            reply += " Some reviewed items could not be applied."
         self._add_message(cid, "assistant", reply)
         if deleted or updated:
             notify_detail = f"{len(deleted)} removed, {len(updated)} changed"
@@ -1040,6 +1049,73 @@ class ControlPlane:
             activity=[
                 {"stage": "committing", "label": "Applying approved changes", "detail": notify_detail},
                 {"stage": "completed", "label": "Calendar updated", "detail": None},
+            ],
+        )
+
+    def _refresh_pending_ops(
+        self, ops: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        refreshed_ops: list[dict[str, Any]] = []
+        refreshed_records: list[dict[str, Any]] = []
+        for raw in ops:
+            if raw.get("kind") == "pause_others":
+                refreshed_ops.append(raw)
+                continue
+            action_data = raw.get("calendar_action") or {}
+            try:
+                action = CalendarAction.model_validate(action_data)
+            except ValidationError:
+                continue
+            targets = self.calendar.resolve_action_targets(action)
+            records = [self._preview_record(t, action) for t in targets]
+            preview = preview_payload(
+                kind=raw.get("kind") or f"calendar_{action.op}",
+                records=records,
+                why="The calendar changed after this preview. Approve again to apply only the sessions shown.",
+            )
+            refreshed_ops.append(
+                self._pending_op(
+                    raw.get("kind") or f"calendar_{action.op}",
+                    action,
+                    records,
+                    preview,
+                    raw,
+                )
+            )
+            refreshed_records.extend(records)
+        return refreshed_ops, refreshed_records
+
+    def _pending_turn_not_applied(
+        self,
+        cid: str,
+        pending: dict[str, Any],
+        goal: Goal | None,
+        request_id: str,
+        ops: list[dict[str, Any]],
+        unresolved: list[str],
+        *,
+        reply: str,
+    ) -> ChatResponse:
+        refreshed_ops, refreshed_records = self._refresh_pending_ops(ops)
+        preview = preview_payload(
+            kind="calendar",
+            records=refreshed_records,
+            why="The calendar changed after this preview. Nothing was applied.",
+        )
+        self.turns.update(pending["request_id"], status="cancelled", pending_ops_json=[])
+        self.turns.update(request_id, pending_ops_json=refreshed_ops)
+        self._add_message(cid, "assistant", reply)
+        return ChatResponse(
+            conversation_id=cid,
+            reply=reply,
+            goal=goal,
+            ai_available=True,
+            request_id=request_id,
+            mutation_preview=preview,
+            unresolved=unresolved,
+            activity=[
+                {"stage": "preview", "label": "Preview is stale", "detail": "No calendar changes applied"},
+                {"stage": "awaiting_approval", "label": "Review the updated preview", "detail": None},
             ],
         )
 
@@ -1904,12 +1980,16 @@ class ControlPlane:
             if not content:
                 return {"status": "failed", "detail": "missing spark content"}
             spark = self.sparks.capture(content)
+            effects["sparks_created"].append(spark.id)
             return {"sparks": [spark], "status": "succeeded", "detail": spark.content}
 
         if kind == "spark_dismiss":
             spark_id = payload.get("spark_id") or op.get("target_id")
             if spark_id:
-                self.sparks.dismiss(spark_id)
+                existing = self.sparks.get(spark_id)
+                if existing:
+                    effects["sparks_before"].setdefault(spark_id, existing.model_dump(mode="json"))
+                    self.sparks.dismiss(spark_id)
             return {"status": "succeeded"}
 
         if kind == "spark_promote":
@@ -1918,7 +1998,10 @@ class ControlPlane:
                 cid, op, current=goal, created_refs=created_refs, open_goals=open_goals, user_text=user_text, require=False
             )
             if spark_id and target:
-                self.sparks.promote(spark_id, target.id)
+                existing = self.sparks.get(spark_id)
+                if existing:
+                    effects["sparks_before"].setdefault(spark_id, existing.model_dump(mode="json"))
+                    self.sparks.promote(spark_id, target.id)
             return {"status": "succeeded", "goal": target or goal}
 
         if kind == "propose_sessions":
