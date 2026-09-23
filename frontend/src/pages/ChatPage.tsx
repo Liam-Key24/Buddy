@@ -15,6 +15,12 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  chatResultBelongsToView,
+  draftPayload,
+  shouldPersistDraft,
+  type ChatViewBinding,
+} from "../chatSession";
 import { useChatNav } from "../chatNav";
 import { ProposalCards, MutationPreviewCard } from "../components/ProposalCards";
 import { Button } from "../components/ui/Button";
@@ -81,7 +87,8 @@ export function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
   const conversationIdRef = useRef<string | null>(conversationId);
-  const originRef = useRef<string | null>(null);
+  const viewIdRef = useRef(0);
+  const lastViewConversationRef = useRef<string | null>(conversationId);
   const lateReadyRef = useRef<Set<string>>(new Set());
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -96,6 +103,10 @@ export function ChatPage() {
 
   useEffect(() => {
     conversationIdRef.current = conversationId;
+    if (lastViewConversationRef.current !== conversationId) {
+      viewIdRef.current += 1;
+      lastViewConversationRef.current = conversationId;
+    }
   }, [conversationId]);
 
   useEffect(() => {
@@ -217,9 +228,9 @@ export function ChatPage() {
   }, [conversationId]);
 
   useEffect(() => {
-    if (!conversationId || !input) return;
+    if (!shouldPersistDraft(conversationId, input, answers)) return;
     const t = window.setTimeout(() => {
-      saveDraft(conversationId, { composer: input, answers, clarification_answers: answers }).catch(() => undefined);
+      saveDraft(conversationId, draftPayload(input, answers)).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(t);
   }, [input, answers, conversationId]);
@@ -241,11 +252,18 @@ export function ChatPage() {
     }
   }, [busy, questions.length]);
 
-  function applyChatResult(res: ChatResponse, originId: string | null) {
-    if (conversationIdRef.current && originId && conversationIdRef.current !== originId) {
+  function applyChatResult(res: ChatResponse, origin: ChatViewBinding): boolean {
+    if (
+      !chatResultBelongsToView(
+        origin,
+        conversationIdRef.current,
+        viewIdRef.current,
+        res.conversation_id,
+      )
+    ) {
       lateReadyRef.current.add(res.conversation_id);
       refresh().catch(() => undefined);
-      return;
+      return false;
     }
     if (!conversationIdRef.current) {
       setConversationId(res.conversation_id);
@@ -295,6 +313,7 @@ export function ChatPage() {
       setError("Cloud AI is temporarily unavailable. Today, Calendar and Sparks still work.");
     }
     refresh().catch(() => undefined);
+    return true;
   }
 
   async function reloadMessages(cid: string) {
@@ -351,14 +370,19 @@ export function ChatPage() {
         ? crypto.randomUUID()
         : `req-${Date.now()}`;
     requestIdRef.current = requestId;
-    const originId = conversationId;
-    originRef.current = originId;
+    const origin: ChatViewBinding = {
+      originConversationId: conversationId,
+      originViewId: viewIdRef.current,
+    };
     try {
       const res = await sendChat(text, conversationId, controller.signal, requestId, {
         clarification_answers: clarificationAnswers,
         revision_of: revisionOf || null,
       });
-      applyChatResult(res, originId);
+      const applied = applyChatResult(res, origin);
+      if (!applied) {
+        return;
+      }
       const cid = res.conversation_id || conversationId;
       if (cid) {
         try {
