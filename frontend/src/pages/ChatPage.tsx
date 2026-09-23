@@ -18,6 +18,8 @@ import {
 import {
   chatResultBelongsToView,
   draftPayload,
+  draftReadyToSave,
+  lateReplyToastMessage,
   shouldPersistDraft,
   type ChatViewBinding,
 } from "../chatSession";
@@ -29,6 +31,7 @@ import { Tag } from "../components/ui/Tag";
 import { useToast } from "../components/ui/Toast";
 import {
   cancelChat,
+  createConversation,
   decideProposal,
   fetchMessages,
   fetchOpenProposal,
@@ -90,6 +93,11 @@ export function ChatPage() {
   const viewIdRef = useRef(0);
   const lastViewConversationRef = useRef<string | null>(conversationId);
   const lateReadyRef = useRef<Set<string>>(new Set());
+  const inputRef = useRef(input);
+  const answersRef = useRef(answers);
+  const draftOwnerRef = useRef<string | null>(conversationId);
+  const draftHydratedRef = useRef(false);
+  const inFlightConversationRef = useRef<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stepsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -108,6 +116,11 @@ export function ChatPage() {
       lastViewConversationRef.current = conversationId;
     }
   }, [conversationId]);
+
+  useEffect(() => {
+    inputRef.current = input;
+    answersRef.current = answers;
+  }, [input, answers]);
 
   useEffect(() => {
     const raw = localStorage.getItem(EDIT_HINT_KEY);
@@ -158,6 +171,14 @@ export function ChatPage() {
 
   useEffect(() => {
     if (!conversationId) {
+      const prevOwner = draftOwnerRef.current;
+      if (prevOwner) {
+        void saveDraft(prevOwner, draftPayload(inputRef.current, answersRef.current)).catch(
+          () => undefined,
+        );
+      }
+      draftOwnerRef.current = null;
+      draftHydratedRef.current = true;
       setMessages([GREETING]);
       setGoal(null);
       setProposals([]);
@@ -172,10 +193,24 @@ export function ChatPage() {
       setError(null);
       return;
     }
+    if (lateReadyRef.current.has(conversationId)) {
+      lateReadyRef.current.delete(conversationId);
+    }
+    const prevOwner = draftOwnerRef.current;
+    if (prevOwner && prevOwner !== conversationId) {
+      void saveDraft(prevOwner, draftPayload(inputRef.current, answersRef.current)).catch(
+        () => undefined,
+      );
+    }
+    draftOwnerRef.current = conversationId;
+    draftHydratedRef.current = false;
+    setInput("");
+    setAnswers({});
     let cancelled = false;
     fetchMessages(conversationId)
       .then((rows) => {
         if (cancelled) return;
+        if (inFlightConversationRef.current === conversationId) return;
         if (!rows.length) {
           setMessages([GREETING]);
           return;
@@ -220,17 +255,37 @@ export function ChatPage() {
         }
         const entered = open.entered_answers || open.clarification_answers || {};
         setAnswers(entered);
+        setInput(typeof open.composer === "string" ? open.composer : "");
+        if (draftOwnerRef.current === conversationId) {
+          draftHydratedRef.current = true;
+        }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (draftOwnerRef.current === conversationId) {
+          draftHydratedRef.current = true;
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, [conversationId]);
 
   useEffect(() => {
-    if (!shouldPersistDraft(conversationId, input, answers)) return;
+    if (
+      !draftReadyToSave({
+        conversationId,
+        ownerId: draftOwnerRef.current,
+        hydrated: draftHydratedRef.current,
+      }) ||
+      !shouldPersistDraft(conversationId)
+    ) {
+      return;
+    }
+    const cid = conversationId;
+    const payload = draftPayload(input, answers);
     const t = window.setTimeout(() => {
-      saveDraft(conversationId, draftPayload(input, answers)).catch(() => undefined);
+      if (conversationIdRef.current !== cid) return;
+      saveDraft(cid, payload).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(t);
   }, [input, answers, conversationId]);
@@ -370,20 +425,43 @@ export function ChatPage() {
         ? crypto.randomUUID()
         : `req-${Date.now()}`;
     requestIdRef.current = requestId;
-    const origin: ChatViewBinding = {
-      originConversationId: conversationId,
-      originViewId: viewIdRef.current,
-    };
+    const originViewId = viewIdRef.current;
     try {
-      const res = await sendChat(text, conversationId, controller.signal, requestId, {
+      let originConversationId = conversationId;
+      if (!originConversationId) {
+        const created = await createConversation();
+        originConversationId = created.id;
+        if (viewIdRef.current === originViewId) {
+          lastViewConversationRef.current = created.id;
+          conversationIdRef.current = created.id;
+          draftOwnerRef.current = created.id;
+          draftHydratedRef.current = true;
+          setConversationId(created.id);
+        }
+        refresh().catch(() => undefined);
+      }
+      inFlightConversationRef.current = originConversationId;
+      const origin: ChatViewBinding = {
+        originConversationId,
+        originViewId,
+      };
+      const res = await sendChat(text, originConversationId, controller.signal, requestId, {
         clarification_answers: clarificationAnswers,
         revision_of: revisionOf || null,
       });
       const applied = applyChatResult(res, origin);
       if (!applied) {
+        lateReadyRef.current.add(res.conversation_id);
+        refresh().catch(() => undefined);
+        const title = conversations.find((c) => c.id === res.conversation_id)?.title;
+        const openId = res.conversation_id;
+        pushToast(lateReplyToastMessage(title), {
+          label: "Open",
+          onClick: () => setConversationId(openId),
+        });
         return;
       }
-      const cid = res.conversation_id || conversationId;
+      const cid = res.conversation_id || originConversationId;
       if (cid) {
         try {
           await reloadMessages(cid);
@@ -436,6 +514,7 @@ export function ChatPage() {
       setBusy(false);
       abortRef.current = null;
       requestIdRef.current = null;
+      inFlightConversationRef.current = null;
       composerRef.current?.focus();
     }
   }

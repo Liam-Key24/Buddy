@@ -123,6 +123,7 @@ export type OpenProposal = {
   clarification_questions?: ClarificationQuestion[];
   entered_answers?: Record<string, string>;
   clarification_answers?: Record<string, string>;
+  composer?: string;
 };
 
 export type ProposalGroup = {

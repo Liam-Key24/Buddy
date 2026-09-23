@@ -5,14 +5,18 @@ export type ChatViewBinding = {
   originViewId: number;
 };
 
-export function shouldPersistDraft(
-  conversationId: string | null,
-  input: string,
-  answers: Record<string, string>,
-): conversationId is string {
-  if (!conversationId) return false;
-  if (input.length > 0) return true;
-  return Object.values(answers).some((value) => String(value ?? "").trim().length > 0);
+export function shouldPersistDraft(conversationId: string | null): conversationId is string {
+  return Boolean(conversationId);
+}
+
+export function draftReadyToSave(args: {
+  conversationId: string | null;
+  ownerId: string | null;
+  hydrated: boolean;
+}): args is { conversationId: string; ownerId: string; hydrated: true } {
+  return Boolean(
+    args.hydrated && args.conversationId && args.ownerId === args.conversationId,
+  );
 }
 
 export function draftPayload(input: string, answers: Record<string, string>) {
@@ -21,6 +25,11 @@ export function draftPayload(input: string, answers: Record<string, string>) {
     answers,
     clarification_answers: answers,
   };
+}
+
+export function lateReplyToastMessage(title: string | null | undefined): string {
+  const label = (title || "").trim() || "another chat";
+  return `Buddy replied in ${label}`;
 }
 
 export function chatResultBelongsToView(

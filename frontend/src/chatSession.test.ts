@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   chatResultBelongsToView,
   draftPayload,
+  draftReadyToSave,
+  lateReplyToastMessage,
   shouldPersistDraft,
 } from "./chatSession";
 
 describe("shouldPersistDraft", () => {
   it("saves clarification answers when the composer is empty", () => {
-    expect(shouldPersistDraft("conv-1", "", { grade: "V3 indoors" })).toBe(true);
+    expect(shouldPersistDraft("conv-1")).toBe(true);
     expect(draftPayload("", { grade: "V3 indoors" })).toEqual({
       composer: "",
       answers: { grade: "V3 indoors" },
@@ -19,15 +21,35 @@ describe("shouldPersistDraft", () => {
     const conversationId = "conv-1";
     const input = "";
     const answers = { grade: "V3 indoors" };
-    expect(shouldPersistDraft(conversationId, input, answers)).toBe(true);
+    expect(shouldPersistDraft(conversationId)).toBe(true);
     const saved = draftPayload(input, answers);
-    const restoredAnswers = saved.clarification_answers;
     expect(saved.composer).toBe("");
-    expect(restoredAnswers.grade).toBe("V3 indoors");
+    expect(saved.clarification_answers.grade).toBe("V3 indoors");
+  });
+
+  it("persists an empty composer and empty answers so clears survive reload", () => {
+    expect(shouldPersistDraft("conv-1")).toBe(true);
+    expect(draftPayload("", {})).toEqual({
+      composer: "",
+      answers: {},
+      clarification_answers: {},
+    });
   });
 
   it("does not persist when there is no conversation", () => {
-    expect(shouldPersistDraft(null, "", { grade: "V3" })).toBe(false);
+    expect(shouldPersistDraft(null)).toBe(false);
+  });
+
+  it("does not save onto a chat that has not finished hydrating", () => {
+    expect(
+      draftReadyToSave({ conversationId: "b", ownerId: "a", hydrated: true }),
+    ).toBe(false);
+    expect(
+      draftReadyToSave({ conversationId: "a", ownerId: "a", hydrated: false }),
+    ).toBe(false);
+    expect(
+      draftReadyToSave({ conversationId: "a", ownerId: "a", hydrated: true }),
+    ).toBe(true);
   });
 });
 
@@ -51,5 +73,14 @@ describe("chatResultBelongsToView", () => {
     const origin = { originConversationId: "chat-a", originViewId: 2 };
     expect(chatResultBelongsToView(origin, "chat-b", 3, "chat-a")).toBe(false);
     expect(chatResultBelongsToView(origin, "chat-a", 2, "chat-a")).toBe(true);
+  });
+
+  it("keeps a late reply on the created conversation after a blank send", () => {
+    const origin = { originConversationId: "created-from-new-chat", originViewId: 0 };
+    expect(chatResultBelongsToView(origin, "opened-chat", 1, "created-from-new-chat")).toBe(
+      false,
+    );
+    expect(lateReplyToastMessage("Climbing")).toBe("Buddy replied in Climbing");
+    expect(lateReplyToastMessage("")).toBe("Buddy replied in another chat");
   });
 });
