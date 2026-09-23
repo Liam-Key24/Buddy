@@ -279,6 +279,52 @@ def test_stale_second_operation_does_not_apply_the_first(tmp_path: Path):
         plane.close()
 
 
+def test_mid_apply_crash_rolls_back_all_calendar_writes(tmp_path: Path):
+    plane = ControlPlane(db_path=tmp_path / "t.db", ai=FakeGroq())
+    try:
+        ready, booked = _book_sessions(plane)
+        assert len(booked.booked_sessions) >= 2
+        first, second = booked.booked_sessions[0], booked.booked_sessions[1]
+        plane._ai = ScriptedAI(
+            {
+                "assistant_text": "I can remove those two sessions if you approve.",
+                "intents": ["calendar_delete"],
+                "operations": [
+                    {
+                        "kind": "calendar_delete",
+                        "payload": {"op": "delete", "session_id": first.id},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "kind": "calendar_delete",
+                        "payload": {"op": "delete", "session_id": second.id},
+                        "confidence": 0.9,
+                    },
+                ],
+                "requested_action": {"type": "none"},
+            }
+        )
+        plane.handle_message("Delete those two sessions", conversation_id=ready.conversation_id)
+        original = plane.calendar.delete_session
+        calls = {"n": 0}
+
+        def boom(session_id: str) -> bool:
+            calls["n"] += 1
+            ok = original(session_id)
+            if calls["n"] == 1:
+                raise RuntimeError("simulated crash after first delete")
+            return ok
+
+        plane.calendar.delete_session = boom  # type: ignore[method-assign]
+        approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
+        assert plane.calendar.get_session(first.id) is not None
+        assert plane.calendar.get_session(second.id) is not None
+        assert not (approved.deleted_session_ids or [])
+        assert "left every record" in (approved.reply or "").lower() or "couldn't apply" in (approved.reply or "").lower()
+    finally:
+        plane.close()
+
+
 def test_follow_up_updates_the_named_goal_not_the_latest(tmp_path: Path):
     dump = ScriptedAI(_dump_payload())
     plane = ControlPlane(db_path=tmp_path / "t.db", ai=dump)
@@ -384,6 +430,7 @@ def test_clarification_answers_survive_reload(tmp_path: Path):
         plane.save_draft(
             res.conversation_id,
             {
+                "composer": "half a thought",
                 "clarification_questions": [q.model_dump() for q in res.clarification_questions],
                 "clarification_answers": {"grade": "V3 indoors"},
             },
@@ -393,14 +440,23 @@ def test_clarification_answers_survive_reload(tmp_path: Path):
         questions = restored.get("clarification_questions") or []
         answers = restored.get("entered_answers") or restored.get("clarification_answers") or {}
         assert questions
+        assert restored.get("composer") == "half a thought"
         assert answers.get("grade") == "V3 indoors"
         suggested = questions[0].get("suggested_answer") if isinstance(questions[0], dict) else questions[0].suggested_answer
         assert suggested == "V4"
         assert answers.get("grade") != suggested
         other_open = plane.get_open_proposal(other["id"])
         assert not (other_open.get("clarification_questions") or [])
+        assert other_open.get("composer") in {"", None}
         back = plane.get_open_proposal(res.conversation_id)
         assert (back.get("entered_answers") or back.get("clarification_answers") or {}).get("grade") == "V3 indoors"
+        plane.save_draft(
+            res.conversation_id,
+            {"composer": "", "clarification_answers": {}, "answers": {}},
+        )
+        cleared = plane.get_open_proposal(res.conversation_id)
+        assert cleared.get("composer") == ""
+        assert not (cleared.get("entered_answers") or {})
     finally:
         plane.close()
 

@@ -23,7 +23,7 @@ from .buddy_turn import (
 from .calendar import CalendarService
 from .categories import CategoryStore
 from .config import Settings, load_settings
-from .db import get_connection, init_db
+from .db import commit, get_connection, init_db, transaction
 from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
 from .mutation_policy import classify_operation, preview_payload
@@ -57,6 +57,11 @@ class RevertBlocked(Exception):
     def __init__(self, detail: str):
         super().__init__(detail)
         self.detail = detail
+
+
+class _ApprovalNotApplied(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
 
 
 class AIClient(Protocol):
@@ -244,7 +249,7 @@ class ControlPlane:
                 "UPDATE messages SET superseded=1 WHERE id=? AND conversation_id=?",
                 (message_id, conversation_id),
             )
-        self.conn.commit()
+        commit(self.conn)
         return {
             "ok": True,
             "reverted": int(later["n"] if later else 0) + (1 if include_target else 0),
@@ -425,7 +430,7 @@ class ControlPlane:
             "UPDATE conversations SET updated_at=? WHERE id=?",
             (_now(), conversation_id),
         )
-        self.conn.commit()
+        commit(self.conn)
         return mid
 
     def list_messages(self, conversation_id: str, *, include_superseded: bool = False) -> list[dict[str, Any]]:
@@ -557,6 +562,7 @@ class ControlPlane:
             "clarification_questions": [],
             "entered_answers": {},
             "proposal_groups": [],
+            "composer": "",
         }
         if pending:
             extra["mutation_preview"] = self._preview_from_pending(pending)
@@ -565,6 +571,7 @@ class ControlPlane:
         draft = (conv or {}).get("draft") or {}
         if draft.get("clarification_questions") and not extra["clarification_questions"]:
             extra["clarification_questions"] = draft["clarification_questions"]
+        extra["composer"] = str(draft.get("composer") or "")
         answers = draft.get("clarification_answers") or draft.get("answers") or {}
         if isinstance(answers, dict):
             extra["entered_answers"] = answers
@@ -990,30 +997,55 @@ class ControlPlane:
                 ),
             )
 
-        for raw in pause_ops:
-            keep_id = raw.get("target_id") or (goal.id if goal else None)
-            if keep_id:
-                for other in self.goals.list_open():
-                    if other.conversation_id == cid and other.id != keep_id:
-                        self._record_goal_before(effects, other)
-                self.goals.pause_others(cid, keep_id=keep_id)
-
         deleted: list[str] = []
         updated: list[SessionOut] = []
-        apply_failed = False
-        for _raw, action, reviewed_ids, current in calendar_plans:
-            for session in current:
-                self._snapshot_session(effects, session, deleted=action.op == "delete")
-            d, u, errors = self.calendar.apply_reviewed_action(action, reviewed_ids)
-            deleted.extend(d)
-            updated.extend(u)
-            if errors:
-                unresolved.extend(errors)
-                apply_failed = True
-                break
-
-        if apply_failed:
-            self._undo_effects(effects)
+        try:
+            with transaction(self.conn):
+                for raw, action, reviewed_ids, _current in calendar_plans:
+                    fingerprints = raw.get("fingerprints") or {}
+                    for sid in reviewed_ids:
+                        session = self.calendar.get_session(sid)
+                        if session is None or not self.calendar.fingerprints_match(
+                            session, fingerprints.get(sid)
+                        ):
+                            raise _ApprovalNotApplied("stale")
+                for raw in pause_ops:
+                    keep_id = raw.get("target_id") or (goal.id if goal else None)
+                    if keep_id:
+                        for other in self.goals.list_open():
+                            if other.conversation_id == cid and other.id != keep_id:
+                                self._record_goal_before(effects, other)
+                        self.goals.pause_others(cid, keep_id=keep_id)
+                for raw, action, reviewed_ids, current in calendar_plans:
+                    for session in current:
+                        self._snapshot_session(effects, session, deleted=action.op == "delete")
+                    d, u, errors = self.calendar.apply_reviewed_action(action, reviewed_ids)
+                    deleted.extend(d)
+                    updated.extend(u)
+                    if errors:
+                        unresolved.extend(errors)
+                        raise _ApprovalNotApplied("apply")
+                self.turns.update(pending["request_id"], status="completed", pending_ops_json=[])
+                if request_id:
+                    self.turns.update(request_id, effects_json=effects)
+                n = len(deleted) + len(updated)
+                reply = f"Applied {n} calendar change{'s' if n != 1 else ''}."
+                self._add_message(cid, "assistant", reply)
+        except _ApprovalNotApplied as exc:
+            reply = (
+                "That preview is stale — matching calendar records changed, so I didn't apply it. "
+                "Review the updated list and approve only if it still looks right."
+                if exc.reason == "stale"
+                else (
+                    "I couldn't apply those calendar changes, so I left every record as it was. "
+                    "Review the updated list and approve only if it still looks right."
+                )
+            )
+            return self._pending_turn_not_applied(
+                cid, pending, goal, request_id, ops, unresolved, reply=reply
+            )
+        except Exception:
+            log.exception("approval_apply_failed")
             return self._pending_turn_not_applied(
                 cid,
                 pending,
@@ -1027,12 +1059,6 @@ class ControlPlane:
                 ),
             )
 
-        self.turns.update(pending["request_id"], status="completed", pending_ops_json=[])
-        if request_id:
-            self.turns.update(request_id, effects_json=effects)
-        n = len(deleted) + len(updated)
-        reply = f"Applied {n} calendar change{'s' if n != 1 else ''}."
-        self._add_message(cid, "assistant", reply)
         if deleted or updated:
             notify_detail = f"{len(deleted)} removed, {len(updated)} changed"
         else:

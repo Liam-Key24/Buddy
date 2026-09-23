@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .db import commit
 from .schemas import Goal, GoalStatus, GoalUpdate
 
 
@@ -100,7 +101,7 @@ class GoalStore:
             (now, goal_id),
         )
         self.conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
-        self.conn.commit()
+        commit(self.conn)
         return goal
 
     def pause_others(self, conversation_id: str, keep_id: str | None = None) -> None:
@@ -123,7 +124,7 @@ class GoalStore:
                 """,
                 (now, conversation_id),
             )
-        self.conn.commit()
+        commit(self.conn)
 
     def pause_for_conversation(self, conversation_id: str) -> None:
         """Pause every open goal tied to a conversation (e.g. chat soft-deleted)."""
@@ -172,7 +173,7 @@ class GoalStore:
                 now,
             ),
         )
-        self.conn.commit()
+        commit(self.conn)
         goal = self.get(gid)
         assert goal is not None
         return goal
@@ -229,7 +230,7 @@ class GoalStore:
                 goal.id,
             ),
         )
-        self.conn.commit()
+        commit(self.conn)
 
     def restore_snapshot(self, snap: dict[str, Any]) -> Goal | None:
         """Put a goal back to a recorded snapshot, including re-insert after delete."""
@@ -273,7 +274,7 @@ class GoalStore:
                 now,
             ),
         )
-        self.conn.commit()
+        commit(self.conn)
         return self.get(gid)
 
     def _row(self, row: Any) -> Goal:

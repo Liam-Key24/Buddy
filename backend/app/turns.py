@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .db import commit
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -66,7 +68,7 @@ class TurnStore:
                 """,
                 (request_id, conversation_id, user_message, now, now),
             )
-            self.conn.commit()
+            commit(self.conn)
         except Exception:
             return None
         return self.get(request_id)
@@ -100,7 +102,7 @@ class TurnStore:
             f"UPDATE turns SET {', '.join(sets)} WHERE request_id=?",
             values,
         )
-        self.conn.commit()
+        commit(self.conn)
         return self.get(request_id)
 
     def list_since(
