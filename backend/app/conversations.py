@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .owners import resolve_owner
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -30,32 +32,44 @@ class ConversationStore:
     def __init__(self, conn):
         self.conn = conn
 
-    def create(self) -> dict[str, Any]:
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def create(self, owner_user_id: str | None = None) -> dict[str, Any]:
+        oid = self._oid(owner_user_id)
         cid = _new_id()
         now = _now()
         min_order = self.conn.execute(
-            "SELECT COALESCE(MIN(sort_order), 1) AS n FROM conversations WHERE deleted_at IS NULL"
+            """
+            SELECT COALESCE(MIN(sort_order), 1) AS n
+            FROM conversations
+            WHERE deleted_at IS NULL AND owner_user_id=?
+            """,
+            (oid,),
         ).fetchone()
         sort_order = int(min_order["n"] if min_order else 1) - 1
         self.conn.execute(
             """
             INSERT INTO conversations (
-                id, created_at, updated_at, title, deleted_at, draft_json, sort_order
+                id, created_at, updated_at, title, deleted_at, draft_json, sort_order, owner_user_id
             )
-            VALUES (?, ?, ?, ?, NULL, '{}', ?)
+            VALUES (?, ?, ?, ?, NULL, '{}', ?, ?)
             """,
-            (cid, now, now, "New chat", sort_order),
+            (cid, now, now, "New chat", sort_order, oid),
         )
         self.conn.commit()
-        return self.get(cid)
+        return self.get(cid, owner_user_id=oid)
 
-    def get(self, conversation_id: str) -> dict[str, Any] | None:
+    def get(self, conversation_id: str, owner_user_id: str | None = None) -> dict[str, Any] | None:
+        oid = self._oid(owner_user_id)
         row = self.conn.execute(
-            "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            "SELECT * FROM conversations WHERE id = ? AND owner_user_id=?",
+            (conversation_id, oid),
         ).fetchone()
         return self._row(row) if row else None
 
-    def list_active(self) -> list[dict[str, Any]]:
+    def list_active(self, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        oid = self._oid(owner_user_id)
         rows = self.conn.execute(
             """
             SELECT c.*, (
@@ -63,19 +77,22 @@ class ConversationStore:
                 WHERE m.conversation_id = c.id AND m.role = 'user'
             ) AS user_message_count
             FROM conversations c
-            WHERE c.deleted_at IS NULL
+            WHERE c.deleted_at IS NULL AND c.owner_user_id=?
             ORDER BY c.sort_order ASC, c.updated_at DESC
-            """
+            """,
+            (oid,),
         ).fetchall()
         return [self._row(r) for r in rows]
 
-    def list_deleted(self) -> list[dict[str, Any]]:
+    def list_deleted(self, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        oid = self._oid(owner_user_id)
         rows = self.conn.execute(
             """
             SELECT * FROM conversations
-            WHERE deleted_at IS NOT NULL
+            WHERE deleted_at IS NOT NULL AND owner_user_id=?
             ORDER BY deleted_at DESC
-            """
+            """,
+            (oid,),
         ).fetchall()
         return [self._row(r) for r in rows]
 
@@ -107,18 +124,19 @@ class ConversationStore:
             siblings = self.conn.execute(
                 """
                 SELECT id FROM conversations
-                WHERE deleted_at IS NULL AND folder_id=?
+                WHERE deleted_at IS NULL AND folder_id=? AND owner_user_id=?
                 ORDER BY sort_order ASC, updated_at DESC
                 """,
-                (folder_id,),
+                (folder_id, self._oid()),
             ).fetchall()
         else:
             siblings = self.conn.execute(
                 """
                 SELECT id FROM conversations
-                WHERE deleted_at IS NULL AND folder_id IS NULL
+                WHERE deleted_at IS NULL AND folder_id IS NULL AND owner_user_id=?
                 ORDER BY sort_order ASC, updated_at DESC
-                """
+                """,
+                (self._oid(),),
             ).fetchall()
         ids = [r["id"] for r in siblings if r["id"] != conversation_id]
         if before_id and before_id in ids:

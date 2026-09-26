@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import commit
+from .owners import resolve_owner
 from .schemas import Goal, GoalStatus, GoalUpdate
 
 
@@ -23,44 +24,55 @@ class GoalStore:
     def __init__(self, conn):
         self.conn = conn
 
-    def get(self, goal_id: str) -> Goal | None:
-        row = self.conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def get(self, goal_id: str, owner_user_id: str | None = None) -> Goal | None:
+        row = self.conn.execute(
+            "SELECT * FROM goals WHERE id = ? AND owner_user_id=?",
+            (goal_id, self._oid(owner_user_id)),
+        ).fetchone()
         return self._row(row) if row else None
 
-    def active_for_conversation(self, conversation_id: str) -> Goal | None:
+    def active_for_conversation(self, conversation_id: str, owner_user_id: str | None = None) -> Goal | None:
         row = self.conn.execute(
             """
             SELECT * FROM goals
             WHERE conversation_id = ?
+              AND owner_user_id=?
               AND status IN ('gathering', 'ready_to_plan', 'planned', 'active')
             ORDER BY updated_at DESC
             LIMIT 1
             """,
-            (conversation_id,),
+            (conversation_id, self._oid(owner_user_id)),
         ).fetchone()
         return self._row(row) if row else None
 
-    def list_open(self) -> list[Goal]:
+    def list_open(self, owner_user_id: str | None = None) -> list[Goal]:
         rows = self.conn.execute(
             """
             SELECT * FROM goals
-            WHERE status IN ('gathering', 'ready_to_plan', 'planned', 'active')
+            WHERE owner_user_id=?
+              AND status IN ('gathering', 'ready_to_plan', 'planned', 'active')
             ORDER BY updated_at DESC
-            """
+            """,
+            (self._oid(owner_user_id),),
         ).fetchall()
         return [self._row(r) for r in rows]
 
-    def list_managed(self) -> list[Goal]:
+    def list_managed(self, owner_user_id: str | None = None) -> list[Goal]:
         """Open + paused + completed goals for the Goals page.
 
         Removed goals are hard-deleted (`remove`), so they never appear here.
         Goals from soft-deleted chats are hidden unless the goal is completed (`done`).
         """
+        oid = self._oid(owner_user_id)
         rows = self.conn.execute(
             """
             SELECT g.* FROM goals g
             LEFT JOIN conversations c ON c.id = g.conversation_id
-            WHERE g.status IN (
+            WHERE g.owner_user_id=?
+              AND g.status IN (
               'gathering', 'ready_to_plan', 'planned', 'active', 'paused', 'done'
             )
               AND (g.status = 'done' OR c.deleted_at IS NULL)
@@ -75,7 +87,8 @@ class GoalStore:
                 ELSE 6
               END,
               g.updated_at DESC
-            """
+            """,
+            (oid,),
         ).fetchall()
         return [self._row(r) for r in rows]
 
@@ -144,7 +157,9 @@ class GoalStore:
         status: GoalStatus = "gathering",
         facts: dict[str, Any] | None = None,
         pause_others: bool = True,
+        owner_user_id: str | None = None,
     ) -> Goal:
+        oid = self._oid(owner_user_id)
         if pause_others:
             self.pause_others(conversation_id)
         gid = _new_id()
@@ -154,8 +169,9 @@ class GoalStore:
             """
             INSERT INTO goals (
                 id, conversation_id, title, domain, target, deadline,
-                baseline, frequency, commitment, status, facts_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                baseline, frequency, commitment, status, facts_json, created_at, updated_at,
+                owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 gid,
@@ -171,10 +187,11 @@ class GoalStore:
                 json.dumps(facts),
                 now,
                 now,
+                oid,
             ),
         )
         commit(self.conn)
-        goal = self.get(gid)
+        goal = self.get(gid, owner_user_id=oid)
         assert goal is not None
         return goal
 
@@ -251,12 +268,14 @@ class GoalStore:
             existing.facts = snap.get("facts") if isinstance(snap.get("facts"), dict) else existing.facts
             self.save(existing)
             return self.get(gid)
+        oid = self._oid()
         self.conn.execute(
             """
             INSERT INTO goals (
                 id, conversation_id, title, domain, target, deadline,
-                baseline, frequency, commitment, status, facts_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                baseline, frequency, commitment, status, facts_json, created_at, updated_at,
+                owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 gid,
@@ -272,6 +291,7 @@ class GoalStore:
                 json.dumps(snap.get("facts") or {}),
                 snap.get("created_at") or now,
                 now,
+                oid,
             ),
         )
         commit(self.conn)

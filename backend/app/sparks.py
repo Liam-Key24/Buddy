@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .owners import resolve_owner
 from .schemas import Spark
 
 
@@ -21,31 +22,42 @@ class SparkService:
     def __init__(self, conn):
         self.conn = conn
 
-    def capture(self, content: str) -> Spark:
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def capture(self, content: str, owner_user_id: str | None = None) -> Spark:
+        oid = self._oid(owner_user_id)
         sid = _new_id()
         now = _now()
         self.conn.execute(
             """
-            INSERT INTO sparks (id, content, status, promoted_goal_id, created_at, updated_at)
-            VALUES (?, ?, 'open', NULL, ?, ?)
+            INSERT INTO sparks (id, content, status, promoted_goal_id, created_at, updated_at, owner_user_id)
+            VALUES (?, ?, 'open', NULL, ?, ?, ?)
             """,
-            (sid, content.strip(), now, now),
+            (sid, content.strip(), now, now, oid),
         )
         self.conn.commit()
         return Spark(id=sid, content=content.strip(), status="open", promoted_goal_id=None, created_at=now)
 
-    def list_open(self) -> list[Spark]:
+    def list_open(self, owner_user_id: str | None = None) -> list[Spark]:
         rows = self.conn.execute(
-            "SELECT * FROM sparks WHERE status = 'open' ORDER BY created_at DESC"
+            "SELECT * FROM sparks WHERE status = 'open' AND owner_user_id=? ORDER BY created_at DESC",
+            (self._oid(owner_user_id),),
         ).fetchall()
         return [self._row(r) for r in rows]
 
-    def list_all(self) -> list[Spark]:
-        rows = self.conn.execute("SELECT * FROM sparks ORDER BY created_at DESC").fetchall()
+    def list_all(self, owner_user_id: str | None = None) -> list[Spark]:
+        rows = self.conn.execute(
+            "SELECT * FROM sparks WHERE owner_user_id=? ORDER BY created_at DESC",
+            (self._oid(owner_user_id),),
+        ).fetchall()
         return [self._row(r) for r in rows]
 
-    def get(self, spark_id: str) -> Spark | None:
-        row = self.conn.execute("SELECT * FROM sparks WHERE id = ?", (spark_id,)).fetchone()
+    def get(self, spark_id: str, owner_user_id: str | None = None) -> Spark | None:
+        row = self.conn.execute(
+            "SELECT * FROM sparks WHERE id = ? AND owner_user_id=?",
+            (spark_id, self._oid(owner_user_id)),
+        ).fetchone()
         return self._row(row) if row else None
 
     def restore_snapshot(self, snap: dict[str, Any]) -> Spark | None:
@@ -71,8 +83,8 @@ class SparkService:
         else:
             self.conn.execute(
                 """
-                INSERT INTO sparks (id, content, status, promoted_goal_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sparks (id, content, status, promoted_goal_id, created_at, updated_at, owner_user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sid,
@@ -81,42 +93,43 @@ class SparkService:
                     snap.get("promoted_goal_id"),
                     snap.get("created_at") or now,
                     now,
+                    self._oid(),
                 ),
             )
         self.conn.commit()
         return self.get(sid)
 
-    def remove(self, spark_id: str) -> None:
-        self.conn.execute("DELETE FROM sparks WHERE id=?", (spark_id,))
+    def remove(self, spark_id: str, owner_user_id: str | None = None) -> None:
+        self.conn.execute(
+            "DELETE FROM sparks WHERE id=? AND owner_user_id=?",
+            (spark_id, self._oid(owner_user_id)),
+        )
         self.conn.commit()
 
-    def promote(self, spark_id: str, goal_id: str) -> Spark | None:
-        row = self.conn.execute("SELECT * FROM sparks WHERE id = ?", (spark_id,)).fetchone()
-        if not row:
+    def promote(self, spark_id: str, goal_id: str, owner_user_id: str | None = None) -> Spark | None:
+        if not self.get(spark_id, owner_user_id=owner_user_id):
             return None
         now = _now()
         self.conn.execute(
             """
-            UPDATE sparks SET status='promoted', promoted_goal_id=?, updated_at=? WHERE id=?
+            UPDATE sparks SET status='promoted', promoted_goal_id=?, updated_at=?
+            WHERE id=? AND owner_user_id=?
             """,
-            (goal_id, now, spark_id),
+            (goal_id, now, spark_id, self._oid(owner_user_id)),
         )
         self.conn.commit()
-        refreshed = self.conn.execute("SELECT * FROM sparks WHERE id = ?", (spark_id,)).fetchone()
-        return self._row(refreshed)
+        return self.get(spark_id, owner_user_id=owner_user_id)
 
-    def dismiss(self, spark_id: str) -> Spark | None:
-        row = self.conn.execute("SELECT * FROM sparks WHERE id = ?", (spark_id,)).fetchone()
-        if not row:
+    def dismiss(self, spark_id: str, owner_user_id: str | None = None) -> Spark | None:
+        if not self.get(spark_id, owner_user_id=owner_user_id):
             return None
         now = _now()
         self.conn.execute(
-            "UPDATE sparks SET status='dismissed', updated_at=? WHERE id=?",
-            (now, spark_id),
+            "UPDATE sparks SET status='dismissed', updated_at=? WHERE id=? AND owner_user_id=?",
+            (now, spark_id, self._oid(owner_user_id)),
         )
         self.conn.commit()
-        refreshed = self.conn.execute("SELECT * FROM sparks WHERE id = ?", (spark_id,)).fetchone()
-        return self._row(refreshed)
+        return self.get(spark_id, owner_user_id=owner_user_id)
 
     def _row(self, row: Any) -> Spark:
         d = dict(row)

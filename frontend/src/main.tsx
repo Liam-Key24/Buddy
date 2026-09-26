@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./AppShell";
+import { AuthGate } from "./AuthGate";
 import { CalendarPage } from "./pages/CalendarPage";
 import { ChatPage } from "./pages/ChatPage";
 import { GoalsPage } from "./pages/GoalsPage";
@@ -16,6 +17,7 @@ import "./index.css";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
+      <AuthGate>
       <Routes>
         <Route element={<AppShell />}>
           <Route path="/" element={<TodayPage />} />
@@ -32,6 +34,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
+      </AuthGate>
     </BrowserRouter>
   </StrictMode>,
 );

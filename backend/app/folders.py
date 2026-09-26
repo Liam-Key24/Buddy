@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .owners import resolve_owner
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -19,37 +21,47 @@ class FolderStore:
     def __init__(self, conn):
         self.conn = conn
 
-    def list(self) -> list[dict[str, Any]]:
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def list(self, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        oid = self._oid(owner_user_id)
         rows = self.conn.execute(
             """
             SELECT * FROM chat_folders
+            WHERE owner_user_id=?
             ORDER BY sort_order ASC, created_at ASC
-            """
+            """,
+            (oid,),
         ).fetchall()
         return [self._row(r) for r in rows]
 
-    def get(self, folder_id: str) -> dict[str, Any] | None:
+    def get(self, folder_id: str, owner_user_id: str | None = None) -> dict[str, Any] | None:
+        oid = self._oid(owner_user_id)
         row = self.conn.execute(
-            "SELECT * FROM chat_folders WHERE id = ?", (folder_id,)
+            "SELECT * FROM chat_folders WHERE id = ? AND owner_user_id=?",
+            (folder_id, oid),
         ).fetchone()
         return self._row(row) if row else None
 
-    def create(self, title: str) -> dict[str, Any]:
+    def create(self, title: str, owner_user_id: str | None = None) -> dict[str, Any]:
+        oid = self._oid(owner_user_id)
         fid = _new_id()
         now = _now()
         max_order = self.conn.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS n FROM chat_folders"
+            "SELECT COALESCE(MAX(sort_order), -1) AS n FROM chat_folders WHERE owner_user_id=?",
+            (oid,),
         ).fetchone()
         n = max_order["n"] if max_order else -1
         self.conn.execute(
             """
-            INSERT INTO chat_folders (id, title, sort_order, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO chat_folders (id, title, sort_order, created_at, updated_at, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (fid, title.strip() or "Untitled", int(n) + 1, now, now),
+            (fid, title.strip() or "Untitled", int(n) + 1, now, now, oid),
         )
         self.conn.commit()
-        return self.get(fid)
+        return self.get(fid, owner_user_id=oid)
 
     def rename(self, folder_id: str, title: str) -> dict[str, Any] | None:
         if not self.get(folder_id):

@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+from .owners import resolve_owner
+
+# Shared Groq key is 1000/day; each private account gets half.
+DEFAULT_DAILY_LIMIT = 500
+
+
+def daily_limit() -> int:
+    raw = os.environ.get("BUDDY_DAILY_REQUEST_LIMIT", "").strip()
+    if not raw:
+        return DEFAULT_DAILY_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_DAILY_LIMIT
+    return max(1, value)
 
 
 def _now() -> str:
@@ -18,6 +35,9 @@ def _new_id() -> str:
 class UsageStore:
     def __init__(self, conn):
         self.conn = conn
+
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
 
     def record(
         self,
@@ -34,6 +54,7 @@ class UsageStore:
         rate_reset: str | None = None,
         cancelled: bool = False,
         request_id: str | None = None,
+        owner_user_id: str | None = None,
     ) -> str:
         rid = request_id or _new_id()
         self.conn.execute(
@@ -41,8 +62,8 @@ class UsageStore:
             INSERT INTO ai_requests (
                 id, conversation_id, created_at, model, status, attempt,
                 latency_ms, tokens_prompt, tokens_completion,
-                rate_limit, rate_remaining, rate_reset, cancelled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rate_limit, rate_remaining, rate_reset, cancelled, owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rid,
@@ -58,6 +79,7 @@ class UsageStore:
                 rate_remaining,
                 rate_reset,
                 1 if cancelled else 0,
+                self._oid(owner_user_id),
             ),
         )
         self.conn.commit()
@@ -70,15 +92,15 @@ class UsageStore:
         )
         self.conn.commit()
 
-    def today_summary(self) -> dict[str, Any]:
+    def today_summary(self, owner_user_id: str | None = None) -> dict[str, Any]:
         today = datetime.now(timezone.utc).date().isoformat()
         rows = self.conn.execute(
             """
             SELECT * FROM ai_requests
-            WHERE created_at >= ?
+            WHERE created_at >= ? AND owner_user_id=?
             ORDER BY created_at DESC
             """,
-            (today,),
+            (today, self._oid(owner_user_id)),
         ).fetchall()
         used = 0
         last_limit = None
@@ -105,9 +127,9 @@ class UsageStore:
                 last_remaining = d["rate_remaining"]
             if d.get("rate_reset"):
                 last_reset = d["rate_reset"]
-        # Buddy's meter is local attempts. Groq header remaining is a rolling window and
-        # must not replace the local used count (that made "12 attempts" show as "1 / 1000").
-        limit = 1000
+        # Buddy's meter is local attempts per owner. Groq header remaining is a rolling
+        # window and must not replace the local used count.
+        limit = daily_limit()
         remaining = max(0, limit - used)
         return {
             "used": used,

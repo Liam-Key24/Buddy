@@ -1,0 +1,10 @@
+[Unit]
+Description=Buddy SQLite online backup
+After=buddy.service
+
+[Service]
+Type=oneshot
+User=buddy
+Group=buddy
+EnvironmentFile=/etc/buddy/env
+ExecStart=/opt/buddy/current/backend/.venv/bin/python /opt/buddy/current/deploy/backup_buddy.py

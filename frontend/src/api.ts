@@ -258,8 +258,39 @@ async function json<T>(res: Response): Promise<T> {
   return res.json();
 }
 
+export type Me = {
+  id: string;
+  username: string;
+};
+
 export async function fetchHealth(): Promise<HealthResponse> {
   return json(await fetch(`${API_BASE}/health`));
+}
+
+export async function fetchMe(): Promise<Me | null> {
+  const res = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
+  if (res.status === 401) return null;
+  return json(res);
+}
+
+export async function login(username: string, password: string): Promise<Me> {
+  return json(
+    await fetch(`${API_BASE}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ username, password }),
+    }),
+  );
+}
+
+export async function logout(): Promise<void> {
+  await json(
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    }),
+  );
 }
 
 export async function sendChat(

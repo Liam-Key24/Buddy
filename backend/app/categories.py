@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .owners import resolve_owner
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -47,8 +49,26 @@ class CategoryStore:
     def __init__(self, conn):
         self.conn = conn
 
-    def ensure_defaults(self) -> None:
-        row = self.conn.execute("SELECT COUNT(*) AS c FROM categories").fetchone()
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def ensure_defaults(self, owner_user_id: str | None = None) -> None:
+        from .auth import list_users
+
+        if owner_user_id:
+            owners = [owner_user_id]
+        else:
+            owners = [u["id"] for u in list_users(self.conn)]
+            if not owners:
+                owners = [self._oid()]
+        for oid in owners:
+            self._ensure_defaults_for(oid)
+
+    def _ensure_defaults_for(self, owner_user_id: str) -> None:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM categories WHERE owner_user_id=?",
+            (owner_user_id,),
+        ).fetchone()
         if row and row["c"] > 0:
             return
         now = _now()
@@ -56,8 +76,8 @@ class CategoryStore:
             self.conn.execute(
                 """
                 INSERT INTO categories (
-                    id, name, color, icon, keywords, sort_order, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, name, color, icon, keywords, sort_order, created_at, updated_at, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _new_id(),
@@ -68,22 +88,31 @@ class CategoryStore:
                     i,
                     now,
                     now,
+                    owner_user_id,
                 ),
             )
         self.conn.commit()
 
-    def list(self) -> list[dict[str, Any]]:
-        self.ensure_defaults()
-        self.dedupe_by_name()
+    def list(self, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        oid = self._oid(owner_user_id)
+        self.ensure_defaults(oid)
+        self.dedupe_by_name(oid)
         rows = self.conn.execute(
-            "SELECT * FROM categories ORDER BY sort_order ASC, name ASC"
+            "SELECT * FROM categories WHERE owner_user_id=? ORDER BY sort_order ASC, name ASC",
+            (oid,),
         ).fetchall()
         return [self._row(r) for r in rows]
 
-    def dedupe_by_name(self) -> None:
+    def dedupe_by_name(self, owner_user_id: str | None = None) -> None:
         """Keep one category per name (case-insensitive); remapping sessions to the keeper."""
+        oid = self._oid(owner_user_id)
         rows = self.conn.execute(
-            "SELECT id, name, sort_order, created_at FROM categories ORDER BY sort_order ASC, created_at ASC"
+            """
+            SELECT id, name, sort_order, created_at FROM categories
+            WHERE owner_user_id=?
+            ORDER BY sort_order ASC, created_at ASC
+            """,
+            (oid,),
         ).fetchall()
         keep: dict[str, str] = {}
         removed = False
@@ -96,8 +125,8 @@ class CategoryStore:
                 continue
             keeper = keep[key]
             self.conn.execute(
-                "UPDATE sessions SET category_id=? WHERE category_id=?",
-                (keeper, r["id"]),
+                "UPDATE sessions SET category_id=? WHERE category_id=? AND owner_user_id=?",
+                (keeper, r["id"], oid),
             )
             self.conn.execute("DELETE FROM categories WHERE id=?", (r["id"],))
             removed = True
@@ -111,12 +140,14 @@ class CategoryStore:
         color: str = "#93c5fd",
         icon: str = "circle",
         keywords: str = "",
+        owner_user_id: str | None = None,
     ) -> dict[str, Any]:
-        self.ensure_defaults()
+        oid = self._oid(owner_user_id)
+        self.ensure_defaults(oid)
         clean = name.strip()
         existing = self.conn.execute(
-            "SELECT id FROM categories WHERE lower(name)=lower(?) LIMIT 1",
-            (clean,),
+            "SELECT id FROM categories WHERE lower(name)=lower(?) AND owner_user_id=? LIMIT 1",
+            (clean, oid),
         ).fetchone()
         if existing:
             updated = self.update(
@@ -129,22 +160,26 @@ class CategoryStore:
             return updated  # type: ignore[return-value]
         cid = _new_id()
         now = _now()
-        sort = self.conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 AS s FROM categories").fetchone()[
-            "s"
-        ]
+        sort = self.conn.execute(
+            "SELECT COALESCE(MAX(sort_order),0)+1 AS s FROM categories WHERE owner_user_id=?",
+            (oid,),
+        ).fetchone()["s"]
         self.conn.execute(
             """
             INSERT INTO categories (
-                id, name, color, icon, keywords, sort_order, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, name, color, icon, keywords, sort_order, created_at, updated_at, owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (cid, clean, color, icon, keywords.strip().lower(), sort, now, now),
+            (cid, clean, color, icon, keywords.strip().lower(), sort, now, now, oid),
         )
         self.conn.commit()
-        return self.get(cid)  # type: ignore[return-value]
+        return self.get(cid, owner_user_id=oid)  # type: ignore[return-value]
 
-    def get(self, category_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    def get(self, category_id: str, owner_user_id: str | None = None) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM categories WHERE id = ? AND owner_user_id=?",
+            (category_id, self._oid(owner_user_id)),
+        ).fetchone()
         return self._row(row) if row else None
 
     def update(self, category_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -159,20 +194,34 @@ class CategoryStore:
             """
             UPDATE categories
             SET name=?, color=?, icon=?, keywords=?, updated_at=?
-            WHERE id=?
+            WHERE id=? AND owner_user_id=?
             """,
-            (str(name).strip(), color, icon, str(keywords).strip().lower(), _now(), category_id),
+            (
+                str(name).strip(),
+                color,
+                icon,
+                str(keywords).strip().lower(),
+                _now(),
+                category_id,
+                self._oid(),
+            ),
         )
         self.conn.commit()
         return self.get(category_id)
 
-    def delete(self, category_id: str) -> bool:
-        row = self.get(category_id)
+    def delete(self, category_id: str, owner_user_id: str | None = None) -> bool:
+        oid = self._oid(owner_user_id)
+        row = self.get(category_id, owner_user_id=oid)
         if not row:
             return False
-        # Keep sessions; clear category_id
-        self.conn.execute("UPDATE sessions SET category_id=NULL WHERE category_id=?", (category_id,))
-        self.conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+        self.conn.execute(
+            "UPDATE sessions SET category_id=NULL WHERE category_id=? AND owner_user_id=?",
+            (category_id, oid),
+        )
+        self.conn.execute(
+            "DELETE FROM categories WHERE id=? AND owner_user_id=?",
+            (category_id, oid),
+        )
         self.conn.commit()
         return True
 

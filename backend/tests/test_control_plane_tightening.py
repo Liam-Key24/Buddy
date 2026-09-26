@@ -52,6 +52,7 @@ def _settings(**kwargs) -> Settings:
         request_timeout_s=5.0,
         max_output_tokens=128,
         cors_origins=DEFAULT_CORS_ORIGINS,
+        static_dir=None,
     )
     values.update(kwargs)
     return Settings(**values)

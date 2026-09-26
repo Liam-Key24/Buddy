@@ -70,6 +70,10 @@ class Settings:
     request_timeout_s: float
     max_output_tokens: int
     cors_origins: tuple[str, ...]
+    static_dir: Path | None
+    session_secret: str = ""
+    cookie_secure: bool = False
+    session_days: int = 30
 
     @property
     def groq_configured(self) -> bool:
@@ -79,6 +83,8 @@ class Settings:
 def load_settings() -> Settings:
     db_raw = os.environ.get("BUDDY_DB_PATH", "").strip()
     db_path = Path(db_raw).expanduser() if db_raw else DEFAULT_DB
+    static_raw = os.environ.get("BUDDY_STATIC_DIR", "").strip()
+    static_dir = Path(static_raw).expanduser() if static_raw else None
     return Settings(
         db_path=db_path,
         host=os.environ.get("BUDDY_HOST", "127.0.0.1").strip() or "127.0.0.1",
@@ -93,4 +99,8 @@ def load_settings() -> Settings:
         request_timeout_s=_env_float("BUDDY_GROQ_TIMEOUT_S", 45.0),
         max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 8192),
         cors_origins=_env_cors(DEFAULT_CORS_ORIGINS),
+        static_dir=static_dir,
+        session_secret=os.environ.get("BUDDY_SESSION_SECRET", "").strip(),
+        cookie_secure=_env_bool("BUDDY_COOKIE_SECURE", default=False),
+        session_days=_env_int("BUDDY_SESSION_DAYS", 30),
     )

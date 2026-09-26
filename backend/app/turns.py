@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import commit
+from .owners import resolve_owner
 
 
 def _now() -> str:
@@ -18,9 +19,13 @@ class TurnStore:
     def __init__(self, conn):
         self.conn = conn
 
-    def get(self, request_id: str) -> dict[str, Any] | None:
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
+    def get(self, request_id: str, owner_user_id: str | None = None) -> dict[str, Any] | None:
         row = self.conn.execute(
-            "SELECT * FROM turns WHERE request_id=?", (request_id,)
+            "SELECT * FROM turns WHERE request_id=? AND owner_user_id=?",
+            (request_id, self._oid(owner_user_id)),
         ).fetchone()
         return self._row(row) if row else None
 
@@ -63,10 +68,10 @@ class TurnStore:
                     request_id, conversation_id, status, user_message,
                     response_json, pending_ops_json, clarifications_json,
                     activity_json, context_categories_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, 'received', ?, NULL, '[]', '[]', '[]', '[]', ?, ?)
+                    created_at, updated_at, owner_user_id
+                ) VALUES (?, ?, 'received', ?, NULL, '[]', '[]', '[]', '[]', ?, ?, ?)
                 """,
-                (request_id, conversation_id, user_message, now, now),
+                (request_id, conversation_id, user_message, now, now, self._oid()),
             )
             commit(self.conn)
         except Exception:

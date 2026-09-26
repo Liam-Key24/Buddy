@@ -1,5 +1,7 @@
-import { useState, type ReactNode } from "react";
-import { Camera, SlidersHorizontal, UserCircle, UsersThree } from "@phosphor-icons/react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Camera, SignOut, SlidersHorizontal, UserCircle, UsersThree } from "@phosphor-icons/react";
+import { fetchMe, logout, type Me } from "../../api";
+import { Button } from "../../components/ui/Button";
 import { SectionHead } from "../../components/ui/SectionHead";
 import { Surface } from "../../components/ui/Surface";
 import { Tag } from "../../components/ui/Tag";
@@ -52,20 +54,55 @@ function ProfileCard({
 }
 
 export function GeneralSettingsPage() {
+  const [me, setMe] = useState<Me | null>(null);
   const [showAvatar, setShowAvatar] = useState(true);
   const [showPartnerAvatar, setShowPartnerAvatar] = useState(true);
   const [compactSidebar, setCompactSidebar] = useState(false);
   const [confirmDeletes, setConfirmDeletes] = useState(true);
+  const [signingOut, setSigningOut] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMe()
+      .then((row) => {
+        if (!cancelled) setMe(row);
+      })
+      .catch(() => {
+        if (!cancelled) setMe(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleLogout() {
+    setSigningOut(true);
+    try {
+      await logout();
+      window.location.reload();
+    } finally {
+      setSigningOut(false);
+    }
+  }
 
   return (
     <>
       <SettingsPageHead
         title="Settings"
-        subtitle="Profile and preferences. Avatar and account options are placeholders until multi-account ships."
+        subtitle="Profile, preferences, and this device’s signed-in account."
         action={<Tag tone="warn">Placeholders</Tag>}
       />
 
       <SettingsMasonry>
+        <Surface>
+          <SectionHead icon={<SignOut size={16} weight="duotone" />} title="Account" />
+          <p className="mb-3 text-sm text-ink-soft">
+            Signed in as <strong>{me?.username ?? "…"}</strong>
+          </p>
+          <Button tone="raised" onClick={handleLogout} disabled={signingOut || !me}>
+            {signingOut ? "Signing out…" : "Log out"}
+          </Button>
+        </Surface>
         <ProfileCard
           title="Your profile"
           name="You"
