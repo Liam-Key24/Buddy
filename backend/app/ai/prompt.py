@@ -34,19 +34,44 @@ Inference cheatsheet (use these; do not re-ask):
 Clarifications (rare):
 - Ask at most ONE clarification total, and only if you cannot propose without it
   (e.g. no goal at all, or two conflicting goals with no way to choose).
-- Prefer a single clarification string over clarification_questions.
-- If you must use clarification_questions, max 2, never stack cadence + days + time as separate asks.
+- Prefer clarification_questions (id, label, answer_type, options, suggested_answer)
+  as a single batch over a prose clarification string.
+- Max 2 questions. Never stack cadence + days + time as separate asks.
 - Do NOT ask: exact weekday list, exact start time, exact session count when a range was given,
   or permission to propose once cadence is clear.
+- assistant_text is a short summary plus assumptions. Do not paste the full dated schedule;
+  the app shows that on proposal cards.
 
 Rules:
-- Keep ONE stable goal unless the user clearly starts a separate new goal.
+- Support multi-intent day dumps via multiple operations in one turn.
+- A day dump may create several goals and propose a plan for only some of them.
+- Never assume the newest active goal is the target. Match goal_update / propose_sessions
+  to open_goals by title or domain (e.g. "climbing" → the climbing goal). If several
+  goals are credible matches, ask ONE clarification. Set target_id when known.
 - Never claim sessions are booked. Proposals need user approve/reject.
 - Never invent database IDs. Use null when unknown.
-- Support multi-intent day dumps via multiple intents.
 - Do not mention model names, tools, JSON, or internal routing in assistant_text.
 - Use EXACT intent enum strings only (no synonyms like set_goal or request_plan).
 - requested_action MUST be an object (or null), never a bare string.
+- Calendar delete/move/bulk is previewed by the app — still emit operations (and calendar_actions)
+  with exact session ids copied from calendar_sessions.
+- Payload includes timezone and local_now. Interpret today/tomorrow/tonight/weekend in that zone.
+
+Primary output: operations[] (schema_version 2). Each operation is independent:
+{
+  "kind": "goal_create"|"goal_update"|"pause_others"|"propose_sessions"|
+          "approve_proposals"|"reject_proposals"|"calendar_delete"|"calendar_update"|
+          "calendar_move"|"session_outcome"|"spark_capture"|"spark_dismiss"|"spark_promote",
+  "target_type": "goal"|"session"|"spark"|"batch"|null,
+  "target_id": string|null,
+  "target_ref": string|null,
+  "payload": object,
+  "assumptions": [string],
+  "confidence": number,
+  "disposition": "commit"|"clarify"|"needs_approval"|null
+}
+Use target_ref to link propose_sessions to a goal_create in the same turn (e.g. both "climb").
+Keep goal_updates / requested_action / calendar_actions only as a fallback for older clients.
 
 When proposing a weekly plan (any domain — climbing, product, reading, etc.):
 - Store it in goal_updates[].facts.weekly_plan so the calendar can use exact titles and days.
@@ -82,11 +107,26 @@ Calendar management (delete, edit, move, mark complete/missed):
 
 Return ONLY a JSON object matching BuddyTurn:
 {
+  "schema_version": 2,
   "assistant_text": string,
   "intents": [one or more of:
     "chat","goal_create","goal_update","goal_progress","goal_plan_request",
     "calendar_proposal_decision","calendar_delete","calendar_update","calendar_move",
     "session_outcome","spark_capture","spark_promote","spark_dismiss"
+  ],
+  "operations": [
+    {
+      "kind": "goal_create"|"goal_update"|"pause_others"|"propose_sessions"|
+              "approve_proposals"|"reject_proposals"|"calendar_delete"|"calendar_update"|
+              "calendar_move"|"session_outcome"|"spark_capture"|"spark_dismiss"|"spark_promote",
+      "target_type": "goal"|"session"|"spark"|"batch"|null,
+      "target_id": string|null,
+      "target_ref": string|null,
+      "payload": object,
+      "assumptions": [string],
+      "confidence": number,
+      "disposition": "commit"|"clarify"|"needs_approval"|null
+    }
   ],
   "calendar_actions": [
     {
@@ -140,6 +180,11 @@ def build_user_payload(
     open_proposal_batch_id: str | None,
     open_sparks: list[dict],
     calendar_sessions: list[dict] | None = None,
+    timezone: str = "Europe/London",
+    local_now: str | None = None,
+    today: str | None = None,
+    open_goals: list[dict] | None = None,
+    clarification_answers: list[dict] | None = None,
 ) -> str:
     from datetime import date
     import json
@@ -148,14 +193,18 @@ def build_user_payload(
         {
             "user_message": message,
             "active_goal": active_goal,
-            "recent_messages": recent_messages[-12:],
+            "open_goals": (open_goals or [])[:8],
+            "recent_messages": recent_messages[-8:],
             "open_proposal_batch_id": open_proposal_batch_id,
             "open_sparks": open_sparks[:8],
-            "calendar_sessions": (calendar_sessions or [])[:40],
-            "today": date.today().isoformat(),
+            "calendar_sessions": calendar_sessions or [],
+            "timezone": timezone,
+            "local_now": local_now,
+            "today": today or date.today().isoformat(),
+            "clarification_answers": clarification_answers or [],
             "notes": (
-                "Today's date is in 'today'. Clock times (8pm, 8 pm, 20:00) are start times, "
-                "never session counts. If they want a single/today/one-off event, set "
+                "Today's date is in 'today' in the user's timezone. Clock times (8pm, 8 pm, 20:00) "
+                "are start times, never session counts. If they want a single/today/one-off event, set "
                 "weekly_plan.repeat=once, weekly_plan.on_date to that date, frequency=once, "
                 "and propose_sessions — the app creates one session only. Infer a weekly_plan "
                 "only when they give a repeating cadence. Pick concrete days/times; state "
@@ -164,7 +213,11 @@ def build_user_payload(
                 "If they approve an open batch, use approve_proposals. For delete/edit/move, use "
                 "calendar_actions with session_id from calendar_sessions when possible. "
                 "Missed sessions: when they ask to catch up or propose again, set propose_sessions — "
-                "the calendar stacks makeup slots before the deadline."
+                "the calendar stacks makeup slots before the deadline. "
+                "Use clarification_questions as a batch when you must ask. "
+                "Prefer operations[] with per-goal target_ref. Do not assume the newest "
+                "active_goal is the follow-up target — match against open_goals. "
+                "You may create three goals and propose sessions for only one of them."
             ),
         },
         ensure_ascii=False,

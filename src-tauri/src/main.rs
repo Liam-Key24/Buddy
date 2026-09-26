@@ -88,11 +88,17 @@ fn spawn_backend() -> Result<Child, String> {
     } else {
         // Packaged: expect buddy-backend sidecar beside the app resources / PATH override.
         let bin = std::env::var("BUDDY_BACKEND_BIN").unwrap_or_else(|_| {
-            // Tauri externalBin name resolves next to the executable as buddy-backend-<triple>
+            // Tauri externalBin copies buddy-backend-<triple> next to the executable.
             let exe = std::env::current_exe().ok();
-            if let Some(exe) = exe {
-                if let Some(dir) = exe.parent() {
-                    let candidate = dir.join("buddy-backend");
+            if let Some(dir) = exe.as_ref().and_then(|path| path.parent()) {
+                let triple = std::env::consts::ARCH;
+                let names = [
+                    format!("buddy-backend-{triple}-apple-darwin"),
+                    "buddy-backend-aarch64-apple-darwin".into(),
+                    "buddy-backend".into(),
+                ];
+                for name in names {
+                    let candidate = dir.join(&name);
                     if candidate.exists() {
                         return candidate.to_string_lossy().to_string();
                     }

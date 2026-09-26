@@ -166,9 +166,13 @@ class ConversationStore:
     def save_draft(self, conversation_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
         if not self.get(conversation_id):
             return None
+        current = (self.get(conversation_id) or {}).get("draft") or {}
+        merged = dict(current) if isinstance(current, dict) else {}
+        if isinstance(draft, dict):
+            merged.update(draft)
         self.conn.execute(
             "UPDATE conversations SET draft_json=?, updated_at=? WHERE id=?",
-            (json.dumps(draft), _now(), conversation_id),
+            (json.dumps(merged), _now(), conversation_id),
         )
         self.conn.commit()
         return self.get(conversation_id)

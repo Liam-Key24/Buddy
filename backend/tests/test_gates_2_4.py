@@ -84,7 +84,7 @@ def test_invalid_buddy_turn_does_not_mutate(tmp_path: Path):
     class BadAI:
         calls = 0
 
-        def complete_json(self, system, user, *, allow_retry=True):
+        def complete_json(self, system, user, *, allow_retry=True, **kwargs):
             self.calls += 1
             return {"nope": True}
 

@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .categories import CategoryStore
+from .db import commit as db_commit
 from .schemas import CalendarAction, CategoryBrief, SessionOut
 
 
@@ -216,7 +217,7 @@ class CalendarService:
                 {**dict(rows[i]), "category_id": cid}
             )
         if dirty:
-            self.conn.commit()
+            db_commit(self.conn)
         return sessions
 
     def list_fixed_blocks(self) -> list[dict[str, Any]]:
@@ -248,7 +249,7 @@ class CalendarService:
             """,
             (bid, title, weekday, start_minute, end_minute, _now()),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         row = self.conn.execute("SELECT * FROM fixed_blocks WHERE id = ?", (bid,)).fetchone()
         return dict(row)
 
@@ -294,12 +295,12 @@ class CalendarService:
                 block_id,
             ),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         return data
 
     def delete_fixed_block(self, block_id: str) -> bool:
         cur = self.conn.execute("DELETE FROM fixed_blocks WHERE id = ?", (block_id,))
-        self.conn.commit()
+        db_commit(self.conn)
         return cur.rowcount > 0
 
     def list_proposed_for_batch(self, batch_id: str) -> list[SessionOut]:
@@ -335,7 +336,7 @@ class CalendarService:
             cid = self.categories.match_title(r["title"])
             self.conn.execute("UPDATE sessions SET category_id=? WHERE id=?", (cid, r["id"]))
             n += 1
-        self.conn.commit()
+        db_commit(self.conn)
         return n
 
     def _busy_intervals(self, day: date) -> list[tuple[datetime, datetime]]:
@@ -568,7 +569,7 @@ class CalendarService:
 
         if plan and isinstance(plan.get("slots"), list) and plan["slots"]:
             sessions = self._propose_from_weekly_plan(goal, plan, start_day, end_day)
-            self.conn.commit()
+            db_commit(self.conn)
             return sessions
 
         # Generic path (no structured weekly plan): keep a short approval horizon.
@@ -805,7 +806,7 @@ class CalendarService:
                 )
             )
         if commit:
-            self.conn.commit()
+            db_commit(self.conn)
         return sessions
 
     def _insert_proposed(
@@ -871,7 +872,7 @@ class CalendarService:
                     json.dumps(session_ids),
                 ),
             )
-        self.conn.commit()
+        db_commit(self.conn)
         return booked
 
     def undo_batch(self, batch_id: str) -> list[SessionOut]:
@@ -911,7 +912,7 @@ class CalendarService:
                     "UPDATE goals SET status='planned', updated_at=? WHERE id=?",
                     (now, restored[0].goal_id),
                 )
-            self.conn.commit()
+            db_commit(self.conn)
             return restored
 
         # Fallback: any scheduled rows for this batch
@@ -926,7 +927,7 @@ class CalendarService:
                 (now, r["id"]),
             )
             restored.append(self._row_to_session({**dict(r), "status": "proposed"}))
-        self.conn.commit()
+        db_commit(self.conn)
         return restored
 
     def reject_batch(self, batch_id: str) -> int:
@@ -938,7 +939,7 @@ class CalendarService:
             """,
             (now, batch_id),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         return cur.rowcount
 
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None) -> SessionOut | None:
@@ -952,7 +953,7 @@ class CalendarService:
             "UPDATE sessions SET status=?, notes=COALESCE(?, notes), updated_at=? WHERE id=?",
             (outcome, notes, now, session_id),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         refreshed = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return self._row_to_session(refreshed)
 
@@ -1055,7 +1056,7 @@ class CalendarService:
             """,
             (sid, title, start.isoformat(), end.isoformat(), now, now, category_id),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
         return self._row_to_session(row)
 
@@ -1064,6 +1065,76 @@ class CalendarService:
         if not row:
             return None
         return self._row_to_session(row)
+
+    def session_snapshot(self, session: SessionOut) -> dict[str, Any]:
+        return {
+            "id": session.id,
+            "goal_id": session.goal_id,
+            "title": session.title,
+            "start_at": session.start_at,
+            "end_at": session.end_at,
+            "kind": session.kind,
+            "status": session.status,
+            "proposal_batch_id": session.proposal_batch_id,
+            "notes": session.notes,
+            "category_id": session.category_id,
+            "created_at": None,
+            "updated_at": session.updated_at,
+        }
+
+    def restore_session_snapshot(self, snap: dict[str, Any]) -> SessionOut | None:
+        sid = snap.get("id")
+        if not sid:
+            return None
+        now = _now()
+        existing = self.conn.execute("SELECT id FROM sessions WHERE id=?", (sid,)).fetchone()
+        if existing:
+            self.conn.execute(
+                """
+                UPDATE sessions SET
+                    goal_id=?, title=?, start_at=?, end_at=?, kind=?, status=?,
+                    proposal_batch_id=?, notes=?, category_id=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    snap.get("goal_id"),
+                    snap.get("title") or "",
+                    snap.get("start_at"),
+                    snap.get("end_at"),
+                    snap.get("kind") or "flexible",
+                    snap.get("status") or "scheduled",
+                    snap.get("proposal_batch_id"),
+                    snap.get("notes"),
+                    snap.get("category_id"),
+                    now,
+                    sid,
+                ),
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, goal_id, title, start_at, end_at, kind, status,
+                    proposal_batch_id, notes, created_at, updated_at, category_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sid,
+                    snap.get("goal_id"),
+                    snap.get("title") or "",
+                    snap.get("start_at"),
+                    snap.get("end_at"),
+                    snap.get("kind") or "flexible",
+                    snap.get("status") or "scheduled",
+                    snap.get("proposal_batch_id"),
+                    snap.get("notes"),
+                    snap.get("created_at") or now,
+                    now,
+                    snap.get("category_id"),
+                ),
+            )
+        db_commit(self.conn)
+        return self.get_session(sid)
 
     def resolve_action_targets(self, action: CalendarAction) -> list[SessionOut]:
         if action.session_id:
@@ -1133,7 +1204,7 @@ class CalendarService:
             """,
             (new_title, start.isoformat(), end.isoformat(), new_category_id, now, session_id),
         )
-        self.conn.commit()
+        db_commit(self.conn)
         updated = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return self._row_to_session(updated)
 
@@ -1207,13 +1278,49 @@ class CalendarService:
                 errors.append(str(exc))
         return deleted, updated, errors
 
+    def apply_reviewed_action(
+        self,
+        action: CalendarAction,
+        session_ids: list[str],
+    ) -> tuple[list[str], list[SessionOut], list[str]]:
+        """Apply a mutation only to previously reviewed session IDs. Never re-runs selectors."""
+        deleted: list[str] = []
+        updated: list[SessionOut] = []
+        errors: list[str] = []
+        for session_id in session_ids:
+            pinned = action.model_copy(
+                update={
+                    "session_id": session_id,
+                    "title_contains": None,
+                    "date": None,
+                    "goal_id": None,
+                    "all_matching": False,
+                    "statuses": [],
+                }
+            )
+            d, u, e = self.apply_calendar_action(pinned)
+            deleted.extend(d)
+            updated.extend(u)
+            errors.extend(e)
+        return deleted, updated, errors
+
+    def fingerprints_match(self, session: SessionOut, fingerprint: dict[str, Any] | None) -> bool:
+        if not fingerprint:
+            return False
+        return (
+            session.title == fingerprint.get("title")
+            and session.start_at == fingerprint.get("start_at")
+            and session.end_at == fingerprint.get("end_at")
+            and session.status == fingerprint.get("status")
+        )
+
     def delete_session(self, session_id: str) -> bool:
         """Hard-delete a session by id. Returns False if missing."""
         row = self.conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if not row:
             return False
         self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        self.conn.commit()
+        db_commit(self.conn)
         return True
 
     def _row_to_session(self, row) -> SessionOut:
@@ -1242,4 +1349,5 @@ class CalendarService:
             notes=d.get("notes"),
             category_id=category_id,
             category=category,
+            updated_at=d.get("updated_at"),
         )

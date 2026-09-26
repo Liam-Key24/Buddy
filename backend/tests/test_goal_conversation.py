@@ -130,7 +130,7 @@ def test_restart_recovers_active_goal(plane):
     assert loaded.baseline == "V4"
 
 
-def test_new_product_goal_pauses_climbing(plane):
+def test_new_product_goal_keeps_climbing_open(plane):
     service, _ = plane
     climb = service.handle_message("I want to climb V6 by the end of November.")
     mevero = service.handle_message(
@@ -143,7 +143,10 @@ def test_new_product_goal_pauses_climbing(plane):
     assert "climb v6" not in mevero.reply.lower()
     old = service.get_goal(climb.goal.id)
     assert old is not None
-    assert old.status == "paused"
+    assert old.status != "paused"
+    open_titles = {g.title for g in service.goals.list_open()}
+    assert any("climb" in t.lower() for t in open_titles)
+    assert any("mevero" in t.lower() for t in open_titles)
 
     ready = service.handle_message("Twice a week.", conversation_id=mevero.conversation_id)
     assert ready.goal is not None

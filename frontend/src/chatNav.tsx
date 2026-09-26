@@ -26,7 +26,7 @@ import { useToast } from "./components/ui/Toast";
 
 export const STORAGE_KEY = "buddy.conversationId";
 
-type ChatNavValue = {
+export type ChatNavValue = {
   conversations: Conversation[];
   folders: ChatFolder[];
   conversationId: string | null;
@@ -46,7 +46,7 @@ type ChatNavValue = {
   refresh: () => Promise<void>;
 };
 
-const ChatNavContext = createContext<ChatNavValue | null>(null);
+export const ChatNavContext = createContext<ChatNavValue | null>(null);
 
 export function useChatNav() {
   const ctx = useContext(ChatNavContext);

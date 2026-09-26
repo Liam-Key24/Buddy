@@ -3,6 +3,7 @@ import {
   ArrowUp,
   CheckCircle,
   CircleNotch,
+  PencilSimple,
   Stop,
   Target,
 } from "@phosphor-icons/react";
@@ -14,14 +15,23 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  chatResultBelongsToView,
+  draftPayload,
+  draftReadyToSave,
+  lateReplyToastMessage,
+  shouldPersistDraft,
+  type ChatViewBinding,
+} from "../chatSession";
 import { useChatNav } from "../chatNav";
-import { ProposalCards } from "../components/ProposalCards";
+import { ProposalCards, MutationPreviewCard } from "../components/ProposalCards";
 import { Button } from "../components/ui/Button";
 import { useGoalComplete } from "../components/ui/GoalCompleteOverlay";
 import { Tag } from "../components/ui/Tag";
 import { useToast } from "../components/ui/Toast";
 import {
   cancelChat,
+  createConversation,
   decideProposal,
   fetchMessages,
   fetchOpenProposal,
@@ -33,12 +43,14 @@ import {
   type ChatResponse,
   type ClarificationQuestion,
   type Goal,
+  type MutationPreview,
+  type ProposalGroup,
   type ProposalSummary,
   type Session,
 } from "../api";
 import { cn } from "../lib/cn";
 
-type Msg = { role: "user" | "assistant"; content: string };
+type Msg = { id?: string; role: "user" | "assistant"; content: string };
 
 const EDIT_HINT_KEY = "buddy.editGoalHint";
 const CONTINUE_HINT_KEY = "buddy.continueHint";
@@ -58,22 +70,34 @@ export function ChatPage() {
   const [goal, setGoal] = useState<Goal | null>(null);
   const [proposals, setProposals] = useState<Session[]>([]);
   const [proposalSummary, setProposalSummary] = useState<ProposalSummary | null>(null);
+  const [proposalGroups, setProposalGroups] = useState<ProposalGroup[]>([]);
+  const [mutationPreview, setMutationPreview] = useState<MutationPreview | null>(null);
   const [proposalOpen, setProposalOpen] = useState(true);
   const [questions, setQuestions] = useState<ClarificationQuestion[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [activity, setActivity] = useState<ActivityStep[]>([]);
   const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [focusStep, setFocusStep] = useState(0);
-  const [whyOpen, setWhyOpen] = useState(false);
+  const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
   const [undoBatchId, setUndoBatchId] = useState<string | null>(null);
   const [modeTag, setModeTag] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const composingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
+  const conversationIdRef = useRef<string | null>(conversationId);
+  const viewIdRef = useRef(0);
+  const lastViewConversationRef = useRef<string | null>(conversationId);
+  const lateReadyRef = useRef<Set<string>>(new Set());
+  const inputRef = useRef(input);
+  const answersRef = useRef(answers);
+  const draftOwnerRef = useRef<string | null>(conversationId);
+  const draftHydratedRef = useRef(false);
+  const inFlightConversationRef = useRef<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const stepsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +108,19 @@ export function ChatPage() {
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
   }, []);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+    if (lastViewConversationRef.current !== conversationId) {
+      viewIdRef.current += 1;
+      lastViewConversationRef.current = conversationId;
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    inputRef.current = input;
+    answersRef.current = answers;
+  }, [input, answers]);
 
   useEffect(() => {
     const raw = localStorage.getItem(EDIT_HINT_KEY);
@@ -134,20 +171,46 @@ export function ChatPage() {
 
   useEffect(() => {
     if (!conversationId) {
+      const prevOwner = draftOwnerRef.current;
+      if (prevOwner) {
+        void saveDraft(prevOwner, draftPayload(inputRef.current, answersRef.current)).catch(
+          () => undefined,
+        );
+      }
+      draftOwnerRef.current = null;
+      draftHydratedRef.current = true;
       setMessages([GREETING]);
       setGoal(null);
       setProposals([]);
       setProposalSummary(null);
+      setProposalGroups([]);
+      setMutationPreview(null);
       setQuestions([]);
       setAnswers({});
       setUndoBatchId(null);
       setActivity([]);
+      setEditingId(null);
+      setError(null);
       return;
     }
+    if (lateReadyRef.current.has(conversationId)) {
+      lateReadyRef.current.delete(conversationId);
+    }
+    const prevOwner = draftOwnerRef.current;
+    if (prevOwner && prevOwner !== conversationId) {
+      void saveDraft(prevOwner, draftPayload(inputRef.current, answersRef.current)).catch(
+        () => undefined,
+      );
+    }
+    draftOwnerRef.current = conversationId;
+    draftHydratedRef.current = false;
+    setInput("");
+    setAnswers({});
     let cancelled = false;
     fetchMessages(conversationId)
       .then((rows) => {
         if (cancelled) return;
+        if (inFlightConversationRef.current === conversationId) return;
         if (!rows.length) {
           setMessages([GREETING]);
           return;
@@ -155,7 +218,11 @@ export function ChatPage() {
         setMessages(
           rows
             .filter((r) => r.role === "user" || r.role === "assistant")
-            .map((r) => ({ role: r.role as "user" | "assistant", content: r.content })),
+            .map((r) => ({
+              id: r.id,
+              role: r.role as "user" | "assistant",
+              content: r.content,
+            })),
         );
       })
       .catch(() => undefined);
@@ -163,25 +230,62 @@ export function ChatPage() {
       .then((open) => {
         if (cancelled) return;
         setGoal(open.goal);
-        if (open.proposed_sessions?.length && open.proposal_summary) {
+        const groups = open.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        if (groups.length) {
+          setProposalGroups(groups);
+          setProposals(groups[0].sessions);
+          setProposalSummary(groups[0].summary);
+          setProposalOpen(true);
+        } else if (open.proposed_sessions?.length && open.proposal_summary) {
           setProposals(open.proposed_sessions);
           setProposalSummary(open.proposal_summary);
+          setProposalGroups([]);
           setProposalOpen(true);
         } else {
           setProposals([]);
           setProposalSummary(null);
+          setProposalGroups([]);
+        }
+        const preview = open.mutation_preview;
+        setMutationPreview(preview?.records?.length ? preview : null);
+        if (open.clarification_questions?.length) {
+          setQuestions(open.clarification_questions);
+        } else {
+          setQuestions([]);
+        }
+        const entered = open.entered_answers || open.clarification_answers || {};
+        setAnswers(entered);
+        setInput(typeof open.composer === "string" ? open.composer : "");
+        if (draftOwnerRef.current === conversationId) {
+          draftHydratedRef.current = true;
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (draftOwnerRef.current === conversationId) {
+          draftHydratedRef.current = true;
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, [conversationId]);
 
   useEffect(() => {
-    if (!conversationId || !input) return;
+    if (
+      !draftReadyToSave({
+        conversationId,
+        ownerId: draftOwnerRef.current,
+        hydrated: draftHydratedRef.current,
+      }) ||
+      !shouldPersistDraft(conversationId)
+    ) {
+      return;
+    }
+    const cid = conversationId;
+    const payload = draftPayload(input, answers);
     const t = window.setTimeout(() => {
-      saveDraft(conversationId, { composer: input, answers }).catch(() => undefined);
+      if (conversationIdRef.current !== cid) return;
+      saveDraft(cid, payload).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(t);
   }, [input, answers, conversationId]);
@@ -203,32 +307,53 @@ export function ChatPage() {
     }
   }, [busy, questions.length]);
 
-  function applyChatResult(res: ChatResponse) {
-    setConversationId(res.conversation_id);
+  function applyChatResult(res: ChatResponse, origin: ChatViewBinding): boolean {
+    if (
+      !chatResultBelongsToView(
+        origin,
+        conversationIdRef.current,
+        viewIdRef.current,
+        res.conversation_id,
+      )
+    ) {
+      lateReadyRef.current.add(res.conversation_id);
+      refresh().catch(() => undefined);
+      return false;
+    }
+    if (!conversationIdRef.current) {
+      setConversationId(res.conversation_id);
+    }
     const prevStatus = goal?.status;
     setGoal(res.goal);
     if (res.goal?.status === "done" && prevStatus !== "done") {
-      celebrateGoalComplete(res.goal.title);
+      celebrateGoalComplete(res.goal.title, `${res.conversation_id}:${res.goal.id}`);
     }
     setActivity(res.activity || []);
-    if (res.proposed_sessions?.length) {
+    const groups = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+    if (groups.length) {
+      setProposalGroups(groups);
+      setProposals(groups[0].sessions);
+      setProposalSummary(groups[0].summary);
+      setProposalOpen(true);
+      setQuestions([]);
+      setModeTag(groups.length > 1 ? `${groups.length} plans` : "Plan");
+    } else if (res.proposed_sessions?.length) {
       setProposals(res.proposed_sessions);
       setProposalSummary(res.proposal_summary ?? null);
+      setProposalGroups([]);
       setProposalOpen(true);
       setQuestions([]);
       setModeTag("Plan");
     }
+    if (res.mutation_preview?.records?.length) {
+      setMutationPreview(res.mutation_preview);
+    } else {
+      setMutationPreview(null);
+    }
     if (res.clarification_questions?.length) {
       setQuestions(res.clarification_questions);
-      const next: Record<string, string> = {};
-      for (const q of res.clarification_questions) {
-        if (q.suggested_answer) next[q.id] = q.suggested_answer;
-      }
-      setAnswers(next);
     }
     if (res.booked_sessions?.length) {
-      setProposals([]);
-      setProposalSummary(null);
       setUndoBatchId(res.undo_batch_id ?? null);
     }
     if (res.deleted_session_ids?.length || res.updated_sessions?.length) {
@@ -243,12 +368,53 @@ export function ChatPage() {
       setError("Cloud AI is temporarily unavailable. Today, Calendar and Sparks still work.");
     }
     refresh().catch(() => undefined);
+    return true;
   }
 
-  async function sendMessage(text: string) {
+  async function reloadMessages(cid: string) {
+    const rows = await fetchMessages(cid);
+    if (!rows.length) {
+      setMessages([GREETING]);
+      return;
+    }
+    setMessages(
+      rows
+        .filter((r) => r.role === "user" || r.role === "assistant")
+        .map((r) => ({
+          id: r.id,
+          role: r.role as "user" | "assistant",
+          content: r.content,
+        })),
+    );
+  }
+
+  function startEdit(message: Msg) {
+    if (!message.id || message.role !== "user" || busy) return;
+    setEditingId(message.id);
+    setInput(message.content);
+    setError(null);
+    requestAnimationFrame(() => {
+      resizeComposer();
+      composerRef.current?.focus();
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setInput("");
+    requestAnimationFrame(resizeComposer);
+  }
+
+  async function sendMessage(
+    text: string,
+    clarificationAnswers?: Array<{ question_id: string; answer: string }>,
+    revisionOf?: string | null,
+  ) {
     if (!text.trim() || busy) return;
     setError(null);
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    if (!revisionOf) {
+      setMessages((m) => [...m, { role: "user", content: text }]);
+    }
     setBusy(true);
     setActivity([{ stage: "started", label: "Understanding your goal", detail: null }]);
     setStepsCollapsed(true);
@@ -259,29 +425,96 @@ export function ChatPage() {
         ? crypto.randomUUID()
         : `req-${Date.now()}`;
     requestIdRef.current = requestId;
+    const originViewId = viewIdRef.current;
     try {
-      const res = await sendChat(text, conversationId, controller.signal, requestId);
-      applyChatResult(res);
+      let originConversationId = conversationId;
+      if (!originConversationId) {
+        const created = await createConversation();
+        originConversationId = created.id;
+        if (viewIdRef.current === originViewId) {
+          lastViewConversationRef.current = created.id;
+          conversationIdRef.current = created.id;
+          draftOwnerRef.current = created.id;
+          draftHydratedRef.current = true;
+          setConversationId(created.id);
+        }
+        refresh().catch(() => undefined);
+      }
+      inFlightConversationRef.current = originConversationId;
+      const origin: ChatViewBinding = {
+        originConversationId,
+        originViewId,
+      };
+      const res = await sendChat(text, originConversationId, controller.signal, requestId, {
+        clarification_answers: clarificationAnswers,
+        revision_of: revisionOf || null,
+      });
+      const applied = applyChatResult(res, origin);
+      if (!applied) {
+        lateReadyRef.current.add(res.conversation_id);
+        refresh().catch(() => undefined);
+        const title = conversations.find((c) => c.id === res.conversation_id)?.title;
+        const openId = res.conversation_id;
+        pushToast(lateReplyToastMessage(title), {
+          label: "Open",
+          onClick: () => setConversationId(openId),
+        });
+        return;
+      }
+      const cid = res.conversation_id || originConversationId;
+      if (cid) {
+        try {
+          await reloadMessages(cid);
+        } catch {
+          /* keep optimistic transcript */
+        }
+      }
+      setEditingId(null);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        setActivity([{ stage: "cancelled", label: "Stopped", detail: "No database or calendar changes" }]);
-        setMessages((m) => [
-          ...m,
-          { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." },
-        ]);
+        let committed = false;
+        const rid = requestIdRef.current;
+        if (rid) {
+          try {
+            const info = await cancelChat(rid);
+            committed = Boolean(info.committed);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (committed) {
+          setActivity([{ stage: "completed", label: "Finished before Stop", detail: "Changes may have been applied" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: "That turn was already saving — some calendar changes may have been applied." },
+          ]);
+        } else {
+          setActivity([{ stage: "cancelled", label: "Stopped", detail: "No calendar changes" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: "Stopped. Your message is saved — nothing else changed." },
+          ]);
+        }
       } else {
         const message = err instanceof Error ? err.message : "Something went wrong";
         setError(message);
-        setActivity([{ stage: "error", label: "Could not reach Cloud AI", detail: "No calendar changes made" }]);
-        setMessages((m) => [
-          ...m,
-          { role: "assistant", content: `I couldn't finish that turn (${message}). Your message is preserved.` },
-        ]);
+        if (revisionOf) {
+          pushToast(message);
+          setInput(text);
+          setActivity([{ stage: "error", label: "Edit blocked", detail: "Calendar records were kept" }]);
+        } else {
+          setActivity([{ stage: "error", label: "Could not reach Cloud AI", detail: "No calendar changes made" }]);
+          setMessages((m) => [
+            ...m,
+            { role: "assistant", content: `I couldn't finish that turn (${message}). Your message is preserved.` },
+          ]);
+        }
       }
     } finally {
       setBusy(false);
       abortRef.current = null;
       requestIdRef.current = null;
+      inFlightConversationRef.current = null;
       composerRef.current?.focus();
     }
   }
@@ -292,40 +525,43 @@ export function ChatPage() {
     if (!text || busy) return;
     setInput("");
     requestAnimationFrame(resizeComposer);
-    await sendMessage(text);
+    await sendMessage(text, undefined, editingId);
   }
 
   async function submitQuestionStack() {
-    const lines = questions.map((q) => {
-      const a = (answers[q.id] || "").trim() || "(skipped)";
-      return `${q.label}: ${a}`;
-    });
-    const payload = `Here are my answers:\n${lines.join("\n")}\nPlease continue with the plan.`;
+    const payload = questions
+      .map((q) => ({ question_id: q.id, answer: (answers[q.id] || "").trim() }))
+      .filter((row) => row.answer);
     setQuestions([]);
-    await sendMessage(payload);
+    await sendMessage("Answered the questions.", payload);
   }
 
-  async function onDecide(decision: "approve" | "reject" | "adjust" | "undo") {
-    const batchId = proposals[0]?.proposal_batch_id || undoBatchId;
-    if (!batchId || busy) return;
+  async function onDecide(
+    decision: "approve" | "reject" | "adjust" | "undo",
+    batchId?: string | null,
+  ) {
+    const resolvedBatch = batchId || proposalGroups[0]?.proposal_batch_id || proposals[0]?.proposal_batch_id || undoBatchId;
     if (decision === "adjust") {
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          content: "What should change? e.g. “move Thursday to 19:00” or “drop one session”.",
+          content: "What should change? Describe the adjustment — I won't apply the current preview until you approve a new one.",
         },
       ]);
-      setProposalOpen(false);
+      if (!batchId) setProposalOpen(false);
       return;
     }
+    if (!resolvedBatch || busy) return;
     setBusy(true);
     try {
-      const res = await decideProposal(batchId, decision, conversationId);
+      const res = await decideProposal(resolvedBatch, decision, conversationId);
       if (decision === "approve") {
-        setProposals([]);
-        setProposalSummary(null);
-        setUndoBatchId(res.undo_batch_id || batchId);
+        const remaining = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        setProposalGroups(remaining);
+        setProposals(remaining[0]?.sessions || []);
+        setProposalSummary(remaining[0]?.summary ?? null);
+        setUndoBatchId(res.undo_batch_id || resolvedBatch);
         pushToast("Booked. You can undo without Cloud AI.");
         setMessages((m) => [
           ...m,
@@ -336,8 +572,10 @@ export function ChatPage() {
         ]);
         notifyCalendarChanged();
       } else if (decision === "reject") {
-        setProposals([]);
-        setProposalSummary(null);
+        const remaining = res.proposal_groups?.filter((g) => g.sessions?.length) || [];
+        setProposalGroups(remaining);
+        setProposals(remaining[0]?.sessions || []);
+        setProposalSummary(remaining[0]?.summary ?? null);
         setMessages((m) => [
           ...m,
           { role: "assistant", content: `Rejected ${res.rejected ?? 0} proposed session(s).` },
@@ -348,6 +586,7 @@ export function ChatPage() {
         const undone = res.undone || [];
         setProposals(undone);
         setProposalSummary(buildProposalSummary(goal, undone));
+        setProposalGroups([]);
         setProposalOpen(true);
         pushToast("Booking undone — sessions are proposals again.");
         setMessages((m) => [
@@ -458,6 +697,11 @@ export function ChatPage() {
             {goal.frequency ? ` · ${goal.frequency}` : ""}
           </Tag>
         )}
+        {!goal && proposalGroups.length > 1 && (
+          <Tag icon={<Target size={12} weight="duotone" />} tone="mint">
+            {proposalGroups.length} goals
+          </Tag>
+        )}
       </header>
 
       {error && (
@@ -468,19 +712,30 @@ export function ChatPage() {
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
           {messages.map((m, i) => (
             <div
-              key={`${m.role}-${i}`}
+              key={m.id || `${m.role}-${i}`}
               className={cn(
-                "max-w-[85%] rounded-card border border-hairline px-3.5 py-2.5 text-sm leading-relaxed",
+                "group relative max-w-[85%] rounded-card border border-hairline px-3.5 py-2.5 text-sm leading-relaxed",
                 m.role === "user"
                   ? "ml-auto bg-raised/60"
                   : "bg-page-deep/40 text-ink-soft",
+                editingId && m.id === editingId && "border-mint/50",
               )}
             >
               {m.content}
+              {m.role === "user" && m.id && !busy && (
+                <button
+                  type="button"
+                  className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted hover:text-ink"
+                  onClick={() => startEdit(m)}
+                >
+                  <PencilSimple size={12} />
+                  Edit
+                </button>
+              )}
             </div>
           ))}
 
-          {undoBatchId && !proposals.length && (
+          {undoBatchId && !proposals.length && !proposalGroups.length && (
             <div>
               <Button onClick={() => onDecide("undo")} disabled={busy}>
                 Undo booking
@@ -491,24 +746,48 @@ export function ChatPage() {
         </div>
       </div>
 
-      {!!proposals.length && proposalSummary && proposalOpen && (
+      {(!!proposalGroups.length || (!!proposals.length && proposalSummary) || !!mutationPreview) && proposalOpen && (
         <div className="pointer-events-none absolute inset-x-0 bottom-28 z-10 flex justify-center px-4 md:bottom-32 md:justify-end md:pr-8">
-          <div className="pointer-events-auto w-full max-w-md">
-            <ProposalCards
-              goal={goal}
-              summary={proposalSummary}
-              proposals={proposals}
-              whyOpen={whyOpen}
-              busy={busy}
-              onToggleWhy={() => setWhyOpen((v) => !v)}
-              onClose={() => setProposalOpen(false)}
-              onDecide={(decision) => onDecide(decision)}
-            />
+          <div className="pointer-events-auto flex w-full max-w-md max-h-[55vh] flex-col gap-3 overflow-y-auto">
+            {mutationPreview && (
+              <MutationPreviewCard
+                preview={mutationPreview}
+                busy={busy}
+                onApprove={() => sendMessage("Approve")}
+                onAdjust={() => onDecide("adjust")}
+                onCancel={() => sendMessage("Cancel")}
+              />
+            )}
+            {(proposalGroups.length
+              ? proposalGroups
+              : proposalSummary
+                ? [{ goal, proposal_batch_id: proposals[0]?.proposal_batch_id || "", summary: proposalSummary, sessions: proposals }]
+                : []
+            ).map((group) => (
+              group.summary ? (
+                <ProposalCards
+                  key={group.proposal_batch_id}
+                  goal={group.goal}
+                  summary={group.summary}
+                  proposals={group.sessions}
+                  whyOpen={Boolean(whyOpen[group.proposal_batch_id])}
+                  busy={busy}
+                  onToggleWhy={() =>
+                    setWhyOpen((current) => ({
+                      ...current,
+                      [group.proposal_batch_id]: !current[group.proposal_batch_id],
+                    }))
+                  }
+                  onClose={() => setProposalOpen(false)}
+                  onDecide={(decision) => onDecide(decision, group.proposal_batch_id)}
+                />
+              ) : null
+            ))}
           </div>
         </div>
       )}
 
-      {!!proposals.length && proposalSummary && !proposalOpen && (
+      {(!!proposalGroups.length || (!!proposals.length && proposalSummary) || !!mutationPreview) && !proposalOpen && (
         <div className="absolute right-5 bottom-28 z-10">
           <Button tone="primary" onClick={() => setProposalOpen(true)}>
             Review plan
@@ -583,9 +862,20 @@ export function ChatPage() {
                           value={answers[q.id] || ""}
                           onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
                           onFocus={() => setFocusStep(i)}
-                          placeholder={q.suggested_answer || q.help_text || ""}
+                          placeholder={q.help_text || "Your answer"}
                           className="w-full rounded-lg bg-raised-soft px-2 py-1 text-sm outline-none"
                         />
+                      )}
+                      {q.suggested_answer && (
+                        <button
+                          type="button"
+                          className="mt-1 text-left text-xs text-mint"
+                          onClick={() =>
+                            setAnswers((a) => ({ ...a, [q.id]: a[q.id] || q.suggested_answer || "" }))
+                          }
+                        >
+                          Suggestion: {q.suggested_answer}
+                        </button>
                       )}
                     </li>
                   ))}
@@ -618,6 +908,14 @@ export function ChatPage() {
           onSubmit={onSubmit}
         >
           <div className="min-w-0 flex-1">
+            {editingId && (
+              <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-ink-soft">
+                <span>Editing this message undoes later goal and calendar changes.</span>
+                <button type="button" className="text-muted hover:text-ink" onClick={cancelEdit}>
+                  Cancel
+                </button>
+              </div>
+            )}
             {modeTag && (
               <div className="mb-1">
                 <Tag tone="mint" onDismiss={() => setModeTag(null)}>
@@ -633,7 +931,7 @@ export function ChatPage() {
               ref={composerRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="What do you want to work toward?"
+              placeholder={editingId ? "Edit your message" : "What do you want to work toward?"}
               rows={1}
               className="max-h-[180px] w-full resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-dim"
               onCompositionStart={() => {
@@ -644,6 +942,11 @@ export function ChatPage() {
               }}
               onInput={resizeComposer}
               onKeyDown={(e) => {
+                if (e.key === "Escape" && editingId) {
+                  e.preventDefault();
+                  cancelEdit();
+                  return;
+                }
                 if (e.key !== "Enter") return;
                 if (composingRef.current || e.nativeEvent.isComposing) return;
                 if (e.shiftKey) return;

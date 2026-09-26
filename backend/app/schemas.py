@@ -104,6 +104,7 @@ class SessionOut(BaseModel):
     notes: str | None = None
     category_id: str | None = None
     category: CategoryBrief | None = None
+    updated_at: str | None = None
 
 
 class Spark(BaseModel):
@@ -145,12 +146,7 @@ class CalendarAction(BaseModel):
 
 
 class RequestedAction(BaseModel):
-    type: Literal[
-        "propose_sessions",
-        "approve_proposals",
-        "reject_proposals",
-        "none",
-    ] = "none"
+    type: str = "none"
     batch_id: str | None = None
     session_id: str | None = None
     outcome: Literal["completed", "missed"] | None = None
@@ -158,23 +154,81 @@ class RequestedAction(BaseModel):
     spark_content: str | None = None
 
 
+KNOWN_REQUESTED_ACTIONS = {
+    "propose_sessions",
+    "approve_proposals",
+    "reject_proposals",
+    "none",
+}
+
+OPERATION_KINDS = {
+    "goal_create",
+    "goal_update",
+    "pause_others",
+    "propose_sessions",
+    "approve_proposals",
+    "reject_proposals",
+    "spark_capture",
+    "spark_dismiss",
+    "spark_promote",
+    "session_outcome",
+    "calendar_delete",
+    "calendar_update",
+    "calendar_move",
+    "chat",
+}
+
+OperationDisposition = Literal["commit", "clarify", "needs_approval"]
+
+
+class TurnOperation(BaseModel):
+    """One interpreted action in a BuddyTurn. Versioned via BuddyTurn.schema_version."""
+
+    id: str | None = None
+    kind: str
+    target_type: str | None = None
+    target_id: str | None = None
+    target_ref: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    confidence: float = 0.5
+    disposition: OperationDisposition | None = None
+
+
 class BuddyTurn(BaseModel):
     """Canonical structured result from one Cloud AI call."""
 
+    schema_version: int = 1
     assistant_text: str
     intents: list[Intent] = Field(default_factory=lambda: ["chat"])
+    operations: list[TurnOperation] = Field(default_factory=list)
     goal_updates: list[GoalUpdate] = Field(default_factory=list)
     clarification: str | None = None
     clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
     requested_action: RequestedAction | None = None
     calendar_actions: list[CalendarAction] = Field(default_factory=list)
     confidence: float = 0.5
+    validation_errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProposalGroup(BaseModel):
+    goal: Goal | None = None
+    proposal_batch_id: str
+    summary: dict[str, Any] | None = None
+    sessions: list[SessionOut] = Field(default_factory=list)
+
+
+class ClarificationAnswer(BaseModel):
+    question_id: str
+    answer: str
 
 
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
     request_id: str | None = None
+    clarification_answers: list[ClarificationAnswer] = Field(default_factory=list)
+    revision_of: str | None = None
 
 
 class ChatCancelRequest(BaseModel):
@@ -198,6 +252,11 @@ class ChatResponse(BaseModel):
     request_id: str | None = None
     deleted_session_ids: list[str] = Field(default_factory=list)
     updated_sessions: list[SessionOut] = Field(default_factory=list)
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+    mutation_preview: dict[str, Any] | None = None
+    proposal_groups: list[ProposalGroup] = Field(default_factory=list)
+    stopped: bool = False
+    stop_committed: bool = False
 
 
 class SessionUpdate(BaseModel):

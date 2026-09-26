@@ -13,10 +13,11 @@ import { FrostFloat } from "./FrostFloat";
 
 type Celebration = {
   title: string;
+  key?: string;
 };
 
 type GoalCompleteContextValue = {
-  celebrateGoalComplete: (title: string) => void;
+  celebrateGoalComplete: (title: string, key?: string) => void;
 };
 
 const GoalCompleteContext = createContext<GoalCompleteContextValue | null>(null);
@@ -201,9 +202,12 @@ function GoalCompleteCard({
 export function GoalCompleteProvider({ children }: { children: ReactNode }) {
   const [celebration, setCelebration] = useState<Celebration | null>(null);
 
-  const celebrateGoalComplete = useCallback((title: string) => {
+  const celebrateGoalComplete = useCallback((title: string, key?: string) => {
     const trimmed = title.trim() || "Your goal";
-    setCelebration({ title: trimmed });
+    setCelebration((current) => {
+      if (key && current?.key === key) return current;
+      return { title: trimmed, key };
+    });
   }, []);
 
   const value = useMemo(() => ({ celebrateGoalComplete }), [celebrateGoalComplete]);

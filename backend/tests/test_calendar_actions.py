@@ -47,16 +47,23 @@ def test_delete_all_proposed_via_chat(plane: ControlPlane):
     proposed_ids = {s.id for s in planned.proposed_sessions}
 
     result = plane.handle_message("Delete all proposed sessions", conversation_id=ready.conversation_id)
-    assert result.deleted_session_ids
+    assert any(op.get("status") == "needs_approval" for op in result.operations)
+    remaining_before = plane.calendar.list_sessions(statuses=["proposed"])
+    assert any(s.id in proposed_ids for s in remaining_before)
+    approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
     remaining = plane.calendar.list_sessions(statuses=["proposed"])
     assert not any(s.id in proposed_ids for s in remaining)
+    assert approved.deleted_session_ids
 
 
 def test_delete_single_session_via_chat(plane: ControlPlane):
     ready, booked = _book_sessions(plane)
     target_id = booked.booked_sessions[0].id
     result = plane.handle_message("Delete that session", conversation_id=ready.conversation_id)
-    assert target_id in result.deleted_session_ids
+    assert target_id not in (result.deleted_session_ids or [])
+    assert plane.calendar.get_session(target_id) is not None
+    approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
+    assert target_id in approved.deleted_session_ids
     assert plane.calendar.get_session(target_id) is None
 
 
@@ -64,7 +71,9 @@ def test_rename_session_via_chat(plane: ControlPlane):
     ready, booked = _book_sessions(plane)
     target = booked.booked_sessions[0]
     result = plane.handle_message("Rename it to power day", conversation_id=ready.conversation_id)
-    assert result.updated_sessions
+    assert not result.updated_sessions
+    approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
+    assert approved.updated_sessions
     updated = plane.calendar.get_session(target.id)
     assert updated is not None
     assert "Power Day" in updated.title or "power day" in updated.title.lower()
@@ -74,7 +83,9 @@ def test_move_session_via_chat(plane: ControlPlane):
     ready, booked = _book_sessions(plane)
     target = booked.booked_sessions[0]
     result = plane.handle_message("Move it to Friday evening", conversation_id=ready.conversation_id)
-    assert result.updated_sessions
+    assert not result.updated_sessions
+    approved = plane.handle_message("Approve", conversation_id=ready.conversation_id)
+    assert approved.updated_sessions
     updated = plane.calendar.get_session(target.id)
     assert updated is not None
     assert updated.start_at.startswith("2026-12-05")

@@ -91,6 +91,6 @@ def load_settings() -> Settings:
         # Default on when a key is present; set BUDDY_AI_ENABLED=0 to force local-only.
         ai_enabled=_env_bool("BUDDY_AI_ENABLED", default=True),
         request_timeout_s=_env_float("BUDDY_GROQ_TIMEOUT_S", 45.0),
-        max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 1024),
+        max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 8192),
         cors_origins=_env_cors(DEFAULT_CORS_ORIGINS),
     )

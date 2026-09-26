@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from .migrations import run_migrations
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "buddy.db"
+_TXN_DEPTH: dict[int, int] = {}
 
 
 def resolve_db_path(db_path: Path | None = None) -> Path:
@@ -24,7 +27,44 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def _txn_depth(conn: sqlite3.Connection) -> int:
+    return _TXN_DEPTH.get(id(conn), 0)
+
+
+def commit(conn: sqlite3.Connection) -> None:
+    """Skip SQLite commit while a managed transaction is open."""
+    if _txn_depth(conn):
+        return
+    sqlite3.Connection.commit(conn)
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """One BEGIN IMMEDIATE / COMMIT for a batch of store writes."""
+    key = id(conn)
+    depth = _txn_depth(conn)
+    _TXN_DEPTH[key] = depth + 1
+    outer = depth == 0
+    if outer and not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        if outer:
+            sqlite3.Connection.commit(conn)
+    except Exception:
+        if outer:
+            conn.rollback()
+        raise
+    finally:
+        if depth:
+            _TXN_DEPTH[key] = depth
+        else:
+            _TXN_DEPTH.pop(key, None)
 
 
 def init_db(conn: sqlite3.Connection) -> None:

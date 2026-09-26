@@ -118,6 +118,39 @@ export type OpenProposal = {
   goal: Goal | null;
   proposed_sessions: Session[];
   proposal_summary: ProposalSummary | null;
+  proposal_groups?: ProposalGroup[];
+  mutation_preview?: MutationPreview | null;
+  clarification_questions?: ClarificationQuestion[];
+  entered_answers?: Record<string, string>;
+  clarification_answers?: Record<string, string>;
+  composer?: string;
+};
+
+export type ProposalGroup = {
+  goal: Goal | null;
+  proposal_batch_id: string;
+  summary: ProposalSummary | null;
+  sessions: Session[];
+};
+
+export type MutationPreviewRecord = {
+  id: string;
+  title?: string;
+  start_at?: string;
+  end_at?: string;
+  status?: string;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  match_reason?: string | null;
+};
+
+export type MutationPreview = {
+  kind?: string;
+  count?: number;
+  records?: MutationPreviewRecord[];
+  why?: string;
+  match_reason?: string | null;
+  actions?: string[];
 };
 
 export type ChatResponse = {
@@ -131,12 +164,30 @@ export type ChatResponse = {
   unresolved?: string[];
   ai_available?: boolean;
   proposal_summary?: ProposalSummary | null;
+  proposal_groups?: ProposalGroup[];
   clarification_questions?: ClarificationQuestion[];
   activity?: ActivityStep[];
   undo_batch_id?: string | null;
   request_id?: string | null;
   deleted_session_ids?: string[];
   updated_sessions?: Session[];
+  operations?: Array<{
+    id?: string;
+    kind: string;
+    status: string;
+    goal_id?: string | null;
+    detail?: string | null;
+  }>;
+  mutation_preview?: MutationPreview | null;
+  stopped?: boolean;
+  stop_committed?: boolean;
+};
+
+export type ChatMessage = {
+  id?: string;
+  role: string;
+  content: string;
+  superseded?: number;
 };
 
 /** Notify Calendar/Today views to reload sessions after Chat changes the calendar. */
@@ -222,6 +273,10 @@ export async function sendChat(
   conversationId?: string | null,
   signal?: AbortSignal,
   requestId?: string | null,
+  extras?: {
+    clarification_answers?: Array<{ question_id: string; answer: string }>;
+    revision_of?: string | null;
+  },
 ): Promise<ChatResponse> {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -230,13 +285,17 @@ export async function sendChat(
       message,
       conversation_id: conversationId || null,
       request_id: requestId || null,
+      clarification_answers: extras?.clarification_answers || [],
+      revision_of: extras?.revision_of || null,
     }),
     signal,
   });
   return json(res);
 }
 
-export async function cancelChat(requestId: string): Promise<{ ok: boolean }> {
+export async function cancelChat(
+  requestId: string,
+): Promise<{ ok: boolean; committed?: boolean; turn_status?: string }> {
   return json(
     await fetch(`${API_BASE}/chat/cancel`, {
       method: "POST",
@@ -421,7 +480,13 @@ export async function decideProposal(
   batchId: string,
   decision: "approve" | "reject" | "adjust" | "undo",
   conversationId?: string | null,
-): Promise<{ booked?: Session[]; rejected?: number; undone?: Session[]; undo_batch_id?: string }> {
+): Promise<{
+  booked?: Session[];
+  rejected?: number;
+  undone?: Session[];
+  undo_batch_id?: string;
+  proposal_groups?: ProposalGroup[];
+}> {
   return json(
     await fetch(`${API_BASE}/calendar/proposals/decide`, {
       method: "POST",
@@ -450,7 +515,7 @@ export async function markSessionOutcome(
 
 export async function fetchMessages(
   conversationId: string,
-): Promise<Array<{ role: string; content: string }>> {
+): Promise<Array<{ id?: string; role: string; content: string }>> {
   return json(await fetch(`${API_BASE}/conversations/${conversationId}/messages`));
 }
 

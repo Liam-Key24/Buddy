@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config import load_settings
-from .control_plane import ControlPlane
+from .control_plane import ControlPlane, RevertBlocked
 from .schemas import (
     ChatCancelRequest,
     ChatRequest,
@@ -61,9 +61,16 @@ def health():
 def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message required")
-    return plane.handle_message(
-        req.message, req.conversation_id, request_id=req.request_id
-    )
+    try:
+        return plane.handle_message(
+            req.message,
+            req.conversation_id,
+            request_id=req.request_id,
+            clarification_answers=req.clarification_answers,
+            revision_of=req.revision_of,
+        )
+    except RevertBlocked as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
 
 
 @app.post("/chat/cancel")
@@ -389,6 +396,16 @@ def save_draft(conversation_id: str, body: DraftBody):
     if not row:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return row
+
+
+@app.post("/conversations/{conversation_id}/messages/{message_id}/revert")
+def revert_message(conversation_id: str, message_id: str):
+    result = plane.revert_to(conversation_id, message_id)
+    if result.get("blocked"):
+        raise HTTPException(status_code=409, detail=result.get("detail") or "Can't revert that message.")
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail="Message not found")
+    return result
 
 
 @app.get("/conversations/{conversation_id}/messages")
