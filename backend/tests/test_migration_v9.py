@@ -31,7 +31,9 @@ def test_pre_v9_rows_assigned_to_migrate_owner(tmp_path: Path):
     )
 
     version = run_migrations(conn)
-    assert version == 9
+    assert version == 10
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "user_settings" in tables
     owner = conn.execute("SELECT id FROM users WHERE username='liam'").fetchone()
     partner = conn.execute("SELECT id FROM users WHERE username='partner'").fetchone()
     assert owner and partner

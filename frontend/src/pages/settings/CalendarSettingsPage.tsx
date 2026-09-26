@@ -1,7 +1,6 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Briefcase,
   CalendarBlank,
   CaretLeft,
   CaretRight,
@@ -10,19 +9,21 @@ import {
   Plus,
   Trash,
   UserCircle,
-  UsersThree,
 } from "@phosphor-icons/react";
+import type { WorkSettings, WorkShift } from "../../api";
+import { ErrorBanner } from "../../components/ui/ErrorBanner";
+import { IconButton } from "../../components/ui/IconButton";
 import { SectionHead } from "../../components/ui/SectionHead";
+import { SegmentedChoice } from "../../components/ui/SegmentedChoice";
 import { Surface } from "../../components/ui/Surface";
 import { Tag } from "../../components/ui/Tag";
 import { cn } from "../../lib/cn";
+import { useSettingsForm } from "../../useUserSettings";
 import {
   PlaceholderToggle,
-  SegmentedChoice,
   SettingsChip,
   SettingsCta,
   SettingsHint,
-  SettingsIconBtn,
   SettingsLabel,
   SettingsMasonry,
   SettingsPageHead,
@@ -31,25 +32,6 @@ import {
 } from "./settingsUi";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-type WorkMode = "full_time" | "part_time";
-
-type WorkShift = {
-  id: string;
-  date: string;
-  start: string;
-  end: string;
-  place: string;
-};
-
-type WorkSchedule = {
-  enabled: boolean;
-  mode: WorkMode;
-  start: string;
-  end: string;
-  days: boolean[];
-  shifts: WorkShift[];
-};
 
 const FULL_TIME = {
   start: "09:00",
@@ -91,7 +73,7 @@ function formatShortDate(key: string) {
   });
 }
 
-function applyMode(prev: WorkSchedule, mode: WorkMode): WorkSchedule {
+function applyMode(prev: WorkSettings, mode: WorkSettings["mode"]): WorkSettings {
   return mode === "full_time" ? { ...prev, mode, ...FULL_TIME } : { ...prev, mode };
 }
 
@@ -99,8 +81,8 @@ function FullTimeEditor({
   schedule,
   onChange,
 }: {
-  schedule: WorkSchedule;
-  onChange: (next: WorkSchedule) => void;
+  schedule: WorkSettings;
+  onChange: (next: WorkSettings) => void;
 }) {
   return (
     <>
@@ -152,8 +134,8 @@ function PartTimeShiftPlanner({
   schedule,
   onChange,
 }: {
-  schedule: WorkSchedule;
-  onChange: (next: WorkSchedule) => void;
+  schedule: WorkSettings;
+  onChange: (next: WorkSettings) => void;
 }) {
   const today = useMemo(() => new Date(), []);
   const [weekAnchor, setWeekAnchor] = useState(() => startOfWeek(today));
@@ -210,21 +192,23 @@ function PartTimeShiftPlanner({
       </p>
 
       <div className="mb-2 flex items-center justify-between gap-2">
-        <SettingsIconBtn
-          aria-label="Previous week"
+        <IconButton
+          label="Previous week"
+          tone="soft"
           disabled={disabled}
           onClick={() => setWeekAnchor((w) => addDays(w, -7))}
         >
           <CaretLeft size={16} weight="bold" />
-        </SettingsIconBtn>
+        </IconButton>
         <span className="text-xs font-medium text-ink">{weekLabel}</span>
-        <SettingsIconBtn
-          aria-label="Next week"
+        <IconButton
+          label="Next week"
+          tone="soft"
           disabled={disabled}
           onClick={() => setWeekAnchor((w) => addDays(w, 7))}
         >
           <CaretRight size={16} weight="bold" />
-        </SettingsIconBtn>
+        </IconButton>
       </div>
 
       <div className="settings-week">
@@ -315,7 +299,7 @@ function PartTimeShiftPlanner({
 
       {schedule.shifts.length > 0 ? (
         <SettingsHint>
-          {schedule.shifts.length} shift{schedule.shifts.length === 1 ? "" : "s"} saved in preview
+          {schedule.shifts.length} shift{schedule.shifts.length === 1 ? "" : "s"} saved
           {otherWeeks > 0 ? ` · ${otherWeeks} on other weeks` : ""}
         </SettingsHint>
       ) : null}
@@ -324,29 +308,29 @@ function PartTimeShiftPlanner({
 }
 
 function WorkScheduleCard({
-  title,
-  icon,
   schedule,
   onChange,
 }: {
-  title: string;
-  icon: ReactNode;
-  schedule: WorkSchedule;
-  onChange: (next: WorkSchedule) => void;
+  schedule: WorkSettings;
+  onChange: (next: WorkSettings) => void;
 }) {
   return (
     <Surface>
-      <SectionHead icon={icon} title={title} action={<Tag>Coming soon</Tag>} />
+      <SectionHead
+        icon={<UserCircle size={16} weight="duotone" />}
+        title="Work hours"
+        action={<Tag>Synced</Tag>}
+      />
       <PlaceholderToggle
         checked={schedule.enabled}
         onChange={(enabled) => onChange({ ...schedule, enabled })}
         label="Protect work hours"
-        hint="Preview — will sync as Busy hours later"
+        hint="Writes Busy hours on your calendar"
       />
       <div className="mt-3">
         <p className="mb-1.5 settings-meta">Hours type</p>
         <SegmentedChoice
-          ariaLabel={`${title} hours type`}
+          ariaLabel="Work hours type"
           disabled={!schedule.enabled}
           value={schedule.mode}
           onChange={(mode) => onChange(applyMode(schedule, mode))}
@@ -371,93 +355,69 @@ function WorkScheduleCard({
 }
 
 export function CalendarSettingsPage() {
-  const [yours, setYours] = useState<WorkSchedule>({
-    enabled: true,
-    mode: "full_time",
-    ...FULL_TIME,
-    shifts: [],
-  });
-  const [partner, setPartner] = useState<WorkSchedule>({
-    enabled: true,
-    mode: "part_time",
-    start: "09:00",
-    end: "13:00",
-    days: [false, false, false, false, false, false, false],
-    shifts: [],
-  });
-  const [sleepEnabled, setSleepEnabled] = useState(true);
-  const [skipWeekends, setSkipWeekends] = useState(true);
+  const { settings, error, saving, persist } = useSettingsForm(350);
 
   return (
     <>
       <SettingsPageHead
         title="Calendar settings"
-        subtitle="Full-time fixed hours or a part-time shift planner — placeholders for calendar sync later."
-        action={<Tag tone="warn">Coming soon</Tag>}
+        action={
+          saving ? <Tag>Saving…</Tag> : settings ? <Tag tone="ok">Synced</Tag> : <Tag>Loading…</Tag>
+        }
       />
 
+      <ErrorBanner>{error}</ErrorBanner>
+
       <SettingsMasonry>
-        <WorkScheduleCard
-          title="Your work hours"
-          icon={<UserCircle size={16} weight="duotone" />}
-          schedule={yours}
-          onChange={setYours}
-        />
-        <WorkScheduleCard
-          title="Partner work hours"
-          icon={<UsersThree size={16} weight="duotone" />}
-          schedule={partner}
-          onChange={setPartner}
-        />
+        {settings ? (
+          <WorkScheduleCard
+            schedule={settings.work}
+            onChange={(work) => persist({ work })}
+          />
+        ) : (
+          <Surface>
+            <SectionHead icon={<UserCircle size={16} weight="duotone" />} title="Work hours" />
+            <p className="m-0 text-sm text-muted">Loading…</p>
+          </Surface>
+        )}
 
         <Surface>
-          <SectionHead
-            icon={<Moon size={16} weight="duotone" />}
-            title="Sleep & rest"
-            action={<Tag>Coming soon</Tag>}
-          />
+          <SectionHead icon={<Moon size={16} weight="duotone" />} title="Sleep & rest" />
           <PlaceholderToggle
-            checked={sleepEnabled}
-            onChange={setSleepEnabled}
+            checked={settings?.sleep_enabled ?? true}
+            onChange={(sleep_enabled) => persist({ sleep_enabled })}
             label="Protect sleep blocks"
-            hint="Preview — evening / early morning"
+            hint="Synced to calendar Sleep busy hours"
+            disabled={!settings}
           />
           <PlaceholderToggle
-            checked={skipWeekends}
-            onChange={setSkipWeekends}
+            checked={settings?.skip_weekends ?? true}
+            onChange={(skip_weekends) => persist({ skip_weekends })}
             label="Lighter weekends"
-            hint="Preview — prefer weekday proposals"
+            hint="Prefer weekday proposals"
+            disabled={!settings}
           />
         </Surface>
 
         <Surface>
-          <SectionHead
-            icon={<Clock size={16} weight="duotone" />}
-            title="Proposal window"
-            action={<Tag>Coming soon</Tag>}
-          />
+          <SectionHead icon={<Clock size={16} weight="duotone" />} title="Proposal window" />
           <SettingsLabel>
             Prefer sessions after
-            <input type="time" className="field" defaultValue="17:30" disabled />
+            <input
+              type="time"
+              className="field"
+              value={settings?.prefer_after ?? "17:30"}
+              disabled={!settings}
+              onChange={(e) => persist({ prefer_after: e.target.value })}
+            />
           </SettingsLabel>
-          <SettingsHint>
-            Placeholder for calendar sync later — proposes already prefer evenings.
-          </SettingsHint>
-        </Surface>
-
-        <Surface>
-          <SectionHead icon={<Briefcase size={16} weight="duotone" />} title="How this will sync" />
-          <p className="m-0 mb-2 text-sm text-muted">
-            Full time stays a fixed block. Part time uses each typed shift (place + times) as Busy
-            hours when calendar sync lands.
-          </p>
-          <p className="m-0 mb-0 settings-meta">Not saved yet — local preview only.</p>
+          <SettingsHint>Used when Buddy proposes evening sessions.</SettingsHint>
         </Surface>
 
         <Surface>
           <SectionHead icon={<CalendarBlank size={16} weight="duotone" />} title="Open calendar" />
           <p className="m-0 mb-3 text-sm text-muted">
-            Categories, busy hours, and day filters live on the calendar panel today.
+            Categories, busy hours, and day filters live on the calendar panel.
           </p>
           <Link to="/calendar" className="settings-cta">
             Go to Calendar

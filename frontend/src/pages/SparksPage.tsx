@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Lightning } from "@phosphor-icons/react";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorBanner } from "../components/ui/ErrorBanner";
 import { Button } from "../components/ui/Button";
 import { Surface } from "../components/ui/Surface";
 import { useToast } from "../components/ui/Toast";
@@ -77,9 +78,7 @@ export function SparksPage() {
         <h1 className="mt-1 mb-0 font-display text-3xl font-medium">Ideas</h1>
       </div>
 
-      {error && (
-        <div className="mb-4 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
-      )}
+      {error ? <ErrorBanner className="mb-4">{error}</ErrorBanner> : null}
 
       <form
         className="mb-5 flex flex-col gap-2 rounded-float border border-hairline bg-raised-soft/70 p-3"

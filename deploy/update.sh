@@ -95,7 +95,7 @@ systemctl is-active --quiet buddy.service
 echo "==> health"
 HEALTH="$(curl -fsS "http://127.0.0.1:${BUDDY_PORT:-8787}/api/health" || true)"
 echo "${HEALTH}"
-echo "${HEALTH}" | grep -q '"ok": true' || {
+echo "${HEALTH}" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' || {
   echo "health check failed — attempting rollback to previous release" >&2
   if [[ -n "${PREVIOUS}" && -d "${PREVIOUS}" ]]; then
     ln -sfn "${PREVIOUS}" "${CURRENT}"

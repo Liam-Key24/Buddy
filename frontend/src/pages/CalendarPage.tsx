@@ -17,10 +17,12 @@ import {
 import { CategoryPanel, type CategoryDraft } from "../components/CategoryPanel";
 import { CategoryIcon } from "../components/CategoryIcon";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { ErrorBanner } from "../components/ui/ErrorBanner";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FrostFloat } from "../components/ui/FrostFloat";
 import { IconButton } from "../components/ui/IconButton";
+import { SegmentedChoice } from "../components/ui/SegmentedChoice";
 import { Surface } from "../components/ui/Surface";
 import { Tag } from "../components/ui/Tag";
 import {
@@ -32,6 +34,7 @@ import {
   uniqueCategories,
 } from "../lib/categories";
 import { cn } from "../lib/cn";
+import { useConfirmDeletes } from "../useUserSettings";
 import {
   createCategory,
   createFixedBlock,
@@ -197,6 +200,7 @@ function sameDay(a: Date, b: Date) {
 }
 
 export function CalendarPage() {
+  const confirmDeletes = useConfirmDeletes();
   const calendarRef = useRef<FullCalendar | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches,
@@ -628,9 +632,9 @@ export function CalendarPage() {
     if (api) api.gotoDate(date);
   }
 
-  async function confirmDeleteSession() {
-    if (!pendingDelete || busy) return;
-    const id = pendingDelete.id;
+  async function deleteSessionNow(session: Session) {
+    if (busy) return;
+    const id = session.id;
     setBusy(true);
     setError(null);
     try {
@@ -643,6 +647,16 @@ export function CalendarPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function requestDeleteSession(session: Session) {
+    if (confirmDeletes) setPendingDelete(session);
+    else void deleteSessionNow(session);
+  }
+
+  async function confirmDeleteSession() {
+    if (!pendingDelete) return;
+    await deleteSessionNow(pendingDelete);
   }
 
   async function onSaveCategory(draft: CategoryDraft) {
@@ -763,27 +777,13 @@ export function CalendarPage() {
             <Button tone="ghost" className="!rounded-lg px-2.5 py-1 text-sm" onClick={() => calNav("today")}>
               Today
             </Button>
-            <div
-              className="ml-1 flex rounded-xl bg-raised-soft/90 p-0.5 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]"
-              role="tablist"
-              aria-label="Calendar view"
-            >
-              {VIEW_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={view === tab.id}
-                  className={cn(
-                    "rounded-lg px-2.5 py-1 text-sm transition-colors",
-                    view === tab.id ? "bg-mint text-page-deep shadow-sm" : "text-ink-soft",
-                  )}
-                  onClick={() => setCalView(tab.id)}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+            <SegmentedChoice
+              className="ml-1"
+              ariaLabel="Calendar view"
+              value={view}
+              onChange={setCalView}
+              options={VIEW_TABS.map((tab) => ({ value: tab.id, label: tab.label }))}
+            />
           </div>
 
           <h1 className="pointer-events-none absolute inset-x-0 z-0 m-0 text-center font-display text-lg font-medium tracking-tight text-ink">
@@ -797,9 +797,7 @@ export function CalendarPage() {
           </div>
         </header>
 
-        {error && (
-          <div className="mb-2 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
-        )}
+        {error ? <ErrorBanner className="mb-2">{error}</ErrorBanner> : null}
 
         <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <div className="cal-compact-month shrink-0">
@@ -846,7 +844,7 @@ export function CalendarPage() {
           <div className="cal-compact-agenda min-h-0 flex-1 overflow-y-auto">
             <p className="cal-compact-agenda-label">{selectedDayLabel}</p>
             {selectedDaySessions.length ? (
-              <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+              <ul className="m-0 flex list-none flex-col gap-2 p-0">
                 {selectedDaySessions.map((s) => (
                   <li key={s.id}>
                     <button
@@ -1000,7 +998,7 @@ export function CalendarPage() {
                   </Button>
                 </>
               )}
-              <Button tone="danger" disabled={busy} onClick={() => setPendingDelete(selected)}>
+              <Button tone="danger" disabled={busy} onClick={() => requestDeleteSession(selected)}>
                 <Trash size={16} /> Delete
               </Button>
             </div>
@@ -1020,7 +1018,7 @@ export function CalendarPage() {
             </IconButton>
           </div>
 
-          <Surface className="hidden rounded-3xl border-0 bg-raised/90 lg:block">
+          <Surface tone="panel" className="hidden lg:block">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="m-0 text-sm font-medium capitalize">{miniLabel}</h3>
               <div className="flex gap-1">
@@ -1101,7 +1099,7 @@ export function CalendarPage() {
             </div>
           </Surface>
 
-          <Surface className="hidden rounded-3xl border-0 bg-raised/90 lg:block">
+          <Surface tone="panel" className="hidden lg:block">
             {nextUp ? (
               <>
                 <div className="mb-2 flex items-start justify-between gap-2">
@@ -1129,7 +1127,7 @@ export function CalendarPage() {
             )}
           </Surface>
 
-          <Surface className="rounded-3xl border-0 bg-raised/90">
+          <Surface tone="panel">
             <CategoryPanel
               categories={filterCats}
               counts={counts.map}
@@ -1144,7 +1142,7 @@ export function CalendarPage() {
             />
           </Surface>
 
-          <Surface className="rounded-3xl border-0 bg-raised/90">
+          <Surface tone="panel">
             <div className="mb-1 flex items-center justify-between">
               <h3 className="m-0 text-sm font-medium">Busy hours</h3>
               <IconButton label="Add busy hours" size="sm" onClick={() => openFixedEditor()}>

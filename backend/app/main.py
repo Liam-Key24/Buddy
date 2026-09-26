@@ -22,6 +22,7 @@ from .auth import (
 )
 from .config import load_settings
 from .control_plane import ControlPlane, RevertBlocked
+from . import user_settings as user_settings_mod
 from .schemas import (
     ChatCancelRequest,
     ChatRequest,
@@ -130,6 +131,43 @@ def logout(request: Request, response: Response):
 @api.get("/auth/me")
 def me(user: dict = Depends(require_user)):
     return {"id": user["id"], "username": user["username"]}
+
+
+class WorkSettingsPatch(BaseModel):
+    enabled: bool | None = None
+    mode: str | None = None
+    start: str | None = None
+    end: str | None = None
+    days: list[bool] | None = None
+    shifts: list[dict[str, Any]] | None = None
+
+
+class SettingsPatch(BaseModel):
+    show_avatar: bool | None = None
+    compact_sidebar: bool | None = None
+    confirm_deletes: bool | None = None
+    sleep_enabled: bool | None = None
+    skip_weekends: bool | None = None
+    prefer_after: str | None = None
+    work: WorkSettingsPatch | None = None
+
+
+@api.get("/settings")
+def get_user_settings(request: Request):
+    return user_settings_mod.get_settings(plane.conn, _owner_id(request))
+
+
+@api.put("/settings")
+def put_user_settings(body: SettingsPatch, request: Request):
+    patch = body.model_dump(exclude_unset=True)
+    if "work" in patch and patch["work"] is not None:
+        patch["work"] = {
+            k: v for k, v in patch["work"].items() if v is not None
+        }
+    try:
+        return user_settings_mod.put_settings(plane.conn, _owner_id(request), patch)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @api.post("/chat", response_model=ChatResponse)

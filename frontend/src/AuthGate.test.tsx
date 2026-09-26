@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
   fetchMe: vi.fn(),
   login: vi.fn(),
+  logout: vi.fn(),
 }));
 
 vi.mock("./api", () => api);

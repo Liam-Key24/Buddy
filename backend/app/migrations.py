@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 OWNER_TABLES = (
     "conversations",
@@ -127,6 +127,22 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         )
     conn.commit()
     set_schema_version(conn, 9)
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """Per-user settings JSON keyed by owner_user_id."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            owner_user_id TEXT PRIMARY KEY,
+            settings_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.commit()
+    set_schema_version(conn, 10)
 
 
 def run_migrations(conn: sqlite3.Connection, target: int | None = None) -> int:
@@ -355,5 +371,9 @@ def run_migrations(conn: sqlite3.Connection, target: int | None = None) -> int:
     if version < 9 and goal >= 9:
         _migrate_v9(conn)
         version = 9
+
+    if version < 10 and goal >= 10:
+        _migrate_v10(conn)
+        version = 10
 
     return version

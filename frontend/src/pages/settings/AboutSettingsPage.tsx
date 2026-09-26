@@ -7,11 +7,11 @@ import { Tag } from "../../components/ui/Tag";
 import { API_BASE, APP_VERSION, fetchHealth, type HealthResponse } from "../../api";
 import {
   SettingsDl,
-  SettingsError,
   SettingsMasonry,
   SettingsMeta,
   SettingsPageHead,
 } from "./settingsUi";
+import { ErrorBanner } from "../../components/ui/ErrorBanner";
 
 export function AboutSettingsPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -57,9 +57,9 @@ export function AboutSettingsPage() {
       />
 
       {error ? (
-        <SettingsError>
+        <ErrorBanner>
           Could not reach <code>{API_BASE}/health</code>: {error}
-        </SettingsError>
+        </ErrorBanner>
       ) : null}
 
       <SettingsMasonry>

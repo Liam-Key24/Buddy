@@ -2,7 +2,6 @@ import {
   CalendarBlank,
   CaretDown,
   CaretRight,
-  ChatCircle,
   FolderPlus,
   FolderSimple,
   FunnelSimple,
@@ -12,13 +11,15 @@ import {
   PencilSimple,
   Plus,
   SidebarSimple,
+  SignOut,
   SquaresFour,
   Target,
   Trash,
   X,
 } from "@phosphor-icons/react";
-import { useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useState, type DragEvent } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { useAuth } from "../AuthGate";
 import { useChatNav } from "../chatNav";
 import { cn } from "../lib/cn";
 import type { Conversation } from "../api";
@@ -86,6 +87,20 @@ export function SharedSidebar({
 }: SharedSidebarProps) {
   const compact = collapsed && !mobileOpen;
 
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCloseMobile();
+    };
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mobileOpen, onCloseMobile]);
+
   return (
     <>
       <div className="hidden h-full lg:block">
@@ -95,36 +110,48 @@ export function SharedSidebar({
           onCloseMobile={onCloseMobile}
         />
       </div>
-      {mobileOpen && (
-        <div className="fixed inset-0 z-30 lg:hidden">
-          <button
-            type="button"
-            className="absolute inset-0 bg-overlay"
-            aria-label="Close menu"
-            onClick={onCloseMobile}
+      <div
+        className={cn("mobile-drawer", !mobileOpen && "pointer-events-none")}
+        aria-hidden={!mobileOpen}
+      >
+        <button
+          type="button"
+          className={cn("mobile-drawer-backdrop", mobileOpen ? "opacity-100" : "opacity-0")}
+          aria-label="Close menu"
+          tabIndex={mobileOpen ? 0 : -1}
+          onClick={onCloseMobile}
+        />
+        <div
+          className={cn(
+            "mobile-drawer-panel",
+            mobileOpen ? "translate-x-0" : "-translate-x-full",
+          )}
+        >
+          <SidebarPanel
+            compact={false}
+            mobileDrawer
+            onToggleCollapsed={onToggleCollapsed}
+            onCloseMobile={onCloseMobile}
           />
-          <div className="relative h-full w-[min(280px,85vw)]">
-            <SidebarPanel
-              compact={false}
-              onToggleCollapsed={onToggleCollapsed}
-              onCloseMobile={onCloseMobile}
-            />
-          </div>
         </div>
-      )}
+      </div>
     </>
   );
 }
 
 function SidebarPanel({
   compact,
+  mobileDrawer = false,
   onToggleCollapsed,
   onCloseMobile,
 }: {
   compact: boolean;
+  mobileDrawer?: boolean;
   onToggleCollapsed: () => void;
   onCloseMobile: () => void;
 }) {
+  const { logout } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
   const {
     conversations,
     folders,
@@ -249,7 +276,11 @@ function SidebarPanel({
     <aside
       className={cn(
         "flex h-full flex-col bg-sidebar text-ink",
-        compact ? "w-[68px] px-2 py-3" : "w-[260px] px-3 py-4",
+        mobileDrawer
+          ? "w-full px-3 py-4"
+          : compact
+            ? "w-[68px] px-2 py-3"
+            : "w-[260px] px-3 py-4",
       )}
       aria-label="Primary"
     >
@@ -257,16 +288,18 @@ function SidebarPanel({
         {!compact && (
           <img src="/buddy-icon.png" alt="Buddy" width={28} height={28} className="rounded-lg" />
         )}
-        <IconButton
-          label={compact ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={onToggleCollapsed}
-          className="hidden lg:inline-flex"
-        >
-          <SidebarSimple size={18} />
-        </IconButton>
-        <IconButton label="Close menu" onClick={onCloseMobile} className="lg:hidden">
-          <X size={18} />
-        </IconButton>
+        {mobileDrawer ? (
+          <IconButton label="Close menu" onClick={onCloseMobile}>
+            <X size={18} />
+          </IconButton>
+        ) : (
+          <IconButton
+            label={compact ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={onToggleCollapsed}
+          >
+            <SidebarSimple size={18} />
+          </IconButton>
+        )}
       </div>
 
       <div className="flex flex-col gap-0.5">
@@ -475,13 +508,25 @@ function SidebarPanel({
 
       {compact && <div className="flex-1" />}
 
-      <div className="mt-auto pt-2">
+      <div className="mt-auto flex flex-col gap-0.5 pt-2">
         <IconNavItem
           to="/settings"
           icon={<GearSix size={18} />}
           label="Settings"
           collapsed={compact}
           onClick={onCloseMobile}
+        />
+        <IconNavItem
+          icon={<SignOut size={18} />}
+          label={signingOut ? "Signing out…" : "Log out"}
+          collapsed={compact}
+          onClick={() => {
+            if (signingOut) return;
+            setSigningOut(true);
+            void logout()
+              .then(() => onCloseMobile())
+              .finally(() => setSigningOut(false));
+          }}
         />
       </div>
     </aside>
@@ -608,55 +653,15 @@ function ChatRow({
   );
 }
 
-export function MobileNav({ onOpenSidebar }: { onOpenSidebar: () => void }) {
-  const { newChat } = useChatNav();
-  const items = [
-    { to: "/", label: "Today", icon: SquaresFour, end: true },
-    { to: "/chat", label: "Chat", icon: ChatCircle },
-    { to: "/goals", label: "Goals", icon: Target },
-    { to: "/calendar", label: "Calendar", icon: CalendarBlank },
-    { to: "/sparks", label: "Sparks", icon: Lightning },
-  ];
+export function MobileTopBar({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   return (
-    <nav
-      className="fixed inset-x-0 bottom-0 z-20 flex items-center justify-around border-t border-hairline bg-sidebar px-1 py-1.5 lg:hidden"
-      aria-label="Mobile"
-    >
-      <button
-        type="button"
-        className="grid size-10 place-items-center rounded-xl text-muted"
-        aria-label="Open menu"
-        onClick={onOpenSidebar}
-      >
+    <header className="mobile-topbar">
+      <IconButton label="Open menu" onClick={onOpenSidebar}>
         <SidebarSimple size={20} />
-      </button>
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            aria-label={item.label}
-            className={({ isActive }) =>
-              cn(
-                "grid size-10 place-items-center rounded-xl text-muted",
-                isActive && "bg-raised-soft text-mint",
-              )
-            }
-          >
-            <Icon size={22} />
-          </NavLink>
-        );
-      })}
-      <button
-        type="button"
-        className="grid size-10 place-items-center rounded-xl text-muted"
-        aria-label="New chat"
-        onClick={() => void newChat()}
-      >
-        <Plus size={20} />
-      </button>
-    </nav>
+      </IconButton>
+      <NavLink to="/" className="grid place-items-center no-underline" aria-label="Buddy home">
+        <img src="/buddy-icon.png" alt="Buddy" width={28} height={28} className="rounded-lg" />
+      </NavLink>
+    </header>
   );
 }

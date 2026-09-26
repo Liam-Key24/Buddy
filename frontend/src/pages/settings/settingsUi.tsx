@@ -1,5 +1,10 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { ErrorBanner } from "../../components/ui/ErrorBanner";
+import { IconButton } from "../../components/ui/IconButton";
 import { cn } from "../../lib/cn";
+import { useSettingsChrome } from "./SettingsLayout";
+
+export { SegmentedChoice } from "../../components/ui/SegmentedChoice";
 
 export function SettingsMasonry({ children }: { children: ReactNode }) {
   return <div className="settings-masonry">{children}</div>;
@@ -14,13 +19,16 @@ export function SettingsPageHead({
   subtitle?: string;
   action?: ReactNode;
 }) {
+  const chrome = useSettingsChrome();
+
   return (
     <div className="settings-page-head">
-      <div>
+      <div className="settings-page-head-row">
+        <div className="settings-page-head-side">{chrome?.mobileMenu}</div>
         <h1 className="settings-title">{title}</h1>
-        {subtitle ? <p className="settings-subtitle">{subtitle}</p> : null}
+        <div className="settings-page-head-side settings-page-head-side-end">{action}</div>
       </div>
-      {action}
+      {subtitle ? <p className="settings-subtitle">{subtitle}</p> : null}
     </div>
   );
 }
@@ -38,7 +46,7 @@ export function SettingsMeta({ children, className }: { children: ReactNode; cla
 }
 
 export function SettingsError({ children }: { children: ReactNode }) {
-  return <div className="settings-error">{children}</div>;
+  return <ErrorBanner>{children}</ErrorBanner>;
 }
 
 export function SettingsCta({
@@ -56,23 +64,6 @@ export function SettingsCta({
 export function SettingsSoonBtn({ children }: { children: ReactNode }) {
   return (
     <button type="button" disabled className="settings-cta-soon">
-      {children}
-    </button>
-  );
-}
-
-export function SettingsIconBtn({
-  className,
-  ghost,
-  children,
-  ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { ghost?: boolean }) {
-  return (
-    <button
-      type="button"
-      className={cn(ghost ? "settings-icon-btn-ghost" : "settings-icon-btn", className)}
-      {...props}
-    >
       {children}
     </button>
   );
@@ -166,45 +157,6 @@ export function PlaceholderToggle({
   );
 }
 
-export function SegmentedChoice<T extends string>({
-  value,
-  onChange,
-  options,
-  disabled,
-  ariaLabel,
-}: {
-  value: T;
-  onChange: (next: T) => void;
-  options: { value: T; label: string }[];
-  disabled?: boolean;
-  ariaLabel: string;
-}) {
-  return (
-    <div
-      role="group"
-      aria-label={ariaLabel}
-      className={cn("settings-segment", disabled && "settings-dim")}
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
-    >
-      {options.map((opt) => {
-        const active = value === opt.value;
-        return (
-          <button
-            key={opt.value}
-            type="button"
-            disabled={disabled}
-            aria-pressed={active}
-            onClick={() => onChange(opt.value)}
-            className={cn("settings-segment-btn", active && "settings-segment-btn-on")}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 export function SettingsWeekDay({
   dow,
   day,
@@ -267,9 +219,15 @@ export function SettingsShiftRow({
         <strong className="block truncate text-sm text-ink">{place}</strong>
         <SettingsMeta className="tabular-nums">{range}</SettingsMeta>
       </div>
-      <SettingsIconBtn ghost aria-label={`Remove ${place}`} disabled={disabled} onClick={onRemove}>
+      <IconButton
+        label={`Remove ${place}`}
+        size="sm"
+        tone="ghost"
+        disabled={disabled}
+        onClick={onRemove}
+      >
         {removeIcon}
-      </SettingsIconBtn>
+      </IconButton>
     </li>
   );
 }

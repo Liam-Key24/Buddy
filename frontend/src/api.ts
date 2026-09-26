@@ -263,6 +263,33 @@ export type Me = {
   username: string;
 };
 
+export type WorkShift = {
+  id: string;
+  date: string;
+  start: string;
+  end: string;
+  place: string;
+};
+
+export type WorkSettings = {
+  enabled: boolean;
+  mode: "full_time" | "part_time";
+  start: string;
+  end: string;
+  days: boolean[];
+  shifts: WorkShift[];
+};
+
+export type UserSettings = {
+  show_avatar: boolean;
+  compact_sidebar: boolean;
+  confirm_deletes: boolean;
+  sleep_enabled: boolean;
+  skip_weekends: boolean;
+  prefer_after: string;
+  work: WorkSettings;
+};
+
 export async function fetchHealth(): Promise<HealthResponse> {
   return json(await fetch(`${API_BASE}/health`));
 }
@@ -289,6 +316,25 @@ export async function logout(): Promise<void> {
     await fetch(`${API_BASE}/auth/logout`, {
       method: "POST",
       credentials: "include",
+    }),
+  );
+}
+
+export async function fetchSettings(): Promise<UserSettings> {
+  return json(
+    await fetch(`${API_BASE}/settings`, { credentials: "include" }),
+  );
+}
+
+export async function updateSettings(
+  patch: Partial<Omit<UserSettings, "work">> & { work?: Partial<WorkSettings> },
+): Promise<UserSettings> {
+  return json(
+    await fetch(`${API_BASE}/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(patch),
     }),
   );
 }

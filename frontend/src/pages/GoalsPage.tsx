@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChatCircle, PencilSimple, Target, Trash } from "@phosphor-icons/react";
 import { GoalDetailPanel } from "../components/GoalDetailPanel";
+import { ErrorBanner } from "../components/ui/ErrorBanner";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
@@ -10,6 +11,7 @@ import { Tag } from "../components/ui/Tag";
 import { useToast } from "../components/ui/Toast";
 import { useChatNav } from "../chatNav";
 import { deleteGoal, fetchGoals, notifyCalendarChanged, type Goal } from "../api";
+import { useConfirmDeletes } from "../useUserSettings";
 
 const EDIT_HINT_KEY = "buddy.editGoalHint";
 
@@ -45,6 +47,7 @@ export function GoalsPage() {
   const navigate = useNavigate();
   const { setConversationId } = useChatNav();
   const { pushToast } = useToast();
+  const confirmDeletes = useConfirmDeletes();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -80,9 +83,7 @@ export function GoalsPage() {
     navigate("/chat");
   }
 
-  async function confirmRemove() {
-    if (!pendingRemove) return;
-    const goal = pendingRemove;
+  async function removeGoal(goal: Goal) {
     setBusyId(goal.id);
     setError(null);
     try {
@@ -98,6 +99,16 @@ export function GoalsPage() {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function requestRemove(goal: Goal) {
+    if (confirmDeletes) setPendingRemove(goal);
+    else void removeGoal(goal);
+  }
+
+  async function confirmRemove() {
+    if (!pendingRemove) return;
+    await removeGoal(pendingRemove);
   }
 
   return (
@@ -118,9 +129,7 @@ export function GoalsPage() {
           </Link>
         </div>
 
-        {error && (
-          <div className="mb-4 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
-        )}
+        {error ? <ErrorBanner className="mb-4">{error}</ErrorBanner> : null}
 
         {loaded && !goals.length && (
           <EmptyState
@@ -176,7 +185,7 @@ export function GoalsPage() {
                     <Button
                       tone="danger"
                       disabled={busyId === g.id}
-                      onClick={() => setPendingRemove(g)}
+                      onClick={() => requestRemove(g)}
                     >
                       <Trash size={16} /> Remove
                     </Button>
@@ -192,7 +201,7 @@ export function GoalsPage() {
           goal={detail}
           busy={busyId === detail.id}
           onClose={() => setDetail(null)}
-          onRemove={() => setPendingRemove(detail)}
+          onRemove={() => requestRemove(detail)}
         />
       )}
 

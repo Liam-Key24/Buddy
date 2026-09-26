@@ -98,27 +98,29 @@
     opacity: 0.5;
   }
 
-  /* —— Settings only —— */
+  /* —— Mobile chrome —— */
+  .mobile-topbar {
+    @apply fixed top-2 right-3 left-3 z-100 flex h-12 items-center justify-between rounded-float px-3 lg:hidden;
+    background: color-mix(in srgb, var(--color-raised) 72%, transparent);
+    backdrop-filter: blur(22px) saturate(1.15);
+    box-shadow: var(--shadow-float);
+    border: 1px solid var(--color-hairline);
+  }
+  .mobile-drawer {
+    @apply fixed inset-0 z-[110] lg:hidden;
+  }
+  .mobile-drawer-backdrop {
+    @apply absolute inset-0 bg-overlay transition-opacity duration-300 ease-out;
+  }
+  .mobile-drawer-panel {
+    @apply relative h-full w-[min(260px,85vw)] bg-sidebar transition-transform duration-300 ease-out will-change-transform;
+  }
+
   .settings-shell {
     @apply flex h-full min-h-0 flex-col lg:flex-row;
   }
   .settings-nav {
     @apply hidden w-44 shrink-0 flex-col gap-1 border-r border-hairline bg-page-deep/40 p-3 lg:flex;
-  }
-  .settings-switcher {
-    @apply relative shrink-0 border-b border-hairline px-3 py-2 lg:hidden;
-  }
-  .settings-switcher-btn {
-    @apply flex w-full items-center gap-2 rounded-xl bg-raised-soft px-3 py-2 text-sm text-ink;
-  }
-  .settings-switcher-menu {
-    @apply absolute inset-x-3 top-full z-20 mt-1 rounded-xl bg-raised p-1 shadow-[0_8px_24px_rgb(10_16_14/0.3)];
-  }
-  .settings-switcher-item {
-    @apply flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-ink-soft no-underline hover:bg-raised-soft hover:text-ink hover:no-underline;
-  }
-  .settings-switcher-item-active {
-    @apply bg-raised-soft text-mint;
   }
   .settings-nav-eyebrow {
     @apply mb-2 px-2 text-[10px] tracking-wide text-muted uppercase;
@@ -151,13 +153,45 @@
     }
   }
   .settings-page-head {
-    @apply mb-5 flex flex-wrap items-end justify-between gap-3;
+    @apply mb-5;
+  }
+  .settings-page-head-row {
+    @apply grid grid-cols-[1fr_auto_1fr] items-center gap-2;
+  }
+  .settings-page-head-side {
+    @apply flex min-h-8 items-center;
+  }
+  .settings-page-head-side-end {
+    @apply justify-end;
+  }
+  @media (min-width: 1024px) {
+    .settings-page-head-row {
+      @apply flex justify-between;
+    }
+    .settings-page-head-side:not(.settings-page-head-side-end) {
+      display: none;
+    }
   }
   .settings-title {
-    @apply m-0 font-display text-2xl font-medium lg:text-3xl;
+    @apply m-0 max-w-[70vw] truncate text-center font-display text-2xl font-medium lg:max-w-none lg:text-left lg:text-3xl;
   }
   .settings-subtitle {
-    @apply mt-1 mb-0 max-w-xl text-sm text-muted;
+    @apply mt-2 mb-0 max-w-xl text-center text-sm text-muted lg:mt-1 lg:text-left;
+  }
+  .settings-head-menu {
+    @apply relative;
+  }
+  .settings-head-menu-btn {
+    @apply inline-flex items-center gap-0.5 rounded-xl bg-raised-soft px-2 py-1.5 text-ink;
+  }
+  .settings-head-menu-panel {
+    @apply absolute top-full left-0 z-20 mt-1 min-w-48 rounded-xl bg-raised p-1 shadow-[0_8px_24px_rgb(10_16_14/0.3)];
+  }
+  .settings-switcher-item {
+    @apply flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-ink-soft no-underline hover:bg-raised-soft hover:text-ink hover:no-underline;
+  }
+  .settings-switcher-item-active {
+    @apply bg-raised-soft text-mint;
   }
   .settings-meta {
     @apply text-xs text-muted;
@@ -290,7 +324,8 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .frost-float {
+  .frost-float,
+  .mobile-topbar {
     backdrop-filter: none;
     background: var(--color-raised);
   }
@@ -677,15 +712,19 @@
   width: 100%;
   align-items: center;
   gap: 0.7rem;
-  border-radius: 0.85rem;
-  padding: 0.45rem 0.4rem;
+  border-radius: var(--radius-card);
+  padding: 0.7rem 0.85rem;
   text-align: left;
   color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-raised) 80%, transparent);
+  border: 1px solid var(--color-hairline);
+  box-shadow: 0 8px 24px rgb(10 16 14 / 0.18);
 }
 
 .cal-compact-row:hover,
 .cal-compact-row.is-active {
   background: var(--color-raised-soft);
+  border-color: color-mix(in srgb, var(--color-mint) 28%, transparent);
 }
 
 .cal-compact-time {
