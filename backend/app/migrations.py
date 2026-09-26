@@ -6,7 +6,22 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
+
+OWNER_TABLES = (
+    "conversations",
+    "chat_folders",
+    "goals",
+    "sessions",
+    "sparks",
+    "fixed_blocks",
+    "categories",
+    "learned_preferences",
+    "approval_events",
+    "ai_requests",
+    "messages",
+    "turns",
+)
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
@@ -58,8 +73,81 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return column in names
 
 
-def run_migrations(conn: sqlite3.Connection) -> int:
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Users, auth sessions, and owner_user_id on personal tables."""
+    from .auth import bootstrap_users, migrate_owner_id
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id)"
+    )
+    conn.commit()
+
+    bootstrap_users(conn)
+    owner_id = migrate_owner_id(conn)
+
+    for table in OWNER_TABLES:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if table not in tables:
+            continue
+        if not _column_exists(conn, table, "owner_user_id"):
+            if not all(ch.isalnum() or ch == "-" for ch in owner_id):
+                raise RuntimeError("invalid migrate owner id")
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '{owner_id}'"
+            )
+        else:
+            conn.execute(
+                f"UPDATE {table} SET owner_user_id=? WHERE owner_user_id IS NULL OR owner_user_id=''",
+                (owner_id,),
+            )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_owner ON {table}(owner_user_id)"
+        )
+    conn.commit()
+    set_schema_version(conn, 9)
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """Per-user settings JSON keyed by owner_user_id."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            owner_user_id TEXT PRIMARY KEY,
+            settings_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.commit()
+    set_schema_version(conn, 10)
+
+
+def run_migrations(conn: sqlite3.Connection, target: int | None = None) -> int:
     """Apply additive migrations. Returns resulting schema version."""
+    goal = SCHEMA_VERSION if target is None else target
     version = get_schema_version(conn)
     if version < 1:
         _ensure_meta(conn)
@@ -279,5 +367,13 @@ def run_migrations(conn: sqlite3.Connection) -> int:
         conn.commit()
         set_schema_version(conn, 8)
         version = 8
+
+    if version < 9 and goal >= 9:
+        _migrate_v9(conn)
+        version = 9
+
+    if version < 10 and goal >= 10:
+        _migrate_v10(conn)
+        version = 10
 
     return version

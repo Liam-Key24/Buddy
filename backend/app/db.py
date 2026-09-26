@@ -155,8 +155,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     _seed_default_fixed_blocks(conn)
 
 
-def _seed_default_fixed_blocks(conn: sqlite3.Connection) -> None:
-    row = conn.execute("SELECT COUNT(*) AS c FROM fixed_blocks").fetchone()
+def seed_default_fixed_blocks(conn: sqlite3.Connection, owner_user_id: str) -> None:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM fixed_blocks WHERE owner_user_id=?",
+        (owner_user_id,),
+    ).fetchone()
     if row and row["c"] > 0:
         return
     import uuid
@@ -172,9 +175,19 @@ def _seed_default_fixed_blocks(conn: sqlite3.Connection) -> None:
     for title, weekday, start_m, end_m in blocks:
         conn.execute(
             """
-            INSERT INTO fixed_blocks (id, title, weekday, start_minute, end_minute, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO fixed_blocks (id, title, weekday, start_minute, end_minute, created_at, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(uuid.uuid4()), title, weekday, start_m, end_m, now),
+            (str(uuid.uuid4()), title, weekday, start_m, end_m, now, owner_user_id),
         )
     conn.commit()
+
+
+def _seed_default_fixed_blocks(conn: sqlite3.Connection) -> None:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "users" not in tables:
+        return
+    from .auth import list_users
+
+    for user in list_users(conn):
+        seed_default_fixed_blocks(conn, user["id"])

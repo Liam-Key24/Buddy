@@ -20,6 +20,7 @@ def _plane(tmp_path: Path) -> ControlPlane:
         request_timeout_s=5,
         max_output_tokens=256,
         cors_origins=DEFAULT_CORS_ORIGINS,
+        static_dir=None,
     )
     return ControlPlane(db_path=tmp_path / "c.db", settings=settings, ai=None)
 

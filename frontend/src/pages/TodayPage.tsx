@@ -11,6 +11,7 @@ import {
   Target,
   WarningCircle,
 } from "@phosphor-icons/react";
+import { ErrorBanner } from "../components/ui/ErrorBanner";
 import { CategoryIcon } from "../components/CategoryIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionHead } from "../components/ui/SectionHead";
@@ -65,12 +66,24 @@ function formatClock(d: Date) {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function formatClockShort(d: Date) {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
 function formatLongDate(d: Date) {
   return d.toLocaleDateString(undefined, {
     weekday: "long",
     month: "long",
     day: "numeric",
   });
+}
+
+/** Compact mobile header date, e.g. SAT 26 SEP */
+function formatCompactDate(d: Date) {
+  const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
+  const day = d.getDate();
+  const month = d.toLocaleDateString(undefined, { month: "short" });
+  return `${weekday} ${day} ${month}`.toUpperCase();
 }
 
 function formatShortTime(iso: string) {
@@ -358,8 +371,21 @@ export function TodayPage() {
   ];
 
   return (
-    <section className="h-full overflow-y-auto p-5">
-      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <section className="h-full min-w-0 overflow-x-hidden overflow-y-auto p-4 sm:p-5">
+      {/* Mobile: single compact row */}
+      <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-2 lg:hidden">
+        <p className="m-0 font-display text-sm font-medium text-ink">{formatCompactDate(now)}</p>
+        <p className="m-0 text-xs tracking-wide text-muted uppercase">today</p>
+        <p
+          className="m-0 text-right font-display text-sm tabular-nums text-mint"
+          aria-live="polite"
+        >
+          {formatClockShort(now)}
+        </p>
+      </div>
+
+      {/* Desktop: fuller header */}
+      <div className="mb-4 hidden flex-wrap items-end justify-between gap-3 lg:flex">
         <div>
           <p className="m-0 flex items-center gap-1.5 text-xs tracking-wide text-muted uppercase">
             <CalendarBlank size={14} weight="duotone" />
@@ -373,30 +399,28 @@ export function TodayPage() {
         </div>
       </div>
 
-      {error && (
-        <div className="mb-4 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">
-          Could not load today: {error}
-        </div>
-      )}
+      {error ? (
+        <ErrorBanner className="mb-4 w-full">Could not load today: {error}</ErrorBanner>
+      ) : null}
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-4 grid w-full min-w-0 grid-cols-2 gap-3 xl:grid-cols-4">
         {stats.map((s) => (
-          <Surface key={s.label} className="flex items-center gap-3">
+          <Surface key={s.label} className="flex min-w-0 w-full items-center gap-3">
             <span className={s.color}>{s.icon}</span>
-            <div>
+            <div className="min-w-0">
               {loading ? (
                 <Skeleton className="mb-1 h-6 w-16" />
               ) : (
-                <div className="text-xl font-semibold">{s.value}</div>
+                <div className="truncate text-xl font-semibold">{s.value}</div>
               )}
-              <div className="text-xs text-muted">{s.label}</div>
+              <div className="truncate text-xs text-muted">{s.label}</div>
             </div>
           </Surface>
         ))}
       </div>
 
-      <div className="mb-4 grid gap-3 lg:grid-cols-2">
-        <Surface>
+      <div className="mb-4 grid w-full min-w-0 gap-3 lg:grid-cols-2">
+        <Surface className="min-w-0 w-full">
           <SectionHead
             icon={<Clock size={16} weight="duotone" />}
             title="Upcoming"
@@ -435,10 +459,10 @@ export function TodayPage() {
                     if (row.kind === "session") {
                       const s = row.session;
                       return (
-                        <li key={s.id}>
+                        <li key={s.id} className="min-w-0">
                           <Link
                             to="/calendar"
-                            className="flex items-center gap-3 rounded-xl px-1 py-1.5 text-ink no-underline hover:bg-raised-soft"
+                            className="flex min-w-0 items-center gap-3 rounded-xl px-1 py-1.5 text-ink no-underline hover:bg-raised-soft"
                           >
                             <div className="w-14 shrink-0 text-xs text-muted">
                               {formatShortTime(s.start_at)}
@@ -454,11 +478,11 @@ export function TodayPage() {
 
                     const open = !!expandedGroups[row.key];
                     return (
-                      <li key={row.key}>
+                      <li key={row.key} className="min-w-0">
                         <button
                           type="button"
                           onClick={() => toggleGroup(row.key)}
-                          className="flex w-full items-center gap-3 rounded-xl px-1 py-1.5 text-left text-ink hover:bg-raised-soft"
+                          className="flex w-full min-w-0 items-center gap-3 rounded-xl px-1 py-1.5 text-left text-ink hover:bg-raised-soft"
                         >
                           <div className="w-14 shrink-0 text-xs text-muted">
                             {formatGroupTime(row.sessions)}
@@ -519,7 +543,7 @@ export function TodayPage() {
           </div>
         </Surface>
 
-        <Surface>
+        <Surface className="min-w-0 w-full">
           <SectionHead
             icon={<WarningCircle size={16} weight="duotone" />}
             title="Needs you"
@@ -565,7 +589,7 @@ export function TodayPage() {
         </Surface>
       </div>
 
-      <Surface className="mb-4">
+      <Surface className="mb-4 min-w-0 w-full">
         <SectionHead icon={<Target size={16} weight="duotone" />} title="Goals" />
         {loading && (
           <div className="flex flex-col gap-3">
@@ -628,7 +652,7 @@ export function TodayPage() {
       </Surface>
 
       {data?.resurfaced_spark && (
-        <Surface>
+        <Surface className="min-w-0 w-full">
           <SectionHead
             icon={<Sparkle size={16} weight="duotone" />}
             title="Spark"

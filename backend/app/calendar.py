@@ -9,6 +9,7 @@ from typing import Any
 
 from .categories import CategoryStore
 from .db import commit as db_commit
+from .owners import resolve_owner
 from .schemas import CalendarAction, CategoryBrief, SessionOut
 
 
@@ -182,16 +183,21 @@ class CalendarService:
         self.conn = conn
         self.categories = categories or CategoryStore(conn)
 
+    def _oid(self, owner_user_id: str | None = None) -> str:
+        return resolve_owner(self.conn, owner_user_id)
+
     def list_sessions(
         self,
         *,
         start: str | None = None,
         end: str | None = None,
         statuses: list[str] | None = None,
+        owner_user_id: str | None = None,
     ) -> list[SessionOut]:
-        self.categories.ensure_defaults()
-        sql = "SELECT * FROM sessions WHERE 1=1"
-        params: list[Any] = []
+        oid = self._oid(owner_user_id)
+        self.categories.ensure_defaults(oid)
+        sql = "SELECT * FROM sessions WHERE owner_user_id=?"
+        params: list[Any] = [oid]
         if start:
             sql += " AND end_at >= ?"
             params.append(start)
@@ -220,9 +226,14 @@ class CalendarService:
             db_commit(self.conn)
         return sessions
 
-    def list_fixed_blocks(self) -> list[dict[str, Any]]:
+    def list_fixed_blocks(self, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        from .db import seed_default_fixed_blocks
+
+        oid = self._oid(owner_user_id)
+        seed_default_fixed_blocks(self.conn, oid)
         rows = self.conn.execute(
-            "SELECT * FROM fixed_blocks ORDER BY weekday, start_minute"
+            "SELECT * FROM fixed_blocks WHERE owner_user_id=? ORDER BY weekday, start_minute",
+            (oid,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -241,16 +252,20 @@ class CalendarService:
             raise ValueError("weekday must be 0–6 (Mon–Sun)")
         if not (0 <= start_minute < end_minute <= 24 * 60):
             raise ValueError("Invalid start/end minutes")
+        oid = self._oid()
         bid = _new_id()
         self.conn.execute(
             """
-            INSERT INTO fixed_blocks (id, title, weekday, start_minute, end_minute, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO fixed_blocks (id, title, weekday, start_minute, end_minute, created_at, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (bid, title, weekday, start_minute, end_minute, _now()),
+            (bid, title, weekday, start_minute, end_minute, _now(), oid),
         )
         db_commit(self.conn)
-        row = self.conn.execute("SELECT * FROM fixed_blocks WHERE id = ?", (bid,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM fixed_blocks WHERE id = ? AND owner_user_id=?",
+            (bid, oid),
+        ).fetchone()
         return dict(row)
 
     def update_fixed_block(
@@ -262,7 +277,10 @@ class CalendarService:
         start_minute: int | None = None,
         end_minute: int | None = None,
     ) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM fixed_blocks WHERE id = ?", (block_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM fixed_blocks WHERE id = ? AND owner_user_id=?",
+            (block_id, self._oid()),
+        ).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -285,7 +303,7 @@ class CalendarService:
             """
             UPDATE fixed_blocks
             SET title=?, weekday=?, start_minute=?, end_minute=?
-            WHERE id=?
+            WHERE id=? AND owner_user_id=?
             """,
             (
                 data["title"],
@@ -293,13 +311,17 @@ class CalendarService:
                 data["start_minute"],
                 data["end_minute"],
                 block_id,
+                self._oid(),
             ),
         )
         db_commit(self.conn)
         return data
 
     def delete_fixed_block(self, block_id: str) -> bool:
-        cur = self.conn.execute("DELETE FROM fixed_blocks WHERE id = ?", (block_id,))
+        cur = self.conn.execute(
+            "DELETE FROM fixed_blocks WHERE id = ? AND owner_user_id=?",
+            (block_id, self._oid()),
+        )
         db_commit(self.conn)
         return cur.rowcount > 0
 
@@ -307,10 +329,10 @@ class CalendarService:
         rows = self.conn.execute(
             """
             SELECT * FROM sessions
-            WHERE proposal_batch_id = ? AND status = 'proposed'
+            WHERE proposal_batch_id = ? AND status = 'proposed' AND owner_user_id=?
             ORDER BY start_at ASC
             """,
-            (batch_id,),
+            (batch_id, self._oid()),
         ).fetchall()
         return [self._row_to_session(r) for r in rows]
 
@@ -329,8 +351,12 @@ class CalendarService:
 
     def reclassify_all(self) -> int:
         """Re-run title matching for every session. Returns updated count."""
-        self.categories.ensure_defaults()
-        rows = self.conn.execute("SELECT id, title FROM sessions").fetchall()
+        oid = self._oid()
+        self.categories.ensure_defaults(oid)
+        rows = self.conn.execute(
+            "SELECT id, title FROM sessions WHERE owner_user_id=?",
+            (oid,),
+        ).fetchall()
         n = 0
         for r in rows:
             cid = self.categories.match_title(r["title"])
@@ -342,8 +368,10 @@ class CalendarService:
     def _busy_intervals(self, day: date) -> list[tuple[datetime, datetime]]:
         busy: list[tuple[datetime, datetime]] = []
         weekday = day.weekday()
+        oid = self._oid()
         for block in self.conn.execute(
-            "SELECT * FROM fixed_blocks WHERE weekday = ?", (weekday,)
+            "SELECT * FROM fixed_blocks WHERE weekday = ? AND owner_user_id=?",
+            (weekday, oid),
         ).fetchall():
             start = datetime(day.year, day.month, day.day, 0, 0) + timedelta(
                 minutes=block["start_minute"]
@@ -359,9 +387,10 @@ class CalendarService:
             """
             SELECT start_at, end_at FROM sessions
             WHERE status IN ('proposed', 'scheduled', 'completed')
+              AND owner_user_id=?
               AND start_at < ? AND end_at > ?
             """,
-            (day_end.isoformat(), day_start.isoformat()),
+            (oid, day_end.isoformat(), day_start.isoformat()),
         ).fetchall()
         for r in rows:
             busy.append(
@@ -440,8 +469,8 @@ class CalendarService:
 
     def _missed_count(self, goal_id: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM sessions WHERE goal_id = ? AND status = 'missed'",
-            (goal_id,),
+            "SELECT COUNT(*) AS c FROM sessions WHERE goal_id = ? AND status = 'missed' AND owner_user_id=?",
+            (goal_id, self._oid()),
         ).fetchone()
         return int(row["c"] if row else 0)
 
@@ -774,8 +803,8 @@ class CalendarService:
                 """
                 INSERT INTO sessions (
                     id, goal_id, title, start_at, end_at, kind, status,
-                    proposal_batch_id, notes, created_at, updated_at, category_id
-                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, ?, ?, ?, ?)
+                    proposal_batch_id, notes, created_at, updated_at, category_id, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, 'flexible', 'proposed', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sid,
@@ -788,6 +817,7 @@ class CalendarService:
                     now,
                     now,
                     category_id,
+                    self._oid(),
                 ),
             )
             sessions.append(
@@ -820,9 +850,10 @@ class CalendarService:
         return self._insert_proposed_titled(goal, titled)
 
     def approve_batch(self, batch_id: str, *, conversation_id: str | None = None) -> list[SessionOut]:
+        oid = self._oid()
         rows = self.conn.execute(
-            "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'proposed'",
-            (batch_id,),
+            "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'proposed' AND owner_user_id=?",
+            (batch_id, oid),
         ).fetchall()
         if not rows:
             return []
@@ -860,8 +891,8 @@ class CalendarService:
             self.conn.execute(
                 """
                 INSERT INTO approval_events (
-                    id, batch_id, goal_id, conversation_id, approved_at, undone_at, session_ids_json
-                ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+                    id, batch_id, goal_id, conversation_id, approved_at, undone_at, session_ids_json, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     _new_id(),
@@ -870,6 +901,7 @@ class CalendarService:
                     conversation_id,
                     now,
                     json.dumps(session_ids),
+                    oid,
                 ),
             )
         db_commit(self.conn)
@@ -882,10 +914,10 @@ class CalendarService:
         event = self.conn.execute(
             """
             SELECT * FROM approval_events
-            WHERE batch_id = ? AND undone_at IS NULL
+            WHERE batch_id = ? AND undone_at IS NULL AND owner_user_id=?
             ORDER BY approved_at DESC LIMIT 1
             """,
-            (batch_id,),
+            (batch_id, self._oid()),
         ).fetchone()
         now = _now()
         if event:
@@ -917,8 +949,8 @@ class CalendarService:
 
         # Fallback: any scheduled rows for this batch
         rows = self.conn.execute(
-            "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'scheduled'",
-            (batch_id,),
+            "SELECT * FROM sessions WHERE proposal_batch_id = ? AND status = 'scheduled' AND owner_user_id=?",
+            (batch_id, self._oid()),
         ).fetchall()
         restored = []
         for r in rows:
@@ -935,9 +967,9 @@ class CalendarService:
         cur = self.conn.execute(
             """
             UPDATE sessions SET status='rejected', updated_at=?
-            WHERE proposal_batch_id = ? AND status = 'proposed'
+            WHERE proposal_batch_id = ? AND status = 'proposed' AND owner_user_id=?
             """,
-            (now, batch_id),
+            (now, batch_id, self._oid()),
         )
         db_commit(self.conn)
         return cur.rowcount
@@ -945,16 +977,19 @@ class CalendarService:
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None) -> SessionOut | None:
         if outcome not in {"completed", "missed"}:
             raise ValueError("outcome must be completed or missed")
-        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        row = self.get_session(session_id)
         if not row:
             return None
         now = _now()
         self.conn.execute(
-            "UPDATE sessions SET status=?, notes=COALESCE(?, notes), updated_at=? WHERE id=?",
-            (outcome, notes, now, session_id),
+            "UPDATE sessions SET status=?, notes=COALESCE(?, notes), updated_at=? WHERE id=? AND owner_user_id=?",
+            (outcome, notes, now, session_id, self._oid()),
         )
         db_commit(self.conn)
-        refreshed = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        refreshed = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         return self._row_to_session(refreshed)
 
     def find_session_for_outcome_phrase(self, text: str, goal_id: str | None = None) -> Any:
@@ -964,10 +999,11 @@ class CalendarService:
             """
             SELECT * FROM sessions
             WHERE status = 'scheduled'
+              AND owner_user_id=?
               AND (? IS NULL OR goal_id = ?)
             ORDER BY start_at ASC
             """,
-            (goal_id, goal_id),
+            (self._oid(), goal_id, goal_id),
         ).fetchall()
         if not rows:
             return None
@@ -982,10 +1018,10 @@ class CalendarService:
         row = self.conn.execute(
             """
             SELECT proposal_batch_id FROM sessions
-            WHERE goal_id = ? AND status = 'proposed'
+            WHERE goal_id = ? AND status = 'proposed' AND owner_user_id=?
             ORDER BY created_at DESC LIMIT 1
             """,
-            (goal_id,),
+            (goal_id, self._oid()),
         ).fetchone()
         return row["proposal_batch_id"] if row else None
 
@@ -993,10 +1029,11 @@ class CalendarService:
         rows = self.conn.execute(
             """
             SELECT status, COUNT(*) AS c FROM sessions
-            WHERE goal_id = ? AND status IN ('scheduled', 'completed', 'missed', 'proposed')
+            WHERE goal_id = ? AND owner_user_id=?
+              AND status IN ('scheduled', 'completed', 'missed', 'proposed')
             GROUP BY status
             """,
-            (goal_id,),
+            (goal_id, self._oid()),
         ).fetchall()
         out = {"scheduled": 0, "completed": 0, "missed": 0, "proposed": 0}
         for r in rows:
@@ -1009,9 +1046,10 @@ class CalendarService:
             SELECT MIN(start_at) AS started_at,
                    MAX(COALESCE(end_at, start_at)) AS ended_at
             FROM sessions
-            WHERE goal_id = ? AND status IN ('scheduled', 'completed', 'missed')
+            WHERE goal_id = ? AND owner_user_id=?
+              AND status IN ('scheduled', 'completed', 'missed')
             """,
-            (goal_id,),
+            (goal_id, self._oid()),
         ).fetchone()
         if not row:
             return {"started_at": None, "ended_at": None}
@@ -1051,17 +1089,23 @@ class CalendarService:
             """
             INSERT INTO sessions (
                 id, goal_id, title, start_at, end_at, kind, status,
-                proposal_batch_id, notes, created_at, updated_at, category_id
-            ) VALUES (?, NULL, ?, ?, ?, 'flexible', 'scheduled', NULL, NULL, ?, ?, ?)
+                proposal_batch_id, notes, created_at, updated_at, category_id, owner_user_id
+            ) VALUES (?, NULL, ?, ?, ?, 'flexible', 'scheduled', NULL, NULL, ?, ?, ?, ?)
             """,
-            (sid, title, start.isoformat(), end.isoformat(), now, now, category_id),
+            (sid, title, start.isoformat(), end.isoformat(), now, now, category_id, self._oid()),
         )
         db_commit(self.conn)
-        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (sid, self._oid()),
+        ).fetchone()
         return self._row_to_session(row)
 
     def get_session(self, session_id: str) -> SessionOut | None:
-        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         if not row:
             return None
         return self._row_to_session(row)
@@ -1115,8 +1159,8 @@ class CalendarService:
                 """
                 INSERT INTO sessions (
                     id, goal_id, title, start_at, end_at, kind, status,
-                    proposal_batch_id, notes, created_at, updated_at, category_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    proposal_batch_id, notes, created_at, updated_at, category_id, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sid,
@@ -1131,6 +1175,7 @@ class CalendarService:
                     snap.get("created_at") or now,
                     now,
                     snap.get("category_id"),
+                    self._oid(),
                 ),
             )
         db_commit(self.conn)
@@ -1169,7 +1214,10 @@ class CalendarService:
         end_at: str | None = None,
         category_id: str | None | object = ...,
     ) -> SessionOut | None:
-        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         if not row:
             return None
         current = dict(row)
@@ -1200,12 +1248,15 @@ class CalendarService:
             """
             UPDATE sessions
             SET title=?, start_at=?, end_at=?, category_id=?, updated_at=?
-            WHERE id=?
+            WHERE id=? AND owner_user_id=?
             """,
-            (new_title, start.isoformat(), end.isoformat(), new_category_id, now, session_id),
+            (new_title, start.isoformat(), end.isoformat(), new_category_id, now, session_id, self._oid()),
         )
         db_commit(self.conn)
-        updated = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        updated = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         return self._row_to_session(updated)
 
     def move_session(
@@ -1215,7 +1266,10 @@ class CalendarService:
         new_start_at: str,
         new_end_at: str | None = None,
     ) -> SessionOut | None:
-        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         if not row:
             return None
         current = dict(row)
@@ -1316,10 +1370,16 @@ class CalendarService:
 
     def delete_session(self, session_id: str) -> bool:
         """Hard-delete a session by id. Returns False if missing."""
-        row = self.conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT id FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        ).fetchone()
         if not row:
             return False
-        self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id = ? AND owner_user_id=?",
+            (session_id, self._oid()),
+        )
         db_commit(self.conn)
         return True
 

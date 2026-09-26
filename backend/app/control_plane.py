@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -24,6 +25,7 @@ from .calendar import CalendarService
 from .categories import CategoryStore
 from .config import Settings, load_settings
 from .db import commit, get_connection, init_db, transaction
+from .owners import reset_owner, resolve_owner, set_owner
 from .goals import GoalStore, progress_summary
 from .migrations import run_migrations
 from .mutation_policy import classify_operation, preview_payload
@@ -76,6 +78,22 @@ def _now() -> str:
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def with_owner(fn):
+    """Bind owner_user_id for a ControlPlane entry point (explicit, context, or first user)."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        explicit = kwargs.pop("owner_user_id", None)
+        oid = resolve_owner(self.conn, explicit)
+        token = set_owner(oid)
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            reset_owner(token)
+
+    return wrapper
 
 
 class ControlPlane:
@@ -151,15 +169,19 @@ class ControlPlane:
         created = self.conversations.create()
         return created["id"]
 
+    @with_owner
     def create_conversation(self) -> dict[str, Any]:
         return self.conversations.create()
 
+    @with_owner
     def list_conversations(self) -> list[dict[str, Any]]:
         return self.conversations.list_active()
 
+    @with_owner
     def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any] | None:
         return self.conversations.rename(conversation_id, title)
 
+    @with_owner
     def move_conversation(
         self, conversation_id: str, folder_id: str | None
     ) -> dict[str, Any] | None:
@@ -167,6 +189,7 @@ class ControlPlane:
             return None
         return self.conversations.move(conversation_id, folder_id)
 
+    @with_owner
     def place_conversation(
         self,
         conversation_id: str,
@@ -177,18 +200,23 @@ class ControlPlane:
             return None
         return self.conversations.place(conversation_id, folder_id, before_id)
 
+    @with_owner
     def list_folders(self) -> list[dict[str, Any]]:
         return self.folders.list()
 
+    @with_owner
     def create_folder(self, title: str) -> dict[str, Any]:
         return self.folders.create(title)
 
+    @with_owner
     def rename_folder(self, folder_id: str, title: str) -> dict[str, Any] | None:
         return self.folders.rename(folder_id, title)
 
+    @with_owner
     def delete_folder(self, folder_id: str) -> dict[str, Any] | None:
         return self.folders.delete(folder_id)
 
+    @with_owner
     def delete_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         row = self.conversations.soft_delete(conversation_id)
         if row:
@@ -196,9 +224,11 @@ class ControlPlane:
             self.goals.pause_for_conversation(conversation_id)
         return row
 
+    @with_owner
     def restore_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         return self.conversations.restore(conversation_id)
 
+    @with_owner
     def revert_to(
         self,
         conversation_id: str,
@@ -206,9 +236,15 @@ class ControlPlane:
         *,
         include_target: bool = False,
     ) -> dict[str, Any]:
+        if not self.conversations.get(conversation_id):
+            return {"ok": False, "reverted": 0}
+        oid = resolve_owner(self.conn)
         row = self.conn.execute(
-            "SELECT * FROM messages WHERE id=? AND conversation_id=?",
-            (message_id, conversation_id),
+            """
+            SELECT * FROM messages
+            WHERE id=? AND conversation_id=? AND owner_user_id=?
+            """,
+            (message_id, conversation_id, oid),
         ).fetchone()
         if not row:
             return {"ok": False, "reverted": 0}
@@ -391,9 +427,11 @@ class ControlPlane:
         self.turns.try_begin(rid, cid, f"{decision}:{batch_id}")
         self.turns.update(rid, status="completed", effects_json=effects)
 
+    @with_owner
     def save_draft(self, conversation_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
         return self.conversations.save_draft(conversation_id, draft)
 
+    @with_owner
     def usage_today(self) -> dict[str, Any]:
         return self.usage.today_summary()
 
@@ -412,8 +450,8 @@ class ControlPlane:
             """
             INSERT INTO messages (
                 id, conversation_id, role, content, created_at,
-                revision_group, revision_of, superseded
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                revision_group, revision_of, superseded, owner_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 mid,
@@ -424,6 +462,7 @@ class ControlPlane:
                 revision_group or mid,
                 revision_of,
                 superseded,
+                resolve_owner(self.conn),
             ),
         )
         self.conn.execute(
@@ -433,22 +472,27 @@ class ControlPlane:
         commit(self.conn)
         return mid
 
+    @with_owner
     def list_messages(self, conversation_id: str, *, include_superseded: bool = False) -> list[dict[str, Any]]:
+        if not self.conversations.get(conversation_id):
+            return []
         sql = """
             SELECT id, conversation_id, role, content, created_at,
                    revision_group, revision_of, superseded
-            FROM messages WHERE conversation_id=?
+            FROM messages WHERE conversation_id=? AND owner_user_id=?
         """
         if not include_superseded:
             sql += " AND superseded=0"
         sql += " ORDER BY created_at ASC"
-        rows = self.conn.execute(sql, (conversation_id,)).fetchall()
+        rows = self.conn.execute(sql, (conversation_id, resolve_owner(self.conn))).fetchall()
         return [dict(r) for r in rows]
 
+    @with_owner
     def get_goal(self, goal_id: str) -> GoalPublic | None:
         goal = self.goals.get(goal_id)
         return self._goal_public(goal) if goal else None
 
+    @with_owner
     def list_goals(self) -> list[GoalPublic]:
         return [self._goal_public(g) for g in self.goals.list_managed()]
 
@@ -470,11 +514,13 @@ class ControlPlane:
             ended_at=ended,
         )
 
+    @with_owner
     def remove_goal(self, goal_id: str) -> Goal | None:
         return self.goals.remove(goal_id)
 
     # --- explicit UI actions (no AI) ---
 
+    @with_owner
     def decide_proposal(
         self, batch_id: str, decision: str, *, conversation_id: str | None = None
     ) -> dict[str, Any]:
@@ -514,13 +560,24 @@ class ControlPlane:
             }
         return {"ok": False, "detail": "Use chat to describe an adjustment"}
 
+    @with_owner
     def mark_outcome(self, session_id: str, outcome: str, notes: str | None = None):
         return self.calendar.mark_outcome(session_id, outcome, notes)
 
     # --- chat cancel ---
 
+    @with_owner
     def cancel_request(self, request_id: str) -> dict[str, Any]:
+        oid = resolve_owner(self.conn)
         entry = self._active_requests.get(request_id)
+        if entry is not None and entry.get("owner_user_id") not in {None, oid}:
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "found": False,
+                "turn_status": "unknown",
+                "committed": False,
+            }
         committed = False
         if entry is not None:
             entry["cancelled"] = True
@@ -554,6 +611,7 @@ class ControlPlane:
         turn = self.turns.get(request_id)
         return bool(turn and turn.get("status") == "cancelled")
 
+    @with_owner
     def get_open_proposal(self, conversation_id: str) -> dict[str, Any]:
         """Rebuild unfinished chat state: proposal groups, previews, questions, answers."""
         pending = self.turns.latest_awaiting_approval(conversation_id)
@@ -643,6 +701,7 @@ class ControlPlane:
 
     # --- chat entry ---
 
+    @with_owner
     def handle_message(
         self,
         message: str,
@@ -657,7 +716,12 @@ class ControlPlane:
         existing = self.turns.get(rid)
         if existing and existing.get("response"):
             return ChatResponse.model_validate(existing["response"])
-        self._active_requests[rid] = {"cancelled": False, "http_client": None, "owns_http_client": False}
+        self._active_requests[rid] = {
+            "cancelled": False,
+            "http_client": None,
+            "owns_http_client": False,
+            "owner_user_id": resolve_owner(self.conn),
+        }
         try:
             cid = (existing or {}).get("conversation_id") or self._ensure_conversation(conversation_id)
             with self._lock_for_conversation(cid):
@@ -818,6 +882,31 @@ class ControlPlane:
                 activity=[{"stage": "cancelled", "label": "Stopped", "detail": "No calendar changes"}],
             )
             return self._finish_response(request_id, cid, response, status="cancelled")
+
+        quota = self.usage.today_summary()
+        if quota["remaining"] <= 0:
+            limit = quota["limit"]
+            reply = (
+                f"You've used your {limit} Cloud AI requests for today. "
+                "The other account still has its own daily allowance. "
+                "Today, Calendar and Sparks still work — Chat will be available again tomorrow."
+            )
+            self._add_message(cid, "assistant", reply)
+            response = ChatResponse(
+                conversation_id=cid,
+                reply=reply,
+                goal=goal,
+                ai_available=False,
+                request_id=request_id,
+                activity=[
+                    {
+                        "stage": "failed",
+                        "label": "Daily request limit reached",
+                        "detail": f"{quota['used']} / {limit} today",
+                    }
+                ],
+            )
+            return self._finish_response(request_id, cid, response, status="failed")
 
         self.turns.update(request_id, status="interpreting")
         try:
@@ -2148,6 +2237,7 @@ class ControlPlane:
 
         return {"status": "skipped", "goal": goal}
 
+    @with_owner
     def get_today(self) -> TodayResponse:
         goals = self.goals.list_open()
         needs: list[TodayNeed] = []

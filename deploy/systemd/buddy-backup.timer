@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Buddy database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=buddy-backup.service
+
+[Install]
+WantedBy=timers.target

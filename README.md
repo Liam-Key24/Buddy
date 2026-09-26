@@ -160,9 +160,14 @@ PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
 | `BUDDY_DB_PATH` | `backend/data/buddy.db` | SQLite file path |
 | `BUDDY_HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` in Docker/Railway/Render |
 | `BUDDY_PORT` | `8787` | Listen port |
-| `BUDDY_CORS_ORIGINS` | localhost + Tauri | Comma-separated browser origins, e.g. `https://buddy.vercel.app,http://localhost:5173` |
+| `BUDDY_CORS_ORIGINS` | localhost + Tauri in dev | Extra browser origins. Empty in production (`BUDDY_COOKIE_SECURE=1`) |
 | `BUDDY_GROQ_TIMEOUT_S` | `45` | Groq request timeout |
 | `BUDDY_GROQ_MAX_TOKENS` | `1024` | Max tokens per Groq response |
+| `BUDDY_USER_1` / `BUDDY_USER_2` | — | First-boot `username:password`; after that username-only is enough |
+| `BUDDY_MIGRATE_OWNER` | first user | Username that receives existing single-tenant rows |
+| `BUDDY_SESSION_SECRET` | — | Extra entropy for session token hashes |
+| `BUDDY_COOKIE_SECURE` | `0` | Set `1` in production (Tailscale Serve HTTPS) |
+| `BUDDY_DAILY_REQUEST_LIMIT` | `500` | Cloud AI requests per account per UTC day (1000 key split in half) |
 
 **Frontend (build time only):**
 
@@ -181,6 +186,9 @@ All routes are on the backend root (not under `/api` unless you put a reverse pr
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Liveness + Groq config status |
+| POST | `/auth/login` | Username/password; sets HttpOnly `buddy_session` |
+| POST | `/auth/logout` | Clears the session cookie |
+| GET | `/auth/me` | Current account, or 401 |
 | POST | `/chat` | Send user message; returns assistant reply + proposals |
 | GET | `/today` | Dashboard payload |
 | GET | `/calendar/sessions` | All sessions |
@@ -281,67 +289,27 @@ Clear these in DevTools → Application → Local Storage if Chat behaves oddly.
 
 ---
 
-## Deploying as a web app
+## Deploying (private Oracle + Tailscale)
 
-Buddy is **two services**: static frontend + long-running backend with persistent SQLite.
+**Authoritative guide:** [`docs/SINGLE_TRUTH.md`](docs/SINGLE_TRUTH.md) and [`deploy/README.md`](deploy/README.md).
 
-### Why not Vercel-only?
+Production shape: one FastAPI process on `127.0.0.1:8787`, SQLite under `/var/lib/buddy/`, UI + `/api` on one origin, Tailscale Serve as the only edge. Do **not** bind `0.0.0.0` or open a public Oracle port.
 
-- Backend is FastAPI + **SQLite on disk**
-- Vercel serverless functions have **ephemeral filesystem** — the DB would reset
-- Chat needs a always-on process, not cold-start functions
+Auth is two private accounts and an HttpOnly `buddy_session` cookie. Set `BUDDY_USER_1`, `BUDDY_USER_2`, `BUDDY_MIGRATE_OWNER`, `BUDDY_SESSION_SECRET`, and `BUDDY_COOKIE_SECURE=1` in `/etc/buddy/env`. Shared calendar is out of scope.
 
-**Working pattern:** Vercel (frontend) + Railway / Render / Fly (backend + volume).
+```bash
+./deploy/package_release.sh          # clean archive (no .venv / node_modules)
+# On host (only after explicit approval):
+#   sudo ./deploy/install.sh
+#   sudoedit /etc/buddy/env
+#   sudo ./deploy/update.sh ./buddy-release-….tar.gz
+```
 
-### A. Backend (Railway or Render example)
+Local development still uses Vite on `:5173` proxying `/api` → backend `:8787`.
 
-1. New service, repo root **`backend/`**
-2. Start command:
+### Legacy public-cloud notes
 
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port $PORT
-   ```
-
-3. Environment:
-
-   ```bash
-   GROQ_API_KEY=...
-   GROQ_MODEL=openai/gpt-oss-120b
-   BUDDY_AI_ENABLED=1
-   BUDDY_HOST=0.0.0.0
-   BUDDY_DB_PATH=/data/buddy.db
-   BUDDY_CORS_ORIGINS=https://your-app.vercel.app,http://localhost:5173
-   ```
-
-4. **Persistent volume** mounted at `/data` (required — without it, data is lost on redeploy)
-
-5. Note the public URL, e.g. `https://buddy-api.up.railway.app`
-
-### B. Frontend (Vercel)
-
-1. Import GitHub repo
-2. **Root Directory:** `frontend`
-3. **Build Command:** `npm run build`
-4. **Output Directory:** `dist`
-5. **Environment variable (Production):**
-
-   ```bash
-   VITE_API_BASE=https://buddy-api.up.railway.app
-   ```
-
-6. `frontend/vercel.json` handles SPA routing for React Router
-
-7. Redeploy after changing `VITE_API_BASE` (it is baked in at build time)
-
-### C. Verify production
-
-- Open `https://your-app.vercel.app/settings` → health should be OK
-- Chat with a test goal
-- Calendar shows approved sessions
-
-### Fast solo hack (today, not durable)
-
-Run backend locally, expose with **ngrok** or **cloudflared**, set `VITE_API_BASE` to the tunnel URL, deploy frontend only. Works for demos; tunnel URL changes when restarted.
+Older Vercel + Railway/Render instructions are **not** the intended production path for this private build. Prefer the Tailscale topology above.
 
 ---
 

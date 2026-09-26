@@ -20,6 +20,7 @@ def test_offline_chat_explains_while_local_works(tmp_path: Path):
         request_timeout_s=5,
         max_output_tokens=256,
         cors_origins=DEFAULT_CORS_ORIGINS,
+        static_dir=None,
     )
     plane = ControlPlane(db_path=tmp_path / "off.db", settings=settings, ai=None)
     try:

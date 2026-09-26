@@ -26,6 +26,7 @@ import {
 import { useChatNav } from "../chatNav";
 import { ProposalCards, MutationPreviewCard } from "../components/ProposalCards";
 import { Button } from "../components/ui/Button";
+import { ErrorBanner } from "../components/ui/ErrorBanner";
 import { useGoalComplete } from "../components/ui/GoalCompleteOverlay";
 import { Tag } from "../components/ui/Tag";
 import { useToast } from "../components/ui/Toast";
@@ -704,9 +705,7 @@ export function ChatPage() {
         )}
       </header>
 
-      {error && (
-        <div className="mx-5 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
-      )}
+      {error ? <ErrorBanner className="mx-5">{error}</ErrorBanner> : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
