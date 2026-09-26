@@ -50,7 +50,7 @@ Mac browser / phone browser / future thin client
 | Current release symlink | `/opt/buddy/current` |
 | Data + SQLite | `/var/lib/buddy/buddy.db` |
 | Backups | `/var/lib/buddy/backups/` |
-| Env / secrets | `/etc/buddy/env` (mode `0600`) |
+| Env / secrets | `/etc/buddy/env` (mode `0600` root:root) |
 | Service user | `buddy` (non-root) |
 | Process bind | `127.0.0.1:8787` |
 | Edge | Tailscale Serve → `http://127.0.0.1:8787` |
@@ -63,7 +63,7 @@ Bootstrap on first start (no UI register) from `/etc/buddy/env`:
 
 ```text
 BUDDY_USER_1=liam:password
-BUDDY_USER_2=partner:password
+BUDDY_USER_2=lydia:password
 BUDDY_MIGRATE_OWNER=liam
 BUDDY_SESSION_SECRET=<long random>
 BUDDY_COOKIE_SECURE=1

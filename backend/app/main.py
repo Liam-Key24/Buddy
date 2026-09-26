@@ -14,9 +14,13 @@ from .auth import (
     SESSION_COOKIE,
     authenticate,
     bind_request_owner,
+    clear_login_failures,
     cookie_kwargs,
     create_session as create_auth_session,
+    login_attempt_key,
+    login_is_locked,
     lookup_session,
+    record_login_failure,
     revoke_session,
     unbind_request_owner,
 )
@@ -51,6 +55,24 @@ plane = ControlPlane(settings=settings)
 
 
 _PUBLIC_API = {"/api/health", "/api/auth/login", "/api/auth/logout"}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    )
+    if settings.cookie_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 @app.middleware("http")
@@ -112,10 +134,17 @@ def health():
 
 
 @public.post("/auth/login")
-def login(body: LoginBody, response: Response):
+def login(body: LoginBody, request: Request, response: Response):
+    ip = request.client.host if request.client else None
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    key = login_attempt_key(forwarded or ip, body.username)
+    if login_is_locked(key):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
     user = authenticate(plane.conn, body.username, body.password)
     if not user:
+        record_login_failure(key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    clear_login_failures(key)
     raw = create_auth_session(plane.conn, user["id"])
     response.set_cookie(value=raw, **cookie_kwargs())
     return {"id": user["id"], "username": user["username"]}

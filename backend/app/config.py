@@ -42,9 +42,10 @@ def _env_float(name: str, default: float) -> float:
 
 def _env_cors(default: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.environ.get("BUDDY_CORS_ORIGINS", "").strip()
-    if not raw:
-        return default
-    extras = [part.strip() for part in raw.split(",") if part.strip()]
+    extras = [part.strip() for part in raw.split(",") if part.strip()] if raw else []
+    # Same-origin Tailscale Serve / cookie Secure: do not allow localhost by default.
+    if _env_bool("BUDDY_COOKIE_SECURE", default=False):
+        return tuple(dict.fromkeys(extras))
     return tuple(dict.fromkeys([*default, *extras]))
 
 

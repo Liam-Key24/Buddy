@@ -160,10 +160,10 @@ PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
 | `BUDDY_DB_PATH` | `backend/data/buddy.db` | SQLite file path |
 | `BUDDY_HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` in Docker/Railway/Render |
 | `BUDDY_PORT` | `8787` | Listen port |
-| `BUDDY_CORS_ORIGINS` | localhost + Tauri | Comma-separated browser origins, e.g. `https://buddy.vercel.app,http://localhost:5173` |
+| `BUDDY_CORS_ORIGINS` | localhost + Tauri in dev | Extra browser origins. Empty in production (`BUDDY_COOKIE_SECURE=1`) |
 | `BUDDY_GROQ_TIMEOUT_S` | `45` | Groq request timeout |
 | `BUDDY_GROQ_MAX_TOKENS` | `1024` | Max tokens per Groq response |
-| `BUDDY_USER_1` / `BUDDY_USER_2` | — | Seeded accounts `username:password` (no public register) |
+| `BUDDY_USER_1` / `BUDDY_USER_2` | — | First-boot `username:password`; after that username-only is enough |
 | `BUDDY_MIGRATE_OWNER` | first user | Username that receives existing single-tenant rows |
 | `BUDDY_SESSION_SECRET` | — | Extra entropy for session token hashes |
 | `BUDDY_COOKIE_SECURE` | `0` | Set `1` in production (Tailscale Serve HTTPS) |

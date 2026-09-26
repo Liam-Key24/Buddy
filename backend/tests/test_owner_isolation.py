@@ -64,3 +64,42 @@ def test_owner_cannot_read_or_write_other_users_rows(tmp_path: Path):
         assert all(row["id"] != mine["id"] for row in liam_sparks)
     finally:
         plane.close()
+
+
+def test_revert_and_cancel_reject_other_owner(tmp_path: Path):
+    client, plane = _client(tmp_path)
+    try:
+        users = {r["username"]: r["id"] for r in plane.conn.execute("SELECT id, username FROM users")}
+        liam = users["liam"]
+        partner = users["partner"]
+        conv = plane.create_conversation(owner_user_id=liam)
+        result = plane.revert_to(conv["id"], "missing-message", owner_user_id=partner)
+        assert result.get("ok") is False
+
+        plane._active_requests["steal-me"] = {
+            "cancelled": False,
+            "http_client": None,
+            "owns_http_client": False,
+            "owner_user_id": liam,
+        }
+        cancelled = plane.cancel_request("steal-me", owner_user_id=partner)
+        assert cancelled["found"] is False
+        assert plane._active_requests["steal-me"]["cancelled"] is False
+    finally:
+        plane.close()
+
+
+def test_resolve_owner_fails_closed_without_fallback(tmp_path: Path, monkeypatch):
+    from app.owners import resolve_owner
+
+    monkeypatch.delenv("BUDDY_OWNER_FALLBACK", raising=False)
+    plane = ControlPlane(db_path=tmp_path / "closed.db", ai=None)
+    try:
+        try:
+            resolve_owner(plane.conn)
+        except RuntimeError as exc:
+            assert "owner_user_id required" in str(exc)
+        else:
+            raise AssertionError("expected owner_user_id required")
+    finally:
+        plane.close()

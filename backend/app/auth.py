@@ -17,7 +17,10 @@ from .owners import reset_owner, set_owner
 
 SESSION_COOKIE = "buddy_session"
 SESSION_DAYS = 30
+LOGIN_WINDOW_S = 15 * 60
+LOGIN_MAX_FAILURES = 5
 _hasher = PasswordHasher()
+_login_failures: dict[str, list[float]] = {}
 
 
 def _now() -> datetime:
@@ -30,11 +33,14 @@ def _now_iso() -> str:
 
 def parse_user_spec(raw: str) -> tuple[str, str] | None:
     text = (raw or "").strip()
-    if not text or ":" not in text:
+    if not text:
         return None
+    if ":" not in text:
+        username = text.strip()
+        return (username, "") if username else None
     username, password = text.split(":", 1)
     username = username.strip()
-    if not username or not password:
+    if not username:
         return None
     return username, password
 
@@ -102,8 +108,8 @@ def get_user_by_id(conn: sqlite3.Connection, user_id: str) -> dict[str, Any] | N
 
 def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id, username, password_hash, created_at FROM users WHERE username=?",
-        (username,),
+        "SELECT id, username, password_hash, created_at FROM users WHERE lower(username)=lower(?)",
+        (username.strip(),),
     ).fetchone()
     return dict(row) if row else None
 
@@ -132,6 +138,11 @@ def bootstrap_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "Set BUDDY_USER_1=username:password and BUDDY_USER_2=username:password."
         )
     for username, password in specs:
+        if not password:
+            raise RuntimeError(
+                f"Bootstrap user {username!r} is missing a password. "
+                "Use BUDDY_USER_1=username:password on first start."
+            )
         create_user(conn, username, password)
     return list_users(conn)
 
@@ -199,6 +210,55 @@ def revoke_session(conn: sqlite3.Connection, raw_token: str | None) -> None:
         (hash_session_token(raw_token),),
     )
     conn.commit()
+
+
+def revoke_user_sessions(conn: sqlite3.Connection, user_id: str) -> int:
+    cur = conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def set_password(conn: sqlite3.Connection, user_id: str, password: str) -> None:
+    if not password:
+        raise ValueError("password required")
+    conn.execute(
+        "UPDATE users SET password_hash=? WHERE id=?",
+        (hash_password(password), user_id),
+    )
+    conn.commit()
+    revoke_user_sessions(conn, user_id)
+
+
+def rename_user(conn: sqlite3.Connection, user_id: str, username: str) -> None:
+    name = (username or "").strip()
+    if not name:
+        raise ValueError("username required")
+    conn.execute("UPDATE users SET username=? WHERE id=?", (name, user_id))
+    conn.commit()
+    revoke_user_sessions(conn, user_id)
+
+
+def login_attempt_key(ip: str | None, username: str) -> str:
+    host = (ip or "unknown").strip() or "unknown"
+    return f"{host}:{(username or '').strip().lower()}"
+
+
+def login_is_locked(key: str, *, now: float | None = None) -> bool:
+    at = now if now is not None else datetime.now(timezone.utc).timestamp()
+    stamps = [t for t in _login_failures.get(key, []) if at - t < LOGIN_WINDOW_S]
+    _login_failures[key] = stamps
+    return len(stamps) >= LOGIN_MAX_FAILURES
+
+
+def record_login_failure(key: str, *, now: float | None = None) -> None:
+    at = now if now is not None else datetime.now(timezone.utc).timestamp()
+    stamps = [t for t in _login_failures.get(key, []) if at - t < LOGIN_WINDOW_S]
+    stamps.append(at)
+    _login_failures[key] = stamps
+
+
+def clear_login_failures(key: str) -> None:
+    _login_failures.pop(key, None)
 
 
 def authenticate(conn: sqlite3.Connection, username: str, password: str) -> dict[str, Any] | None:

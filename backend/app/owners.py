@@ -1,11 +1,12 @@
 """Request-scoped personal-data owner.
 
 Routes bind the authenticated user. Stores resolve owner from an explicit
-argument, the context, or (tests only) the first seeded user in the DB.
+argument or the request context. The first-user fallback is tests only.
 """
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Iterator
@@ -43,13 +44,19 @@ def first_user_id(conn) -> str | None:
     return row["id"] if hasattr(row, "keys") else row[0]
 
 
+def owner_fallback_allowed() -> bool:
+    raw = os.environ.get("BUDDY_OWNER_FALLBACK", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def resolve_owner(conn, explicit: str | None = None) -> str:
     if explicit:
         return explicit
     ctx = current_owner_id()
     if ctx:
         return ctx
-    fallback = first_user_id(conn)
-    if fallback:
-        return fallback
+    if owner_fallback_allowed():
+        fallback = first_user_id(conn)
+        if fallback:
+            return fallback
     raise RuntimeError("owner_user_id required")

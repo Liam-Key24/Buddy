@@ -236,9 +236,15 @@ class ControlPlane:
         *,
         include_target: bool = False,
     ) -> dict[str, Any]:
+        if not self.conversations.get(conversation_id):
+            return {"ok": False, "reverted": 0}
+        oid = resolve_owner(self.conn)
         row = self.conn.execute(
-            "SELECT * FROM messages WHERE id=? AND conversation_id=?",
-            (message_id, conversation_id),
+            """
+            SELECT * FROM messages
+            WHERE id=? AND conversation_id=? AND owner_user_id=?
+            """,
+            (message_id, conversation_id, oid),
         ).fetchone()
         if not row:
             return {"ok": False, "reverted": 0}
@@ -562,7 +568,16 @@ class ControlPlane:
 
     @with_owner
     def cancel_request(self, request_id: str) -> dict[str, Any]:
+        oid = resolve_owner(self.conn)
         entry = self._active_requests.get(request_id)
+        if entry is not None and entry.get("owner_user_id") not in {None, oid}:
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "found": False,
+                "turn_status": "unknown",
+                "committed": False,
+            }
         committed = False
         if entry is not None:
             entry["cancelled"] = True
@@ -701,7 +716,12 @@ class ControlPlane:
         existing = self.turns.get(rid)
         if existing and existing.get("response"):
             return ChatResponse.model_validate(existing["response"])
-        self._active_requests[rid] = {"cancelled": False, "http_client": None, "owns_http_client": False}
+        self._active_requests[rid] = {
+            "cancelled": False,
+            "http_client": None,
+            "owns_http_client": False,
+            "owner_user_id": resolve_owner(self.conn),
+        }
         try:
             cid = (existing or {}).get("conversation_id") or self._ensure_conversation(conversation_id)
             with self._lock_for_conversation(cid):

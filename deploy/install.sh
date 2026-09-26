@@ -29,7 +29,7 @@ install -d -o root -g buddy -m 0750 /etc/buddy
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f /etc/buddy/env ]]; then
-  install -o root -g buddy -m 0640 "${SCRIPT_DIR}/env.production.example" /etc/buddy/env
+  install -o root -g root -m 0600 "${SCRIPT_DIR}/env.production.example" /etc/buddy/env
   echo "wrote /etc/buddy/env from example — edit secrets before start"
 else
   echo "/etc/buddy/env already exists — left unchanged"
