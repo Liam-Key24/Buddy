@@ -239,14 +239,8 @@ export const APP_VERSION = "0.1.0";
 export type HealthResponse = {
   ok: boolean;
   product: string;
-  ai: {
-    label: string;
-    enabled: boolean;
-    configured: boolean;
-    model_configured: string;
-  };
-  db: string;
-  host: string;
+  database: "available" | "unavailable" | string;
+  ai: "configured" | "unconfigured" | string;
   privacy: string;
 };
 
