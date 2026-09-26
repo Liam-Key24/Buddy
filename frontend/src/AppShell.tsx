@@ -1,9 +1,7 @@
-import { List } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Outlet } from "react-router-dom";
 import { ChatNavProvider } from "./chatNav";
 import { MobileNav, SharedSidebar } from "./components/SharedSidebar";
-import { IconButton } from "./components/ui/IconButton";
 import { GoalCompleteProvider } from "./components/ui/GoalCompleteOverlay";
 import { ToastProvider } from "./components/ui/Toast";
 
@@ -23,12 +21,7 @@ export function AppShell() {
               onCloseMobile={() => setMobileOpen(false)}
             />
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <div className="flex items-center gap-2 px-3 pt-3 md:hidden">
-                <IconButton label="Open menu" onClick={() => setMobileOpen(true)}>
-                  <List size={20} />
-                </IconButton>
-              </div>
-              <main className="min-h-0 min-w-0 flex-1 overflow-hidden pb-16 md:pb-0">
+              <main className="min-h-0 min-w-0 flex-1 overflow-hidden pb-16 lg:pb-0">
                 <Outlet />
               </main>
             </div>

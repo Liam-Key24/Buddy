@@ -88,7 +88,7 @@ export function SharedSidebar({
 
   return (
     <>
-      <div className="hidden h-full md:block">
+      <div className="hidden h-full lg:block">
         <SidebarPanel
           compact={compact}
           onToggleCollapsed={onToggleCollapsed}
@@ -96,7 +96,7 @@ export function SharedSidebar({
         />
       </div>
       {mobileOpen && (
-        <div className="fixed inset-0 z-30 md:hidden">
+        <div className="fixed inset-0 z-30 lg:hidden">
           <button
             type="button"
             className="absolute inset-0 bg-overlay"
@@ -260,11 +260,11 @@ function SidebarPanel({
         <IconButton
           label={compact ? "Expand sidebar" : "Collapse sidebar"}
           onClick={onToggleCollapsed}
-          className="hidden md:inline-flex"
+          className="hidden lg:inline-flex"
         >
           <SidebarSimple size={18} />
         </IconButton>
-        <IconButton label="Close menu" onClick={onCloseMobile} className="md:hidden">
+        <IconButton label="Close menu" onClick={onCloseMobile} className="lg:hidden">
           <X size={18} />
         </IconButton>
       </div>
@@ -619,12 +619,12 @@ export function MobileNav({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   ];
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-20 flex items-center justify-around border-t border-hairline bg-sidebar px-1 py-1.5 md:hidden"
+      className="fixed inset-x-0 bottom-0 z-20 flex items-center justify-around border-t border-hairline bg-sidebar px-1 py-1.5 lg:hidden"
       aria-label="Mobile"
     >
       <button
         type="button"
-        className="grid size-10 place-items-center text-muted"
+        className="grid size-10 place-items-center rounded-xl text-muted"
         aria-label="Open menu"
         onClick={onOpenSidebar}
       >
@@ -639,7 +639,10 @@ export function MobileNav({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             end={item.end}
             aria-label={item.label}
             className={({ isActive }) =>
-              cn("grid size-10 place-items-center text-muted", isActive && "text-mint")
+              cn(
+                "grid size-10 place-items-center rounded-xl text-muted",
+                isActive && "bg-raised-soft text-mint",
+              )
             }
           >
             <Icon size={22} />
@@ -648,7 +651,7 @@ export function MobileNav({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       })}
       <button
         type="button"
-        className="grid size-10 place-items-center text-muted"
+        className="grid size-10 place-items-center rounded-xl text-muted"
         aria-label="New chat"
         onClick={() => void newChat()}
       >

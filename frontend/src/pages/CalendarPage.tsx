@@ -18,6 +18,7 @@ import { CategoryPanel, type CategoryDraft } from "../components/CategoryPanel";
 import { CategoryIcon } from "../components/CategoryIcon";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Button } from "../components/ui/Button";
+import { EmptyState } from "../components/ui/EmptyState";
 import { FrostFloat } from "../components/ui/FrostFloat";
 import { IconButton } from "../components/ui/IconButton";
 import { Surface } from "../components/ui/Surface";
@@ -108,6 +109,28 @@ function formatRange(session: Session): string {
   return `${a} – ${b}`;
 }
 
+function formatShortTime(iso: string): string {
+  return new Date(iso)
+    .toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    .replace(":00", "");
+}
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function categoryDotsForDay(rows: Session[]): { colors: string[]; extra: boolean } {
+  const colors: string[] = [];
+  const seen = new Set<string>();
+  for (const s of rows) {
+    const color = s.category?.color || "#c5d9a0";
+    if (seen.has(color)) continue;
+    seen.add(color);
+    colors.push(color);
+  }
+  return { colors: colors.slice(0, 3), extra: colors.length > 3 };
+}
+
 function groupFixedBlocks(blocks: FixedBlock[]) {
   const map = new Map<
     string,
@@ -175,7 +198,9 @@ function sameDay(a: Date, b: Date) {
 
 export function CalendarPage() {
   const calendarRef = useRef<FullCalendar | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches,
+  );
   const [sessions, setSessions] = useState<Session[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>(loadCategoryFilters);
@@ -234,6 +259,18 @@ export function CalendarPage() {
   useEffect(() => {
     saveCategoryFilters(enabled);
   }, [enabled]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => {
+      setSidebarOpen(mq.matches);
+      if (mq.matches) {
+        requestAnimationFrame(() => calendarRef.current?.getApi().updateSize());
+      }
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const filterCats = useMemo(() => uniqueCategories(categories), [categories]);
 
@@ -312,6 +349,42 @@ export function CalendarPage() {
     [miniCursor],
   );
 
+  const sessionsByDay = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    for (const s of filtered) {
+      const key = dayKey(new Date(s.start_at));
+      const list = map.get(key) || [];
+      list.push(s);
+      map.set(key, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.start_at.localeCompare(b.start_at));
+    }
+    return map;
+  }, [filtered]);
+
+  const selectedDaySessions = useMemo(
+    () => sessionsByDay.get(dayKey(selectedDay)) || [],
+    [sessionsByDay, selectedDay],
+  );
+
+  const selectedDayLabel = useMemo(
+    () =>
+      selectedDay.toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "short",
+        day: "numeric",
+      }),
+    [selectedDay],
+  );
+
+  function shiftMiniMonth(delta: number) {
+    setMiniCursor((c) => {
+      const d = new Date(c.year, c.month + delta, 1);
+      return { year: d.getFullYear(), month: d.getMonth() };
+    });
+  }
+
   const events = useMemo(() => {
     const sessionEvents = filtered.map((s) => {
       const color = s.category?.color || "#c5d9a0";
@@ -350,9 +423,14 @@ export function CalendarPage() {
 
 
   function openEventModal() {
-    const start = new Date();
-    start.setMinutes(0, 0, 0);
-    if (new Date().getMinutes() > 0) start.setHours(start.getHours() + 1);
+    const start = new Date(selectedDay);
+    const now = new Date();
+    if (sameDay(start, now)) {
+      start.setHours(now.getHours(), 0, 0, 0);
+      if (now.getMinutes() > 0) start.setHours(start.getHours() + 1);
+    } else {
+      start.setHours(9, 0, 0, 0);
+    }
     const end = new Date(start);
     end.setHours(end.getHours() + 1);
     setEventTitle("");
@@ -545,6 +623,7 @@ export function CalendarPage() {
   function jumpToDay(date: Date) {
     setSelectedDay(date);
     setMiniCursor({ year: date.getFullYear(), month: date.getMonth() });
+    setSelected((prev) => (prev && sameDay(new Date(prev.start_at), date) ? prev : null));
     const api = calendarRef.current?.getApi();
     if (api) api.gotoDate(date);
   }
@@ -642,9 +721,30 @@ export function CalendarPage() {
 
 
   return (
-    <section className="flex h-full min-h-0 gap-4 bg-page p-4">
+    <section className="flex h-full min-h-0 gap-3 bg-page p-3 lg:gap-4 lg:p-4">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="cal-head relative mb-3 flex items-center gap-2">
+        <header className="cal-head mb-3 flex items-center gap-2 lg:hidden">
+          <IconButton
+            label={sidebarOpen ? "Close calendar panel" : "Open calendar panel"}
+            onClick={() => setSidebarOpen((v) => !v)}
+          >
+            <FunnelSimple size={18} />
+          </IconButton>
+          <IconButton label="Previous month" size="sm" onClick={() => shiftMiniMonth(-1)}>
+            <CaretLeft size={16} />
+          </IconButton>
+          <IconButton label="Next month" size="sm" onClick={() => shiftMiniMonth(1)}>
+            <CaretRight size={16} />
+          </IconButton>
+          <h1 className="m-0 min-w-0 flex-1 truncate font-display text-base font-medium tracking-tight">
+            {miniLabel}
+          </h1>
+          <IconButton label="Add event" onClick={openEventModal}>
+            <Plus size={18} weight="bold" />
+          </IconButton>
+        </header>
+
+        <header className="cal-head relative mb-3 hidden items-center gap-2 lg:flex">
           <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5">
             <Button
               tone="ghost"
@@ -701,9 +801,101 @@ export function CalendarPage() {
           <div className="mb-2 rounded-card bg-danger/15 px-3 py-2 text-sm text-danger">{error}</div>
         )}
 
+        <div className="flex min-h-0 flex-1 flex-col lg:hidden">
+          <div className="cal-compact-month shrink-0">
+            <div className="mb-1 grid grid-cols-7 text-center text-[10px] tracking-wide text-muted uppercase">
+              {WEEKDAY_LABELS.map((d) => (
+                <span key={d} className="py-1">
+                  {d.slice(0, 2)}
+                </span>
+              ))}
+            </div>
+            <div className="grid grid-cols-7">
+              {miniCells.map((cell, i) => {
+                const selected = sameDay(cell.date, selectedDay);
+                const isToday = sameDay(cell.date, new Date());
+                const dots = categoryDotsForDay(sessionsByDay.get(dayKey(cell.date)) || []);
+                return (
+                  <button
+                    key={`${cell.date.toISOString()}-${i}`}
+                    type="button"
+                    onClick={() => jumpToDay(cell.date)}
+                    className={cn(
+                      "cal-compact-cell",
+                      !cell.inMonth && "is-out",
+                      selected && "is-selected",
+                    )}
+                  >
+                    <span className={cn("cal-compact-num", isToday && "is-today")}>{cell.day}</span>
+                    <span className="cal-compact-dots">
+                      {dots.colors.map((color) => (
+                        <span
+                          key={color}
+                          className="cal-compact-dot"
+                          style={{ background: color }}
+                        />
+                      ))}
+                      {dots.extra && <span className="cal-compact-dot is-more" />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="cal-compact-agenda min-h-0 flex-1 overflow-y-auto">
+            <p className="cal-compact-agenda-label">{selectedDayLabel}</p>
+            {selectedDaySessions.length ? (
+              <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+                {selectedDaySessions.map((s) => (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(s)}
+                      className={cn(
+                        "cal-compact-row",
+                        selected?.id === s.id && "is-active",
+                      )}
+                    >
+                      <span className="cal-compact-time">{formatShortTime(s.start_at)}</span>
+                      <span
+                        className="grid size-5 shrink-0 place-items-center"
+                        style={s.category?.color ? { color: s.category.color } : undefined}
+                      >
+                        <CategoryIcon
+                          name={s.category?.icon || s.category?.name || ""}
+                          size={16}
+                        />
+                      </span>
+                      <strong className="min-w-0 flex-1 truncate text-sm font-medium">{s.title}</strong>
+                      {s.status === "completed" ? (
+                        <CheckCircle size={16} weight="fill" className="shrink-0 text-ok" aria-label="Completed" />
+                      ) : s.status === "missed" ? (
+                        <X size={16} weight="bold" className="shrink-0 text-danger" aria-label="Missed" />
+                      ) : s.status === "proposed" ? (
+                        <Clock size={16} className="shrink-0 text-warn" aria-label="Proposed" />
+                      ) : null}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyState
+                action={
+                  <IconButton label="Add event" onClick={openEventModal}>
+                    <Plus size={18} weight="bold" />
+                  </IconButton>
+                }
+              >
+                No sessions
+              </EmptyState>
+            )}
+          </div>
+        </div>
+
         <div
           className={cn(
-            "cal-grid-wrap min-h-0 flex-1",
+            "cal-grid-wrap hidden min-h-0 flex-1 lg:block",
             view === "dayGridMonth" && "is-month",
           )}
         >
@@ -753,7 +945,7 @@ export function CalendarPage() {
         </div>
 
         {selected && (
-          <FrostFloat className="mt-3 p-3">
+          <FrostFloat className="mt-3 shrink-0 p-3">
             <div className="flex items-start gap-2">
               <Tag
                 icon={
@@ -818,7 +1010,7 @@ export function CalendarPage() {
 
       {sidebarOpen && (
         <aside
-          className="fixed inset-y-0 right-0 z-20 flex h-full w-[22rem] flex-col gap-3 overflow-y-auto bg-page p-3 xl:static xl:z-0 xl:w-80 xl:shrink-0 xl:bg-transparent xl:p-0"
+          className="fixed inset-y-0 right-0 z-20 flex h-full w-[22rem] flex-col gap-3 overflow-y-auto bg-page p-3 pb-20 lg:pb-3 xl:static xl:z-0 xl:w-80 xl:shrink-0 xl:bg-transparent xl:p-0"
           aria-label="Calendar panel"
         >
           <div className="mb-1 flex items-center justify-between xl:hidden">
@@ -828,7 +1020,7 @@ export function CalendarPage() {
             </IconButton>
           </div>
 
-          <Surface className="rounded-3xl border-0 bg-raised/90">
+          <Surface className="hidden rounded-3xl border-0 bg-raised/90 lg:block">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="m-0 text-sm font-medium capitalize">{miniLabel}</h3>
               <div className="flex gap-1">
@@ -909,7 +1101,7 @@ export function CalendarPage() {
             </div>
           </Surface>
 
-          <Surface className="rounded-3xl border-0 bg-raised/90">
+          <Surface className="hidden rounded-3xl border-0 bg-raised/90 lg:block">
             {nextUp ? (
               <>
                 <div className="mb-2 flex items-start justify-between gap-2">
