@@ -113,11 +113,13 @@ class GroqProvider:
         self.validate_model()
         if cancel_check and cancel_check():
             raise GroqError("cancelled", "Stopped")
+        # Keep one completion inside a small per-minute token budget.
+        max_out = min(max(self.settings.max_output_tokens, 1), 1024)
         payload = {
             "model": self.settings.groq_model,
             "temperature": 0.2,
-            "max_completion_tokens": self.settings.max_output_tokens,
-            "max_tokens": self.settings.max_output_tokens,
+            "max_completion_tokens": max_out,
+            "max_tokens": max_out,
             "reasoning_effort": "low",
             "include_reasoning": True,
             "messages": [
@@ -158,6 +160,8 @@ class GroqProvider:
             message = body["choices"][0]["message"]
             content = _message_text(message)
             usage = body.get("usage") or {}
+            details = usage.get("prompt_tokens_details") or {}
+            cached_tokens = details.get("cached_tokens") if isinstance(details, dict) else None
             rate_limit, rate_remaining, rate_reset = _rate_headers(resp)
             self.last_stats = GroqCallStats(
                 latency_ms=int((time.perf_counter() - started) * 1000),
@@ -170,10 +174,11 @@ class GroqProvider:
                 rate_reset=rate_reset,
             )
             log.info(
-                "groq_ok latency_ms=%s status=%s prompt_tokens=%s completion_tokens=%s content_len=%s retried=%s",
+                "groq_ok latency_ms=%s status=%s prompt_tokens=%s cached_tokens=%s completion_tokens=%s content_len=%s retried=%s",
                 self.last_stats.latency_ms,
                 status,
                 self.last_stats.tokens_prompt,
+                cached_tokens,
                 self.last_stats.tokens_completion,
                 len(content or ""),
                 retried,

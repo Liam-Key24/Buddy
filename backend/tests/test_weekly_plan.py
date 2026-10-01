@@ -108,6 +108,49 @@ def test_frequency_parses_ranges():
     assert frequency_to_weekly_count("once a week") == 1
 
 
+def test_null_plan_times_still_propose_sessions(tmp_path: Path):
+    """Cloud AI often sends JSON null for hours. That must not raise TypeError."""
+    plane = ControlPlane(db_path=tmp_path / "null-times.db", ai=None)
+    try:
+        cid = plane._ensure_conversation(None)
+        stores = GoalStore(plane.conn)
+        goal = stores.create(
+            cid,
+            title="Save £3,000 by 1 April 2027",
+            target="£3,000",
+            deadline="2027-04-01",
+            frequency="monthly",
+            status="ready_to_plan",
+            facts={
+                "weekly_plan": {
+                    "pattern_summary": "Transfer savings once a week",
+                    "prefer_after_hour": None,
+                    "window_end_hour": None,
+                    "avoid_weekdays": [None, "Saturday"],
+                    "slots": [
+                        {
+                            "weekday": "Monday",
+                            "title": "Transfer savings",
+                            "start_hour": None,
+                            "start_minute": None,
+                            "duration_minutes": None,
+                        }
+                    ],
+                }
+            },
+        )
+        from app.planning import propose_for_goal
+
+        text, sessions, summary = propose_for_goal(plane.calendar, goal)
+        assert sessions
+        assert summary["total"] == len(sessions)
+        assert all(s.title == "Transfer savings" for s in sessions)
+        assert "TypeError" not in text
+        assert all(datetime.fromisoformat(s.start_at).weekday() == 0 for s in sessions)
+    finally:
+        plane.close()
+
+
 def test_one_off_8pm_is_a_single_session(tmp_path: Path):
     from datetime import timedelta
 

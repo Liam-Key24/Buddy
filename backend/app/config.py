@@ -9,8 +9,24 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _prefer_injected_secret(name: str) -> str:
+    """Keep a real process secret. A blank value must not block backend/.env."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    if name in os.environ:
+        os.environ.pop(name, None)
+    return ""
+
+
+# Injected Cloud Agent secrets win over a blank GROQ_API_KEY= line in .env.
+_injected_groq_key = _prefer_injected_secret("GROQ_API_KEY")
 # Load backend/.env for local/dev. Never commit this file.
 load_dotenv(_BACKEND_ROOT / ".env", override=False)
+if _injected_groq_key:
+    os.environ["GROQ_API_KEY"] = _injected_groq_key
 
 DEFAULT_DB = _BACKEND_ROOT / "data" / "buddy.db"
 DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -98,7 +114,8 @@ def load_settings() -> Settings:
         # Default on when a key is present; set BUDDY_AI_ENABLED=0 to force local-only.
         ai_enabled=_env_bool("BUDDY_AI_ENABLED", default=True),
         request_timeout_s=_env_float("BUDDY_GROQ_TIMEOUT_S", 45.0),
-        max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 8192),
+        # 1024 matches the README. 8192 can exceed this model's per-minute token budget in one reply.
+        max_output_tokens=_env_int("BUDDY_GROQ_MAX_TOKENS", 1024),
         cors_origins=_env_cors(DEFAULT_CORS_ORIGINS),
         static_dir=static_dir,
         session_secret=os.environ.get("BUDDY_SESSION_SECRET", "").strip(),

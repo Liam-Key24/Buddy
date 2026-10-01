@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 
-from .calendar import CalendarService, is_one_off_goal
+from .calendar import CalendarService, as_int, as_weekday, is_one_off_goal
 from .schemas import Goal, SessionOut
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -29,13 +29,13 @@ def pattern_summary_from_goal(goal: Goal) -> str | None:
     for slot in slots:
         if not isinstance(slot, dict):
             continue
-        wd = slot.get("weekday")
+        wd = as_weekday(slot.get("weekday"))
         title = slot.get("title") or "Session"
-        if not isinstance(wd, int) or not (0 <= wd <= 6):
+        if wd is None:
             continue
-        start_h = int(slot.get("start_hour", 17))
-        start_m = int(slot.get("start_minute", 30))
-        dur = int(slot.get("duration_minutes") or 60)
+        start_h = as_int(slot.get("start_hour"), 17, low=0, high=23)
+        start_m = as_int(slot.get("start_minute"), 30, low=0, high=59)
+        dur = as_int(slot.get("duration_minutes"), 60, low=15, high=240)
         start_min = start_h * 60 + start_m
         end_min = start_min + dur
         parts.append(f"{_WEEKDAYS[wd]} {title} {_fmt_hm(start_min)}–{_fmt_hm(end_min)}")
@@ -170,9 +170,9 @@ def propose_for_goal(calendar: CalendarService, goal: Goal) -> tuple[str, list[S
     prefer_after = 17
     avoid: list[int] = []
     if isinstance(plan, dict):
-        prefer_after = int(plan.get("prefer_after_hour", 17))
+        prefer_after = as_int(plan.get("prefer_after_hour"), 17, low=0, high=22)
         if isinstance(plan.get("avoid_weekdays"), list):
-            avoid = [int(x) for x in plan["avoid_weekdays"] if isinstance(x, int)]
+            avoid = [day for day in (as_weekday(x) for x in plan["avoid_weekdays"]) if day is not None]
 
     sessions = calendar.propose_goal_sessions(goal)
     if not sessions:

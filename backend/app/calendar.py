@@ -21,6 +21,63 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+def as_int(value: Any, default: int, *, low: int | None = None, high: int | None = None) -> int:
+    """Coerce model-supplied plan numbers. Null and junk fall back to default."""
+    number = default
+    if isinstance(value, bool) or value is None:
+        number = default
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            number = int(text)
+        except ValueError:
+            number = default
+    if low is not None:
+        number = max(low, number)
+    if high is not None:
+        number = min(high, number)
+    return number
+
+
+_WEEKDAY_NAMES = {
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "fri": 4,
+    "friday": 4,
+    "sat": 5,
+    "saturday": 5,
+    "sun": 6,
+    "sunday": 6,
+}
+
+
+def as_weekday(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= 6 else None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text.isdigit():
+            number = int(text)
+            return number if 0 <= number <= 6 else None
+        return _WEEKDAY_NAMES.get(text)
+    return None
+
+
 _CLOCK_RE = re.compile(
     r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\b\d{1,2}:\d{2}\b",
     re.I,
@@ -681,9 +738,11 @@ class CalendarService:
         slots = [s for s in plan.get("slots", []) if isinstance(s, dict)]
         avoid = set()
         if isinstance(plan.get("avoid_weekdays"), list):
-            avoid = {int(x) for x in plan["avoid_weekdays"] if isinstance(x, int)}
-        window_start = int(plan.get("prefer_after_hour", 17))
-        window_end = int(plan.get("window_end_hour", 21))
+            avoid = {day for day in (as_weekday(x) for x in plan["avoid_weekdays"]) if day is not None}
+        window_start = as_int(plan.get("prefer_after_hour"), 17, low=0, high=23)
+        window_end = as_int(plan.get("window_end_hour"), 21, low=0, high=23)
+        if window_end <= window_start:
+            window_end = min(23, window_start + 1)
         one_off = is_one_off_goal(goal, plan)
 
         chosen: list[tuple[datetime, datetime, str]] = []
@@ -698,9 +757,14 @@ class CalendarService:
             ]
             for spec in specs:
                 title = str(spec.get("title") or goal.title).strip() or goal.title
-                duration = int(spec.get("duration_minutes") or session_duration_minutes(goal.domain))
-                prefer_hour = int(spec.get("start_hour", window_start))
-                prefer_minute = int(spec.get("start_minute", 0))
+                duration = as_int(
+                    spec.get("duration_minutes"),
+                    session_duration_minutes(goal.domain),
+                    low=15,
+                    high=240,
+                )
+                prefer_hour = as_int(spec.get("start_hour"), window_start, low=0, high=23)
+                prefer_minute = as_int(spec.get("start_minute"), 0, low=0, high=59)
                 end_hour = min(23, max(window_end, prefer_hour + 1))
                 placed = self._slot_on_day(
                     start_day,
@@ -729,13 +793,18 @@ class CalendarService:
                 day += timedelta(days=1)
                 continue
             for spec in slots:
-                wd = spec.get("weekday")
-                if not isinstance(wd, int) or wd != day.weekday():
+                wd = as_weekday(spec.get("weekday"))
+                if wd is None or wd != day.weekday():
                     continue
                 title = str(spec.get("title") or goal.title).strip() or goal.title
-                duration = int(spec.get("duration_minutes") or session_duration_minutes(goal.domain))
-                prefer_hour = int(spec.get("start_hour", window_start))
-                prefer_minute = int(spec.get("start_minute", 30))
+                duration = as_int(
+                    spec.get("duration_minutes"),
+                    session_duration_minutes(goal.domain),
+                    low=15,
+                    high=240,
+                )
+                prefer_hour = as_int(spec.get("start_hour"), window_start, low=0, high=23)
+                prefer_minute = as_int(spec.get("start_minute"), 30, low=0, high=59)
                 placed = self._slot_on_day(
                     day,
                     duration_minutes=duration,
@@ -768,7 +837,7 @@ class CalendarService:
         ]
         default_dur = session_duration_minutes(goal.domain)
         if slots:
-            default_dur = int(slots[0].get("duration_minutes") or default_dur)
+            default_dur = as_int(slots[0].get("duration_minutes"), default_dur, low=15, high=240)
         self._append_catch_up(
             goal,
             chosen,
