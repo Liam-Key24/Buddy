@@ -27,6 +27,16 @@ export function draftPayload(input: string, answers: Record<string, string>) {
   };
 }
 
+export function cloudAiStatusMessage(reply: string): string {
+  if (/rate limit/i.test(reply)) {
+    return "Cloud AI is rate-limited right now. Today, Calendar and Sparks still work.";
+  }
+  if (/GROQ_API_KEY/i.test(reply)) {
+    return "Cloud AI needs a GROQ_API_KEY on the backend. Today, Calendar and Sparks still work.";
+  }
+  return "Cloud AI is temporarily unavailable. Today, Calendar and Sparks still work.";
+}
+
 export function lateReplyToastMessage(title: string | null | undefined): string {
   const label = (title || "").trim() || "another chat";
   return `Buddy replied in ${label}`;

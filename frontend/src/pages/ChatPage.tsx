@@ -17,6 +17,7 @@ import {
 } from "react";
 import {
   chatResultBelongsToView,
+  cloudAiStatusMessage,
   draftPayload,
   draftReadyToSave,
   lateReplyToastMessage,
@@ -366,7 +367,9 @@ export function ChatPage() {
     if (res.undo_batch_id) setUndoBatchId(res.undo_batch_id);
     setMessages((m) => [...m, { role: "assistant", content: res.reply }]);
     if (res.ai_available === false) {
-      setError("Cloud AI is temporarily unavailable. Today, Calendar and Sparks still work.");
+      setError(cloudAiStatusMessage(res.reply || ""));
+    } else {
+      setError(null);
     }
     refresh().catch(() => undefined);
     return true;

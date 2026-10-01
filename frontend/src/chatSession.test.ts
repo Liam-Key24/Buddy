@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   chatResultBelongsToView,
+  cloudAiStatusMessage,
   draftPayload,
   draftReadyToSave,
   lateReplyToastMessage,
   shouldPersistDraft,
 } from "./chatSession";
+
+describe("cloudAiStatusMessage", () => {
+  it("says when the key is missing", () => {
+    expect(cloudAiStatusMessage("add GROQ_API_KEY to continue")).toMatch(/GROQ_API_KEY/);
+  });
+
+  it("says when Groq rate-limits the key", () => {
+    expect(
+      cloudAiStatusMessage("I couldn't reach Cloud AI just now. (rate limit)"),
+    ).toMatch(/rate-limited/);
+  });
+
+  it("keeps a generic unavailable message otherwise", () => {
+    expect(cloudAiStatusMessage("transport error")).toMatch(/temporarily unavailable/);
+  });
+});
 
 describe("shouldPersistDraft", () => {
   it("saves clarification answers when the composer is empty", () => {
