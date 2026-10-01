@@ -158,6 +158,53 @@ def test_cancel_closes_only_the_request_client():
         plane.close()
 
 
+def test_groq_caps_completion_budget_even_if_env_asks_for_more():
+    """8192 completion tokens can exceed this model's per-minute budget in one reply."""
+    settings = _settings(max_output_tokens=8192)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": settings.groq_model}]})
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"assistant_text":"ok"}'}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test/v1")
+    provider = GroqProvider(settings, client=client)
+    provider.complete_json("system", "user")
+    assert seen["body"]["max_tokens"] == 1024
+    assert seen["body"]["max_completion_tokens"] == 1024
+
+
+def test_rate_limit_reply_names_the_per_minute_token_budget(tmp_path: Path):
+    class Limited:
+        def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict:
+            del system, user, allow_retry, kwargs
+            raise GroqError("rate_limit", "Cloud AI is rate-limited right now")
+
+        def close(self) -> None:
+            return None
+
+    svc = ControlPlane(db_path=tmp_path / "rate.db", ai=Limited())
+    try:
+        res = svc.handle_message("plan three climbs this week")
+        assert res.ai_available is False
+        assert "rate limit" in res.reply.lower()
+        assert "8,000" in res.reply
+    finally:
+        svc.close()
+
+
 def test_groq_does_not_retry_ordinary_4xx():
     posts = {"n": 0}
 

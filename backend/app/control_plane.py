@@ -926,11 +926,19 @@ class ControlPlane:
                     activity=[{"stage": "cancelled", "label": "Stopped", "detail": "No calendar changes"}],
                 )
                 return self._finish_response(request_id, cid, response, status="cancelled")
-            reply = (
-                "I couldn't reach Cloud AI just now, so I didn't change your plan. "
-                f"({exc.category.replace('_', ' ')}) "
-                "Today, Calendar and Sparks remain available."
-            )
+            if exc.category == "rate_limit":
+                reply = (
+                    "Cloud AI hit a rate limit (per-minute tokens), so I didn't change your plan. "
+                    "A few chats in a row can do that: each one resends the planning prompt, "
+                    "and this model allows about 8,000 tokens a minute. Wait a minute and send once. "
+                    "Today, Calendar and Sparks remain available."
+                )
+            else:
+                reply = (
+                    "I couldn't reach Cloud AI just now, so I didn't change your plan. "
+                    f"({exc.category.replace('_', ' ')}) "
+                    "Today, Calendar and Sparks remain available."
+                )
             self._add_message(cid, "assistant", reply)
             response = ChatResponse(
                 conversation_id=cid,
