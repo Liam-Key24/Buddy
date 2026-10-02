@@ -198,6 +198,143 @@ def test_one_off_8pm_is_a_single_session(tmp_path: Path):
         plane.close()
 
 
+def test_plan_on_propose_payload_is_written_to_the_calendar(tmp_path: Path):
+    """Groq puts weekly_plan on propose_sessions, not on the goal. That still has to schedule."""
+
+    class PlanOnPropose:
+        def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict:
+            del system, user, allow_retry, kwargs
+            return {
+                "assistant_text": "Monday evening transfers, starting at 17:30.",
+                "intents": ["goal_create", "goal_plan_request"],
+                "operations": [
+                    {
+                        "kind": "goal_create",
+                        "target_ref": "savings",
+                        "payload": {
+                            "title": "Save £3,000",
+                            "deadline": "2027-04-01",
+                            "target": "£3,000",
+                            "frequency": "weekly",
+                            "status": "gathering",
+                            "facts": {},
+                        },
+                    },
+                    {
+                        "kind": "propose_sessions",
+                        "target_ref": "savings",
+                        "payload": {
+                            "weekly_plan": {
+                                "pattern_summary": "Monday transfer 17:30",
+                                "repeat": "weekly",
+                                "prefer_after_hour": 17,
+                                "window_end_hour": 21,
+                                "slots": [
+                                    {
+                                        "weekday": 0,
+                                        "title": "Transfer savings",
+                                        "start_hour": 17,
+                                        "start_minute": 30,
+                                        "duration_minutes": 30,
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ],
+                "goal_updates": [],
+                "requested_action": {"type": "propose_sessions"},
+                "confidence": 0.9,
+            }
+
+        def close(self) -> None:
+            return None
+
+    plane = ControlPlane(db_path=tmp_path / "apply-plan.db", ai=PlanOnPropose())
+    try:
+        result = plane.handle_message(
+            "Save £3,000 by 1 April 2027. Transfer £100 every Monday evening after work."
+        )
+        proposed = result.proposed_sessions or []
+        assert proposed, result.reply
+        assert all(s.title == "Transfer savings" for s in proposed)
+        starts = [datetime.fromisoformat(s.start_at) for s in proposed]
+        assert all(start.weekday() == 0 for start in starts)
+        assert all(start.hour == 17 and start.minute == 30 for start in starts)
+        assert result.goal is not None
+        slots = ((result.goal.facts or {}).get("weekly_plan") or {}).get("slots") or []
+        assert slots
+    finally:
+        plane.close()
+
+
+def test_empty_operation_uses_goal_update_title_and_propose_plan(tmp_path: Path):
+    """The model often leaves operations[].payload empty and puts the goal on goal_updates."""
+
+    class SplitFields:
+        def complete_json(self, system: str, user: str, *, allow_retry: bool = True, **kwargs) -> dict:
+            del system, user, allow_retry, kwargs
+            return {
+                "assistant_text": "Monday evening transfers, starting at 17:30.",
+                "intents": ["goal_create", "goal_plan_request"],
+                "operations": [
+                    {"kind": "goal_create", "target_ref": "goal_1", "payload": {}},
+                    {
+                        "kind": "propose_sessions",
+                        "target_ref": "goal_1",
+                        "payload": {
+                            "weekly_plan": {
+                                "pattern_summary": "Monday transfer 17:30",
+                                "repeat": "weekly",
+                                "prefer_after_hour": 17,
+                                "window_end_hour": 21,
+                                "slots": [
+                                    {
+                                        "weekday": "Monday",
+                                        "title": "Transfer savings",
+                                        "start_hour": 17,
+                                        "start_minute": 30,
+                                        "duration_minutes": 30,
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ],
+                "goal_updates": [
+                    {
+                        "action": "create",
+                        "title": "Save £3,000",
+                        "target": "£3,000",
+                        "deadline": "2027-04-01",
+                        "frequency": "weekly",
+                        "status": "gathering",
+                        "facts": {},
+                    }
+                ],
+                "requested_action": {"type": "propose_sessions"},
+                "confidence": 0.9,
+            }
+
+        def close(self) -> None:
+            return None
+
+    plane = ControlPlane(db_path=tmp_path / "split-fields.db", ai=SplitFields())
+    try:
+        result = plane.handle_message(
+            "Save £3,000 by 1 April 2027. Transfer £100 every Monday evening after work."
+        )
+        assert result.goal is not None
+        assert result.goal.title == "Save £3,000"
+        proposed = result.proposed_sessions or []
+        assert proposed, result.reply
+        assert all(s.title == "Transfer savings" for s in proposed)
+        starts = [datetime.fromisoformat(s.start_at) for s in proposed]
+        assert all(start.weekday() == 0 and start.hour == 17 and start.minute == 30 for start in starts)
+    finally:
+        plane.close()
+
+
 def test_chat_8pm_single_event_is_one_session(tmp_path: Path):
     from tests.fake_ai import FakeGroq
 
