@@ -1447,6 +1447,36 @@ class ControlPlane:
         return bool(goal.frequency or goal.commitment or has_plan)
 
     @staticmethod
+    def _weekly_plan_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Cloud AI often puts the schedule on propose_sessions, not on the goal."""
+        plan = payload.get("weekly_plan")
+        if not isinstance(plan, dict):
+            facts = payload.get("facts")
+            if isinstance(facts, dict):
+                plan = facts.get("weekly_plan")
+        if not isinstance(plan, dict):
+            return None
+        slots = plan.get("slots")
+        if not isinstance(slots, list) or not slots:
+            return None
+        return plan
+
+    def _attach_plan_from_operation(self, goal: Goal, payload: dict[str, Any]) -> Goal:
+        plan = self._weekly_plan_from_payload(payload)
+        if plan is None:
+            return goal
+        facts = dict(goal.facts or {})
+        facts["weekly_plan"] = plan
+        goal.facts = facts
+        if goal.status == "gathering":
+            goal.status = "ready_to_plan"
+        frequency = payload.get("frequency")
+        if isinstance(frequency, str) and frequency.strip() and not goal.frequency:
+            goal.frequency = frequency.strip()
+        self.goals.save(goal)
+        return goal
+
+    @staticmethod
     def _public_proposal_summary(summary: dict[str, Any] | None) -> dict[str, Any] | None:
         if not summary:
             return None
@@ -2153,9 +2183,10 @@ class ControlPlane:
                         answer_type="short_text",
                     ),
                 }
+            self._record_goal_before(effects, target)
+            target = self._attach_plan_from_operation(target, payload)
             if target.status == "gathering" and not self._goal_has_cadence(target):
                 return {"goal": target, "status": "skipped", "detail": "no cadence"}
-            self._record_goal_before(effects, target)
             _reply_text, sessions, raw_summary = propose_for_goal(self.calendar, target)
             self.goals.save(target)
             summary = self._public_proposal_summary(raw_summary)

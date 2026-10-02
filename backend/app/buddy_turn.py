@@ -314,8 +314,98 @@ def _normalize_operations(data: dict[str, Any]) -> tuple[list[dict[str, Any]], l
             if op:
                 cleaned.append(op)
         if cleaned:
-            return cleaned, errors
+            return _enrich_operations(cleaned, data), errors
     return _legacy_operations(data), errors
+
+
+def _blank(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _plan_with_slots(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict) and isinstance(value.get("slots"), list) and value["slots"]:
+        return value
+    return None
+
+
+def _plan_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    plan = _plan_with_slots(payload.get("weekly_plan"))
+    if plan:
+        return plan
+    facts = payload.get("facts")
+    if isinstance(facts, dict):
+        return _plan_with_slots(facts.get("weekly_plan"))
+    return None
+
+
+def _fill_payload(payload: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    """Copy goal fields the model left off the operation and put on goal_updates."""
+    filled = dict(payload)
+    for key, value in source.items():
+        if key == "action" or _blank(value):
+            continue
+        if key == "facts" and isinstance(value, dict):
+            facts = dict(filled.get("facts") or {})
+            for fact_key, fact_value in value.items():
+                if fact_key == "weekly_plan":
+                    if _plan_with_slots(facts.get("weekly_plan")) or not _plan_with_slots(fact_value):
+                        continue
+                elif not _blank(facts.get(fact_key)):
+                    continue
+                facts[fact_key] = fact_value
+            if facts:
+                filled["facts"] = facts
+            continue
+        if _blank(filled.get(key)):
+            filled[key] = value
+    return filled
+
+
+def _enrich_operations(ops: list[dict[str, Any]], data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use goal_updates when operations[] is only the empty schema skeleton."""
+    updates = [item for item in (data.get("goal_updates") or []) if isinstance(item, dict)]
+    creates = [
+        item
+        for item in updates
+        if str(item.get("action") or "update").lower() in {"create", "new", "set"}
+    ]
+    revisions = [item for item in updates if item not in creates]
+    create_ops = [op for op in ops if op.get("kind") == "goal_create"]
+    update_ops = [op for op in ops if op.get("kind") == "goal_update"]
+    for op, source in zip(create_ops, creates):
+        op["payload"] = _fill_payload(op.get("payload") or {}, source)
+    for op, source in zip(update_ops, revisions):
+        op["payload"] = _fill_payload(op.get("payload") or {}, source)
+
+    plans_by_ref: dict[str, dict[str, Any]] = {}
+    loose_plan: dict[str, Any] | None = None
+    for op in ops:
+        if op.get("kind") != "propose_sessions":
+            continue
+        plan = _plan_from_payload(op.get("payload") or {})
+        if not plan:
+            continue
+        ref = op.get("target_ref")
+        if ref:
+            plans_by_ref[str(ref)] = plan
+        else:
+            loose_plan = plan
+    goal_ops = [op for op in ops if op.get("kind") in {"goal_create", "goal_update"}]
+    for op in goal_ops:
+        ref = str(op.get("target_ref") or "")
+        plan = plans_by_ref.get(ref) if ref else None
+        if plan is None and len(goal_ops) == 1:
+            plan = loose_plan or (next(iter(plans_by_ref.values()), None) if len(plans_by_ref) == 1 else None)
+        if not plan:
+            continue
+        payload = dict(op.get("payload") or {})
+        facts = dict(payload.get("facts") or {})
+        if _plan_with_slots(facts.get("weekly_plan")):
+            continue
+        facts["weekly_plan"] = plan
+        payload["facts"] = facts
+        op["payload"] = payload
+    return ops
 
 
 def _clean_operation(
